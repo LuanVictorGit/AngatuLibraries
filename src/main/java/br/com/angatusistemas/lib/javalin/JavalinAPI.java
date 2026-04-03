@@ -13,7 +13,6 @@ public class JavalinAPI {
 	public static void setupConfig() {
 		Javalin javalin = AngatuLib.getInstance().getJavalin();
 		RoutesConfig routes = javalin.unsafe.routes;
-		
 	}
 	
 	public static Javalin setup(File folderCerts, int port, boolean localhost) {
