@@ -1,0 +1,35 @@
+# Build
+/target/
+/data/
+/models/
+
+# Bancos de dados SQLite
+*.db
+*.db-shm
+*.db-wal
+
+# Eclipse
+.settings/
+.classpath
+.project
+.factorypath
+
+# VS Code
+.vscode/
+
+# Node.js (caso tenha sido gerado por engano)
+package.json
+package-lock.json
+node_modules/
+
+# Arquivos de sistema
+.DS_Store
+Thumbs.db
+
+# Outros temporários
+*.log
+*.tmp
+*.bak
+*.swp
+*.swo
+*.env
