@@ -236,9 +236,9 @@
             <div class="timer-panel">
                 <div class="timer-label">
                     <i class="fas fa-hourglass-half"></i>
-                    <span>Tempo restante de bloqueio</span>
+                    <span>Tempo de bloqueio</span>
                 </div>
-                <div class="countdown" id="countdownDisplay">--:--</div>
+                <div class="countdown" id="countdownDisplay">2 minutos</div>
                 <div style="font-size: 0.75rem; margin-top: 14px; color: #6c7a91;">
                     <i class="fas fa-info-circle"></i> Recarregamentos frequentes (F5) podem prolongar o bloqueio.
                 </div>
@@ -263,63 +263,6 @@
             </div>
         </div>
     </div>
-
-    <script>
-        (function () {
-            // Duração do bloqueio em segundos (deve ser igual à configuração do backend)
-            const BLOCK_DURATION_SECONDS = 300;  // 5 minutos
-
-            const STORAGE_KEY = 'angatu_blocked_until';
-
-            function getUnblockTimestamp() {
-                let stored = localStorage.getItem(STORAGE_KEY);
-                if (stored) {
-                    let parsed = parseInt(stored, 10);
-                    if (!isNaN(parsed) && parsed > Math.floor(Date.now() / 1000)) {
-                        return parsed;
-                    }
-                }
-                let unblock = Math.floor(Date.now() / 1000) + BLOCK_DURATION_SECONDS;
-                localStorage.setItem(STORAGE_KEY, unblock);
-                return unblock;
-            }
-
-            function updateCountdown() {
-                const nowSec = Math.floor(Date.now() / 1000);
-                const unblockSec = getUnblockTimestamp();
-                const remainingSec = unblockSec - nowSec;
-                const countdownEl = document.getElementById('countdownDisplay');
-
-                if (remainingSec <= 0) {
-                    countdownEl.innerText = '00:00';
-                    localStorage.removeItem(STORAGE_KEY);
-                    // Recarrega a página após 1 segundo para tentar restaurar o acesso
-                    setTimeout(() => {
-                        window.location.reload();
-                    }, 1000);
-                    return;
-                }
-
-                const minutes = Math.floor(remainingSec / 60);
-                const seconds = remainingSec % 60;
-                countdownEl.innerText = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
-            }
-
-            setInterval(updateCountdown, 1000);
-            updateCountdown();
-
-            const refreshBtn = document.getElementById('manualRefreshBtn');
-            refreshBtn.addEventListener('click', function () {
-                const nowSec = Math.floor(Date.now() / 1000);
-                const unblockSec = getUnblockTimestamp();
-                if (nowSec >= unblockSec) {
-                    window.location.reload();
-                } else {
-                    alert('O bloqueio ainda não expirou. Aguarde o término do tempo restante.');
-                }
-            });
-        })();
-    </script>
 </body>
 
 </html>

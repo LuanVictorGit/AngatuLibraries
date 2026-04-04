@@ -40,7 +40,7 @@ public class AngatuLib {
 			System.out.println("pasta dos certificados configurados com sucesso.");
 		}
 
-		javalin = JavalinAPI.setup(folderCerts, port, localhost, locationAssets, pathPackageRoutes);
+		javalin = JavalinAPI.setup(folderCerts, port, localhost, locationAssets, pathPackageRoutes, true);
 		if (javalin != null) {
 			System.out.println("Javalin configurado com sucesso! -> " + getOriginHost());
 		} else {

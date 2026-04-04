@@ -5,7 +5,6 @@ import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
-import org.eclipse.jetty.http.HttpStatus;
 import org.reflections.Reflections;
 
 import br.com.angatusistemas.lib.AngatuLib;
@@ -17,14 +16,12 @@ import io.javalin.Javalin;
 import io.javalin.community.ssl.SslPlugin;
 import io.javalin.http.Context;
 import io.javalin.http.staticfiles.Location;
-import io.javalin.rendering.FileRenderer;
-
 public final class JavalinAPI {
 
 	// ==================== CONFIGURAÇÕES DE RATE LIMIT ====================
-	private static final int REQUESTS_PER_WINDOW = 0; // Max 150 requisições por janela
+	private static final int REQUESTS_PER_WINDOW = 10; // Max 150 requisições por janela
 	private static final long WINDOW_SECONDS = 1; // Janela de 60 segundos
-	private static final long BLOCK_SECONDS = 300; // Bloqueio de 5 minutos
+	private static final long BLOCK_SECONDS = 120; // Bloqueio de 5 minutos
 
 	// NOVA FLAG: se true, o limite é por IP (ignora o path). Se false, mantém por
 	// IP+path.
@@ -36,7 +33,7 @@ public final class JavalinAPI {
 
 	// ==================== CONFIGURAÇÕES GLOBAIS ====================
 	private static boolean rateLimitingEnabled = true;
-	private static boolean logRequestsEnabled = true;
+	private static boolean logRequestsEnabled = false;
 	private static final Set<String> IGNORED_PATHS = new HashSet<>(Arrays.asList());
 
 	// Estruturas: chave pode ser IP (global) ou "IP|path" ou "IP|categoria"
@@ -66,7 +63,8 @@ public final class JavalinAPI {
 
 	// ==================== SETUP PRINCIPAL ====================
 	public static Javalin setup(File folderCerts, int port, boolean localhost, Location locationFiles,
-			String packagePath) {
+			String packagePath, boolean enableMaxRequest) {
+		rateLimitingEnabled = enableMaxRequest;
 		try {
 			Javalin javalin = Javalin.create(config -> {
 				config.bundledPlugins.enableCors(cors -> cors.addRule(rule -> rule.anyHost()));
@@ -94,8 +92,6 @@ public final class JavalinAPI {
 
 			// Handler BEFORE - executado para TODAS as requisições (inclusive static files)
 			javalin.unsafe.routes.before(ctx -> {
-				// Log incondicional para debug (pode comentar depois)
-				Console.log("[BEFORE] Path: %s, IP: %s", ctx.path(), ctx.ip());
 
 				if (AngatuLib.getInstance().getOriginHost() == null) {
 					AngatuLib.getInstance().setOriginHost(ctx.scheme() + "://" + ctx.host());
@@ -122,6 +118,19 @@ public final class JavalinAPI {
 						sendBlockPage(ctx, ctx.path());
 						return;
 					}
+				}
+			});
+			
+			javalin.unsafe.routes.after(ctx -> {
+				if (rateLimitingEnabled && !shouldIgnorePath(ctx.path())) {
+					String clientIp = getClientIp(ctx);
+					String key = buildKey(clientIp, ctx.path());
+					
+					if (isBlocked(key)) {
+						sendBlockPage(ctx, ctx.path());
+						return;
+					}
+					
 				}
 			});
 
