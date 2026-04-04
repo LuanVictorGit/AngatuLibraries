@@ -1,7 +1,6 @@
 package br.com.angatusistemas.lib;
 
 import java.io.File;
-
 import java.io.PrintStream;
 
 import br.com.angatusistemas.lib.console.Console;

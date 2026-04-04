@@ -125,6 +125,52 @@
 			<version>1.58.0</version>
 		</dependency>
 
+		<!-- Thumbnailator para thumbnails de alta qualidade -->
+		<dependency>
+			<groupId>net.coobird</groupId>
+			<artifactId>thumbnailator</artifactId>
+			<version>0.4.21</version>
+		</dependency>
+
+		<!-- TwelveMonkeys para formatos adicionais (WebP, TIFF, etc.) -->
+		<dependency>
+			<groupId>com.twelvemonkeys.imageio</groupId>
+			<artifactId>imageio-webp</artifactId>
+			<version>3.12.0</version>
+		</dependency>
+		<dependency>
+			<groupId>com.twelvemonkeys.imageio</groupId>
+			<artifactId>imageio-tiff</artifactId>
+			<version>3.12.0</version>
+		</dependency>
+
+		<!-- JCodec para manipulação de vídeos -->
+		<dependency>
+			<groupId>org.jcodec</groupId>
+			<artifactId>jcodec</artifactId>
+			<version>0.2.5</version>
+		</dependency>
+
+		<dependency>
+			<groupId>org.jcodec</groupId>
+			<artifactId>jcodec-javase</artifactId>
+			<version>0.2.5</version>
+		</dependency>
+
+		<!-- ZXing Core - Geração e leitura de QR Codes -->
+		<dependency>
+			<groupId>com.google.zxing</groupId>
+			<artifactId>core</artifactId>
+			<version>3.5.3</version>
+		</dependency>
+
+		<!-- ZXing JavaSE - Integração com BufferedImage -->
+		<dependency>
+			<groupId>com.google.zxing</groupId>
+			<artifactId>javase</artifactId>
+			<version>3.5.3</version>
+		</dependency>
+
 	</dependencies>
 
 </project>

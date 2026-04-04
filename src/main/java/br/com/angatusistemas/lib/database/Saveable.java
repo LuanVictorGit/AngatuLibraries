@@ -1,15 +1,26 @@
 package br.com.angatusistemas.lib.database;
 
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.UUID;
+import java.util.function.Predicate;
+import java.util.stream.Collectors;
+
 import com.google.gson.Gson;
-import br.com.angatusistemas.lib.gson.GsonAPI;
-import br.com.angatusistemas.lib.console.Console;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 
-import java.sql.*;
-import java.util.*;
-import java.util.function.Predicate;
-import java.util.stream.Collectors;
+import br.com.angatusistemas.lib.console.Console;
+import br.com.angatusistemas.lib.gson.GsonAPI;
 
 /**
  * [PT] Classe abstrata que fornece persistência automática em SQLite para objetos Java.
