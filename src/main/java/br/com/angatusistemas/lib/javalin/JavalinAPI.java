@@ -1,27 +1,25 @@
 package br.com.angatusistemas.lib.javalin;
 
 import java.io.File;
+import java.util.Set;
+
+import org.reflections.Reflections;
 
 import br.com.angatusistemas.lib.AngatuLib;
+import br.com.angatusistemas.lib.javalin.routes.Route;
 import io.javalin.Javalin;
 import io.javalin.community.ssl.SslPlugin;
-import io.javalin.config.RoutesConfig;
 import io.javalin.http.staticfiles.Location;
 
 public class JavalinAPI {
-
-	public static void setupConfig() {
-		Javalin javalin = AngatuLib.getInstance().getJavalin();
-		RoutesConfig routes = javalin.unsafe.routes;
-	}
 	
-	public static Javalin setup(File folderCerts, int port, boolean localhost) {
-		return Javalin.create(config -> {
+	public static Javalin setup(File folderCerts, int port, boolean localhost, Location locationFiles, String packagePath) {
+		Javalin javalin = Javalin.create(config -> {
 			config.bundledPlugins.enableCors(cors -> cors.addRule(rule -> rule.anyHost()));
 			config.staticFiles.add(staticFiles -> {
 				staticFiles.hostedPath = "/";
 				staticFiles.directory = "/public";
-				staticFiles.location = Location.CLASSPATH;
+				staticFiles.location = locationFiles;
 			});
 			if (!localhost) {
 				SslPlugin plugin = new SslPlugin(conf -> {
@@ -36,6 +34,26 @@ public class JavalinAPI {
 			}
 			config.http.maxRequestSize = 200L * 1024L * 1024L;
 		}).start(80);
+		registerAllRoutes(packagePath);
+		return javalin;
+	}
+	
+	private static void registerAllRoutes(String packagePath) {
+		Reflections reflections = new Reflections(packagePath);
+		Set<Class<? extends Route>> rotas = reflections.getSubTypesOf(Route.class);
+		for (Class<? extends Route> rotaClazz : rotas) {
+			try {
+				Route route = rotaClazz.getDeclaredConstructor().newInstance();
+				route.register();
+			} catch (Exception e) {
+				System.err.println("Erro carregando rota: " + rotaClazz.getName());
+				e.printStackTrace();
+			}
+		}
+	}
+	
+	public static Javalin get() {
+		return AngatuLib.getInstance().getJavalin();
 	}
 	
 }

@@ -8,6 +8,7 @@ import br.com.angatusistemas.lib.console.Console;
 import br.com.angatusistemas.lib.console.InterceptorOutputStream;
 import br.com.angatusistemas.lib.javalin.JavalinAPI;
 import io.javalin.Javalin;
+import io.javalin.http.staticfiles.Location;
 import lombok.Getter;
 
 @Getter
@@ -19,7 +20,7 @@ public class AngatuLib {
 	private final Javalin javalin;
 	private boolean localhost = false;
 
-	public AngatuLib(String addressCertificate, int port) {
+	public AngatuLib(String addressCertificate, int port, Location locationAssets, String pathPackageRoutes) {
 		instance = this;
 		System.setOut(new PrintStream(new InterceptorOutputStream(), true));
 		this.PATH_FOLDER_CERTS = "/etc/letsencrypt/live/"+addressCertificate;
@@ -30,9 +31,7 @@ public class AngatuLib {
 			System.out.println("&eModo localhost ativado com sucesso.");
 		}
 
-		javalin = JavalinAPI.setup(folderCerts, port, localhost);
-		JavalinAPI.setupConfig();
-		
+		javalin = JavalinAPI.setup(folderCerts, port, localhost, locationAssets, pathPackageRoutes);
 		this.printBanner(addressCertificate);
 	}
 	
