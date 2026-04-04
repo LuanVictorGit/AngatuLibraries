@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>Acesso temporariamente bloqueado - Angatu Sistemas</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,300;14..32,400;14..32,500;14..32,600;14..32,700&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background: #f5f7fc;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+        }
+
+        .block-card {
+            max-width: 560px;
+            width: 100%;
+            background: #ffffff;
+            border-radius: 32px;
+            box-shadow: 0 20px 35px -12px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.02);
+            overflow: hidden;
+            transition: all 0.2s ease;
+        }
+
+        .card-header {
+            padding: 32px 32px 16px 32px;
+            border-bottom: 1px solid #eef2f6;
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .logo {
+            height: 48px;
+            width: auto;
+            object-fit: contain;
+        }
+
+        .badge {
+            background: #fef2f2;
+            color: #b91c1c;
+            font-size: 0.75rem;
+            font-weight: 600;
+            padding: 4px 10px;
+            border-radius: 40px;
+            letter-spacing: 0.3px;
+            display: inline-block;
+            margin-left: auto;
+        }
+
+        .card-body {
+            padding: 28px 32px 36px 32px;
+        }
+
+        .status-code {
+            font-family: 'Inter', monospace;
+            font-weight: 600;
+            font-size: 0.85rem;
+            color: #6c7a91;
+            background: #f0f3f9;
+            display: inline-block;
+            padding: 6px 14px;
+            border-radius: 40px;
+            margin-bottom: 24px;
+        }
+
+        .title {
+            font-size: 1.8rem;
+            font-weight: 700;
+            color: #0a1c2f;
+            letter-spacing: -0.3px;
+            margin-bottom: 12px;
+            line-height: 1.3;
+        }
+
+        .description {
+            color: #4a5a72;
+            line-height: 1.5;
+            font-size: 0.95rem;
+            margin-bottom: 28px;
+        }
+
+        .timer-panel {
+            background: #f8fafd;
+            border-radius: 24px;
+            padding: 20px 24px;
+            margin: 24px 0 28px 0;
+            border: 1px solid #e9edf2;
+        }
+
+        .timer-label {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.85rem;
+            font-weight: 500;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: #5b6e8c;
+            margin-bottom: 12px;
+        }
+
+        .timer-label i {
+            font-size: 1rem;
+            color: #2c6b2f;
+        }
+
+        .countdown {
+            font-family: 'Inter', monospace;
+            font-size: 2.4rem;
+            font-weight: 700;
+            background: white;
+            display: inline-block;
+            padding: 8px 24px;
+            border-radius: 60px;
+            color: #1a344d;
+            letter-spacing: 2px;
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+            border: 1px solid #e2e8f0;
+        }
+
+        .info-list {
+            margin: 28px 0 20px 0;
+            list-style: none;
+            padding: 0;
+        }
+
+        .info-list li {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-size: 0.9rem;
+            color: #4a5a72;
+            margin-bottom: 16px;
+        }
+
+        .info-list i {
+            width: 20px;
+            color: #3b7cbf;
+            font-size: 1rem;
+        }
+
+        .action-button {
+            background: #ffffff;
+            border: 1px solid #cdd9ed;
+            padding: 10px 20px;
+            border-radius: 40px;
+            font-weight: 500;
+            font-size: 0.85rem;
+            color: #2c5a8c;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .action-button:hover {
+            background: #f0f5fe;
+            border-color: #8ba9cc;
+        }
+
+        .footer-note {
+            margin-top: 32px;
+            padding-top: 20px;
+            border-top: 1px solid #ecf0f5;
+            text-align: center;
+            font-size: 0.75rem;
+            color: #7e8ea8;
+        }
+
+        .footer-note a {
+            color: #2c5a8c;
+            text-decoration: none;
+        }
+
+        .footer-note a:hover {
+            text-decoration: underline;
+        }
+
+        @media (max-width: 500px) {
+            .card-header {
+                padding: 24px 24px 12px 24px;
+            }
+
+            .card-body {
+                padding: 24px 24px 32px 24px;
+            }
+
+            .title {
+                font-size: 1.5rem;
+            }
+
+            .countdown {
+                font-size: 1.9rem;
+                padding: 6px 20px;
+            }
+
+            .logo {
+                height: 38px;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="block-card">
+        <div class="card-header">
+            <img src="https://angatusistemas.com.br/img/iconangatu.png" alt="Angatu Sistemas" class="logo">
+            <div class="badge">Segurança</div>
+        </div>
+        <div class="card-body">
+            <div class="status-code">HTTP 429 · Muitas requisições</div>
+            <h1 class="title">Acesso temporariamente bloqueado</h1>
+            <p class="description">
+                O sistema detectou um volume excessivo de solicitações vindas do seu endereço de rede.
+                Por questões de segurança e estabilidade, o acesso foi bloqueado por alguns minutos.
+            </p>
+
+            <div class="timer-panel">
+                <div class="timer-label">
+                    <i class="fas fa-hourglass-half"></i>
+                    <span>Tempo restante de bloqueio</span>
+                </div>
+                <div class="countdown" id="countdownDisplay">--:--</div>
+                <div style="font-size: 0.75rem; margin-top: 14px; color: #6c7a91;">
+                    <i class="fas fa-info-circle"></i> Recarregamentos frequentes (F5) podem prolongar o bloqueio.
+                </div>
+            </div>
+
+            <ul class="info-list">
+                <li><i class="fas fa-shield-alt"></i> Proteção automática contra sobrecarga do servidor</li>
+                <li><i class="fas fa-clock"></i> O bloqueio será removido automaticamente após o tempo indicado</li>
+                <li><i class="fas fa-envelope"></i> Se o problema persistir, entre em contato com o suporte técnico</li>
+            </ul>
+
+            <div style="text-align: right;">
+                <button class="action-button" id="manualRefreshBtn">
+                    <i class="fas fa-sync-alt"></i> Verificar novamente
+                </button>
+            </div>
+
+            <div class="footer-note">
+                <i class="far fa-copyright"></i> Angatu Sistemas · Plataforma de serviços digitais
+                <br><a href="https://angatusistemas.com.br" target="_blank"
+                    rel="noopener noreferrer">angatusistemas.com.br</a>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        (function () {
+            // Duração do bloqueio em segundos (deve ser igual à configuração do backend)
+            const BLOCK_DURATION_SECONDS = 300;  // 5 minutos
+
+            const STORAGE_KEY = 'angatu_blocked_until';
+
+            function getUnblockTimestamp() {
+                let stored = localStorage.getItem(STORAGE_KEY);
+                if (stored) {
+                    let parsed = parseInt(stored, 10);
+                    if (!isNaN(parsed) && parsed > Math.floor(Date.now() / 1000)) {
+                        return parsed;
+                    }
+                }
+                let unblock = Math.floor(Date.now() / 1000) + BLOCK_DURATION_SECONDS;
+                localStorage.setItem(STORAGE_KEY, unblock);
+                return unblock;
+            }
+
+            function updateCountdown() {
+                const nowSec = Math.floor(Date.now() / 1000);
+                const unblockSec = getUnblockTimestamp();
+                const remainingSec = unblockSec - nowSec;
+                const countdownEl = document.getElementById('countdownDisplay');
+
+                if (remainingSec <= 0) {
+                    countdownEl.innerText = '00:00';
+                    localStorage.removeItem(STORAGE_KEY);
+                    // Recarrega a página após 1 segundo para tentar restaurar o acesso
+                    setTimeout(() => {
+                        window.location.reload();
+                    }, 1000);
+                    return;
+                }
+
+                const minutes = Math.floor(remainingSec / 60);
+                const seconds = remainingSec % 60;
+                countdownEl.innerText = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+            }
+
+            setInterval(updateCountdown, 1000);
+            updateCountdown();
+
+            const refreshBtn = document.getElementById('manualRefreshBtn');
+            refreshBtn.addEventListener('click', function () {
+                const nowSec = Math.floor(Date.now() / 1000);
+                const unblockSec = getUnblockTimestamp();
+                if (nowSec >= unblockSec) {
+                    window.location.reload();
+                } else {
+                    alert('O bloqueio ainda não expirou. Aguarde o término do tempo restante.');
+                }
+            });
+        })();
+    </script>
+</body>
+
+</html>
