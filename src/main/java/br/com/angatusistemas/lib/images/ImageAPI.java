@@ -68,6 +68,107 @@ public final class ImageAPI {
         saveImage(img, filePath);
     }
 
+    // ==================== BYTE ARRAY ====================
+
+    /**
+     * [PT] Converte um BufferedImage para um array de bytes no formato especificado.
+     * <p>
+     * Útil para armazenar imagens em banco de dados (BLOB) ou transmitir via rede.
+     * </p>
+     *
+     * [EN] Converts a BufferedImage to a byte array in the specified format.
+     * <p>
+     * Useful for storing images in databases (BLOB) or transmitting over network.
+     * </p>
+     *
+     * @param image  [PT] imagem a ser convertida
+     *               [EN] image to convert
+     * @param format [PT] formato da imagem (ex: "png", "jpg")
+     *               [EN] image format (e.g., "png", "jpg")
+     * @return [PT] array de bytes da imagem
+     *         [EN] byte array of the image
+     * @throws IOException [PT] se ocorrer erro na escrita
+     *                     [EN] if write error occurs
+     */
+    public static byte[] imageToBytes(BufferedImage image, String format) throws IOException {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        ImageIO.write(image, format, baos);
+        return baos.toByteArray();
+    }
+
+    /**
+     * [PT] Converte um array de bytes para BufferedImage.
+     * <p>
+     * Os bytes devem representar uma imagem em um formato suportado (PNG, JPG, GIF, etc.).
+     * </p>
+     *
+     * [EN] Converts a byte array to a BufferedImage.
+     * <p>
+     * The bytes must represent an image in a supported format (PNG, JPG, GIF, etc.).
+     * </p>
+     *
+     * @param bytes [PT] array de bytes da imagem
+     *              [EN] byte array of the image
+     * @return [PT] imagem decodificada
+     *         [EN] decoded image
+     * @throws IOException [PT] se os bytes não representarem uma imagem válida
+     *                     [EN] if bytes do not represent a valid image
+     */
+    public static BufferedImage bytesToImage(byte[] bytes) throws IOException {
+        try (ByteArrayInputStream bais = new ByteArrayInputStream(bytes)) {
+            BufferedImage img = ImageIO.read(bais);
+            if (img == null) throw new IOException("Invalid image data");
+            return img;
+        }
+    }
+
+    /**
+     * [PT] Salva um array de bytes como arquivo de imagem.
+     * <p>
+     * A extensão do arquivo determina o formato. Os bytes devem corresponder ao formato esperado.
+     * </p>
+     *
+     * [EN] Saves a byte array as an image file.
+     * <p>
+     * The file extension determines the format. The bytes must match the expected format.
+     * </p>
+     *
+     * @param bytes    [PT] array de bytes da imagem
+     *                 [EN] byte array of the image
+     * @param filePath [PT] caminho de destino (ex: "foto.png")
+     *                 [EN] destination path (e.g., "foto.png")
+     * @throws IOException [PT] se ocorrer erro na escrita
+     *                     [EN] if write error occurs
+     */
+    public static void saveBytesAsImage(byte[] bytes, String filePath) throws IOException {
+        try (FileOutputStream fos = new FileOutputStream(filePath)) {
+            fos.write(bytes);
+        }
+        Console.debug("Image saved from bytes: " + filePath);
+    }
+
+    /**
+     * [PT] Lê um arquivo de imagem diretamente para um array de bytes.
+     * <p>
+     * Útil para carregar imagens do disco sem decodificá-las como BufferedImage.
+     * </p>
+     *
+     * [EN] Reads an image file directly to a byte array.
+     * <p>
+     * Useful for loading images from disk without decoding them as BufferedImage.
+     * </p>
+     *
+     * @param filePath [PT] caminho do arquivo de imagem
+     *                 [EN] path to the image file
+     * @return [PT] array de bytes do arquivo
+     *         [EN] byte array of the file
+     * @throws IOException [PT] se ocorrer erro de leitura
+     *                     [EN] if read error occurs
+     */
+    public static byte[] readImageToBytes(String filePath) throws IOException {
+        return Files.readAllBytes(Paths.get(filePath));
+    }
+
     // ==================== LEITURA / ESCRITA ====================
 
     public static BufferedImage readImage(String filePath) throws IOException {
