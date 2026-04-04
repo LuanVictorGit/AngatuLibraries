@@ -3,9 +3,11 @@ package br.com.angatusistemas.lib;
 import java.io.File;
 import java.io.PrintStream;
 
+import br.com.angatusistemas.lib.browser.BrowserAPI;
 import br.com.angatusistemas.lib.console.Console;
 import br.com.angatusistemas.lib.console.InterceptorOutputStream;
 import br.com.angatusistemas.lib.javalin.JavalinAPI;
+import br.com.angatusistemas.lib.task.Task;
 import io.javalin.Javalin;
 import io.javalin.http.staticfiles.Location;
 import lombok.Getter;
@@ -38,6 +40,11 @@ public class AngatuLib {
 		} else {
 			System.out.println("pasta dos certificados configurados com sucesso.");
 		}
+		
+		Task.runAsync(()-> {
+			BrowserAPI.initPool();
+			System.out.println("broser playwright iniciado com sucesso.");
+		});
 
 		javalin = JavalinAPI.setup(folderCerts, port, localhost, locationAssets, pathPackageRoutes, true);
 		if (javalin != null) {
