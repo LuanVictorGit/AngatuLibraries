@@ -253,7 +253,6 @@ public final class JavalinAPI {
 			try {
 				Route route = routeClass.getDeclaredConstructor().newInstance();
 				route.register();
-				Console.log("Rota registrada: %s", routeClass.getName());
 			} catch (Exception e) {
 				Console.error("Erro ao carregar rota: %s", e, routeClass.getName());
 			}
