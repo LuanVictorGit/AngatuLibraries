@@ -21,6 +21,7 @@ import io.javalin.Javalin;
 import io.javalin.community.ssl.SslPlugin;
 import io.javalin.http.Context;
 import io.javalin.http.staticfiles.Location;
+
 public final class JavalinAPI {
 
 	// ==================== CONFIGURAÇÕES DE RATE LIMIT ====================
@@ -67,8 +68,8 @@ public final class JavalinAPI {
 	}
 
 	// ==================== SETUP PRINCIPAL ====================
-	public static Javalin setup(File folderCerts, int port, boolean localhost,
-			String packagePath, boolean enableMaxRequest) {
+	public static Javalin setup(File folderCerts, int port, boolean localhost, String packagePath,
+			boolean enableMaxRequest) {
 		rateLimitingEnabled = enableMaxRequest;
 		try {
 			Javalin javalin = Javalin.create(config -> {
@@ -125,17 +126,17 @@ public final class JavalinAPI {
 					}
 				}
 			});
-			
+
 			javalin.unsafe.routes.after(ctx -> {
 				if (rateLimitingEnabled && !shouldIgnorePath(ctx.path())) {
 					String clientIp = getClientIp(ctx);
 					String key = buildKey(clientIp, ctx.path());
-					
+
 					if (isBlocked(key)) {
 						sendBlockPage(ctx, ctx.path());
 						return;
 					}
-					
+
 				}
 			});
 
@@ -237,13 +238,57 @@ public final class JavalinAPI {
 	// ==================== PÁGINA DE BLOQUEIO (sem dependência circular)
 	// ====================
 	private static void sendBlockPage(Context ctx, String path) {
-		String html = loadBlockPageSafe(path);
+		String html = """
+								<!DOCTYPE html>
+				<html lang="pt-BR">
+				<head>
+				<meta charset="UTF-8">
+				<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+				<title>Acesso temporariamente bloqueado - Angatu Sistemas</title>
+				<link href="https://cdn.jsdelivr.net/npm/tailwindcss@3.3.3/dist/tailwind.min.css" rel="stylesheet">
+				<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+				</head>
+				<body class="bg-[#f5f7fc] flex items-center justify-center min-h-screen p-6 font-inter">
+				<div class="max-w-md w-full bg-white rounded-3xl shadow-lg overflow-hidden">
+				  <div class="flex items-center gap-4 p-8 pb-4 border-b border-gray-200">
+				    <img src="https://angatusistemas.com.br/img/iconangatu.png" class="h-12 object-contain" alt="Angatu Sistemas">
+				    <div class="ml-auto bg-red-100 text-red-700 text-xs font-semibold px-3 py-1 rounded-full">Segurança</div>
+				  </div>
+				  <div class="p-7 pb-9">
+				    <div class="font-mono font-semibold text-gray-500 text-xs mb-6 bg-gray-100 inline-block px-3 py-1 rounded-full">HTTP 429 · Muitas requisições</div>
+				    <h1 class="text-2xl font-bold text-[#0a1c2f] mb-3">Acesso temporariamente bloqueado</h1>
+				    <p class="text-gray-600 text-sm mb-7">
+				      O sistema detectou um volume excessivo de solicitações vindas do seu endereço de rede. Por questões de segurança e estabilidade, o acesso foi bloqueado por alguns minutos.
+				    </p>
+				    <div class="bg-[#f8fafd] border border-gray-200 rounded-2xl p-5 mb-7">
+				      <div class="flex items-center gap-2 text-gray-500 uppercase text-xs font-medium mb-3">
+				        <i class="fas fa-hourglass-half text-green-700"></i> Tempo de bloqueio
+				      </div>
+				      <div id="countdownDisplay" class="font-mono text-3xl font-bold text-[#1a344d] bg-white inline-block px-6 py-2 rounded-full shadow border border-gray-200">2 minutos</div>
+				      <div class="text-gray-500 text-[0.65rem] mt-3 flex items-center gap-1">
+				        <i class="fas fa-info-circle"></i> Recarregamentos frequentes (F5) podem prolongar o bloqueio.
+				      </div>
+				    </div>
+				    <ul class="mb-5 space-y-4 text-gray-600 text-sm">
+				      <li class="flex items-center gap-3"><i class="fas fa-shield-alt text-blue-600 w-5"></i> Proteção automática contra sobrecarga do servidor</li>
+				      <li class="flex items-center gap-3"><i class="fas fa-clock text-blue-600 w-5"></i> O bloqueio será removido automaticamente após o tempo indicado</li>
+				      <li class="flex items-center gap-3"><i class="fas fa-envelope text-blue-600 w-5"></i> Se o problema persistir, entre em contato com o suporte técnico</li>
+				    </ul>
+				    <div class="text-right mb-8">
+				      <button id="manualRefreshBtn" class="inline-flex items-center gap-2 px-5 py-2 text-sm font-medium text-blue-700 bg-white border border-blue-200 rounded-full hover:bg-blue-50 hover:border-blue-300 transition">
+				        <i class="fas fa-sync-alt"></i> Verificar novamente
+				      </button>
+				    </div>
+				    <div class="text-center text-gray-400 text-[0.65rem] border-t border-gray-100 pt-5">
+				      <i class="far fa-copyright"></i> Angatu Sistemas · Plataforma de serviços digitais
+				      <br><a href="https://angatusistemas.com.br" target="_blank" class="text-blue-700 hover:underline">angatusistemas.com.br</a>
+				    </div>
+				  </div>
+				</div>
+				</body>
+				</html>
+								""";
 		ctx.html(html).status(StatusCode.TOO_MANY_REQUESTS.code());
-	}
-
-	private static String loadBlockPageSafe(String path) {
-		String html = AssetsAPI.readAssetAsString("/utils/error/error.html");
-		return html;
 	}
 
 	private static void registerAllRoutes(String packagePath) {
