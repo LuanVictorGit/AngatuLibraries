@@ -174,7 +174,7 @@ public final class JavalinAPI {
 	}
 
 	private static void extractUtilsFiles() {
-		String sourcePath = "br/com/angatusistemas/files"; // 🔥 origem real da sua lib
+		String sourcePath = "src/main/java/br/com/angatusistemas/files";
 		String targetDir = "public/utils";
 
 		try {
