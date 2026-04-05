@@ -11,6 +11,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 import org.reflections.Reflections;
+import org.reflections.scanners.Scanners;
 
 import br.com.angatusistemas.lib.AngatuLib;
 import br.com.angatusistemas.lib.connection.StatusCode;
@@ -146,8 +147,7 @@ public final class JavalinAPI {
 				}
 			});
 
-			registerAllRoutes("br.com.angatusistemas.lib");
-			registerAllRoutes(packagePath);
+			registerAllRoutes();
 
 			Console.log("Javalin iniciado | RateLimit: %s, Modo: %s, Limite: %d req/%ds, Bloqueio: %ds",
 					rateLimitingEnabled ? "ON" : "OFF",
@@ -298,17 +298,29 @@ public final class JavalinAPI {
 		ctx.html(html).status(StatusCode.TOO_MANY_REQUESTS.code());
 	}
 
-	private static void registerAllRoutes(String packagePath) {
-		Reflections reflections = new Reflections(packagePath);
-		Set<Class<? extends Route>> routeClasses = reflections.getSubTypesOf(Route.class);
-		for (Class<? extends Route> routeClass : routeClasses) {
-			try {
-				Route route = routeClass.getDeclaredConstructor().newInstance();
-				route.register();
-			} catch (Exception e) {
-				Console.error("Erro ao carregar rota: %s", e, routeClass.getName());
-			}
-		}
+	private static void registerAllRoutes() {
+	    Reflections reflections = new Reflections(
+	        new org.reflections.util.ConfigurationBuilder()
+	            .setUrls(org.reflections.util.ClasspathHelper.forJavaClassPath())
+	            .setScanners(Scanners.SubTypes)
+	    );
+
+	    Set<Class<? extends Route>> routeClasses = reflections.getSubTypesOf(Route.class);
+
+	    for (Class<? extends Route> routeClass : routeClasses) {
+	        try {
+	            // Evita classes abstratas ou interfaces
+	            if (java.lang.reflect.Modifier.isAbstract(routeClass.getModifiers()) || routeClass.isInterface()) {
+	                continue;
+	            }
+
+	            Route route = routeClass.getDeclaredConstructor().newInstance();
+	            route.register();
+
+	        } catch (Exception e) {
+	            Console.error("Erro ao carregar rota: %s", e, routeClass.getName());
+	        }
+	    }
 	}
 
 	public static Javalin get() {
