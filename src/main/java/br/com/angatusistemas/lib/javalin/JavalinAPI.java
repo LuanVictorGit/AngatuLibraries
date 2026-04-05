@@ -67,7 +67,7 @@ public final class JavalinAPI {
 	}
 
 	// ==================== SETUP PRINCIPAL ====================
-	public static Javalin setup(File folderCerts, int port, boolean localhost, Location locationFiles,
+	public static Javalin setup(File folderCerts, int port, boolean localhost,
 			String packagePath, boolean enableMaxRequest) {
 		rateLimitingEnabled = enableMaxRequest;
 		try {
@@ -76,7 +76,7 @@ public final class JavalinAPI {
 				config.staticFiles.add(staticFiles -> {
 					staticFiles.hostedPath = "/";
 					staticFiles.directory = "/public";
-					staticFiles.location = locationFiles;
+					staticFiles.location = Location.CLASSPATH;
 				});
 				if (!localhost) {
 					SslPlugin plugin = new SslPlugin(conf -> {

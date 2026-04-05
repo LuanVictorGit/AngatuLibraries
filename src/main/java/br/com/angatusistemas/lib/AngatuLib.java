@@ -9,7 +9,6 @@ import br.com.angatusistemas.lib.console.InterceptorOutputStream;
 import br.com.angatusistemas.lib.javalin.JavalinAPI;
 import br.com.angatusistemas.lib.task.Task;
 import io.javalin.Javalin;
-import io.javalin.http.staticfiles.Location;
 import lombok.Getter;
 import lombok.Setter;
 
@@ -25,7 +24,7 @@ public class AngatuLib {
 	private boolean localhost = false;
 	private String originHost;
 
-	public AngatuLib(String addressCertificate, int port, Location locationAssets, String pathPackageRoutes) {
+	public AngatuLib(String addressCertificate, int port, String pathPackageRoutes, boolean bloqByMaxRequisitions) {
 		instance = this;
 		this.addressCertificate = addressCertificate.toLowerCase();
 		System.setOut(new PrintStream(new InterceptorOutputStream(), true));
@@ -41,12 +40,9 @@ public class AngatuLib {
 			System.out.println("pasta dos certificados configurados com sucesso.");
 		}
 		
-		Task.runAsync(()-> {
-			BrowserAPI.initPool();
-			System.out.println("broser playwright iniciado com sucesso.");
-		});
+		Task.runAsync(BrowserAPI::initPool);
 
-		javalin = JavalinAPI.setup(folderCerts, port, localhost, locationAssets, pathPackageRoutes, true);
+		javalin = JavalinAPI.setup(folderCerts, port, localhost, pathPackageRoutes, bloqByMaxRequisitions);
 		if (javalin != null) {
 			System.out.println("Javalin configurado com sucesso! -> " + getOriginHost());
 		} else {
