@@ -1,24 +1,14 @@
 package br.com.angatusistemas.lib.javalin;
 
 import java.io.File;
-import java.io.IOException;
-import java.io.InputStream;
-import java.net.URL;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.nio.file.StandardCopyOption;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Enumeration;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.jar.JarEntry;
-import java.util.jar.JarFile;
 
 import org.reflections.Reflections;
 import org.reflections.scanners.Scanners;
@@ -156,10 +146,7 @@ public final class JavalinAPI {
 				}
 			});
 
-			Task.runAsync(() -> {
-				registerAllRoutes();
-				extractUtilsFiles();
-			});
+			registerAllRoutes();
 
 			Console.log("Javalin iniciado | RateLimit: %s, Modo: %s, Limite: %d req/%ds, Bloqueio: %ds",
 					rateLimitingEnabled ? "ON" : "OFF",
@@ -170,75 +157,6 @@ public final class JavalinAPI {
 		} catch (Exception e) {
 			Console.error("Falha ao iniciar Javalin", e);
 			return null;
-		}
-	}
-
-	private static void extractUtilsFiles() {
-		String sourcePath = "src/main/java/br/com/angatusistemas/files";
-		String targetDir = "public/utils";
-
-		try {
-			Path targetPath = Paths.get(targetDir);
-
-			if (!Files.exists(targetPath)) {
-				Files.createDirectories(targetPath);
-			}
-
-			ClassLoader classLoader = Thread.currentThread().getContextClassLoader();
-			URL url = classLoader.getResource(sourcePath);
-
-			if (url == null) {
-				System.out.println("Não encontrado no classpath: " + sourcePath);
-				return;
-			}
-
-			if ("jar".equals(url.getProtocol())) {
-				// 🔥 Rodando via Maven (JAR da lib)
-				String jarPath = url.getPath().substring(5, url.getPath().indexOf("!"));
-
-				try (JarFile jar = new JarFile(jarPath)) {
-					Enumeration<JarEntry> entries = jar.entries();
-
-					while (entries.hasMoreElements()) {
-						JarEntry entry = entries.nextElement();
-
-						if (entry.getName().startsWith(sourcePath) && !entry.isDirectory()) {
-
-							try (InputStream is = jar.getInputStream(entry)) {
-
-								Path filePath = targetPath.resolve(entry.getName().substring(sourcePath.length() + 1));
-
-								Files.createDirectories(filePath.getParent());
-								Files.copy(is, filePath, StandardCopyOption.REPLACE_EXISTING);
-							}
-						}
-					}
-				}
-
-			} else {
-				// 🧪 Rodando em IDE
-				Path sourceDir = Paths.get(url.toURI());
-				Files.walk(sourceDir).forEach(path -> {
-					try {
-						Path destination = targetPath.resolve(sourceDir.relativize(path));
-
-						if (Files.isDirectory(path)) {
-							Files.createDirectories(destination);
-						} else {
-							Files.createDirectories(destination.getParent());
-							Files.copy(path, destination, StandardCopyOption.REPLACE_EXISTING);
-						}
-
-					} catch (IOException e) {
-						e.printStackTrace();
-					}
-				});
-			}
-
-			System.out.println("Arquivos da AngatuLibraries copiados para /public/utils");
-
-		} catch (Exception e) {
-			e.printStackTrace();
 		}
 	}
 
