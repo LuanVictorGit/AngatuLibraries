@@ -146,6 +146,7 @@ public final class JavalinAPI {
 				}
 			});
 
+			registerAllRoutes("br.com.angatusistemas.lib");
 			registerAllRoutes(packagePath);
 
 			Console.log("Javalin iniciado | RateLimit: %s, Modo: %s, Limite: %d req/%ds, Bloqueio: %ds",
