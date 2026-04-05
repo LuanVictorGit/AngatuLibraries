@@ -1,12 +1,18 @@
 package br.com.angatusistemas.lib.javalin.html;
 
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
+
 import br.com.angatusistemas.lib.console.Console;
 import br.com.angatusistemas.lib.javalin.AssetsAPI;
 import br.com.angatusistemas.lib.strings.StringAPI;
 import io.javalin.Javalin;
-import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.stream.Collectors;
 
 /**
  * [PT] Utilitário para registro automático de rotas HTML a partir de arquivos estáticos.

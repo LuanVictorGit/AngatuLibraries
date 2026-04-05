@@ -1,14 +1,23 @@
 package br.com.angatusistemas.lib.javalin;
 
 import java.io.File;
+import java.io.InputStream;
+import java.net.URL;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Enumeration;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.jar.JarEntry;
+import java.util.jar.JarFile;
 
 import org.reflections.Reflections;
 import org.reflections.scanners.Scanners;
@@ -146,7 +155,10 @@ public final class JavalinAPI {
 				}
 			});
 
-			registerAllRoutes();
+			Task.runAsync(()-> {
+				registerAllRoutes();
+				extractUtilsFiles();
+			});
 
 			Console.log("Javalin iniciado | RateLimit: %s, Modo: %s, Limite: %d req/%ds, Bloqueio: %ds",
 					rateLimitingEnabled ? "ON" : "OFF",
@@ -159,6 +171,68 @@ public final class JavalinAPI {
 			return null;
 		}
 	}
+	
+	private static void extractUtilsFiles() {
+        String sourcePackage = "br/com/angatusistemas/files";
+        String targetDir = "public/utils";
+
+        try {
+            // Cria diretório de destino se não existir
+            Path targetPath = Paths.get(targetDir);
+            if (!Files.exists(targetPath)) {
+                Files.createDirectories(targetPath);
+            }
+
+            // Detecta se está rodando em JAR ou IDE
+            URL url = Thread.currentThread().getContextClassLoader().getResource(sourcePackage);
+
+            if (url == null) {
+                System.out.println("Package não encontrado: " + sourcePackage);
+                return;
+            }
+
+            if (url.getProtocol().equals("jar")) {
+                // 🔥 Caso rodando em JAR
+                String jarPath = url.getPath().substring(5, url.getPath().indexOf("!"));
+                try (JarFile jar = new JarFile(jarPath)) {
+                    Enumeration<JarEntry> entries = jar.entries();
+
+                    while (entries.hasMoreElements()) {
+                        JarEntry entry = entries.nextElement();
+
+                        if (entry.getName().startsWith(sourcePackage) && !entry.isDirectory()) {
+                            InputStream is = jar.getInputStream(entry);
+
+                            Path filePath = targetPath.resolve(
+                                    entry.getName().replace(sourcePackage + "/", "")
+                            );
+
+                            Files.createDirectories(filePath.getParent());
+                            Files.copy(is, filePath, StandardCopyOption.REPLACE_EXISTING);
+
+                            is.close();
+                        }
+                    }
+                }
+
+            } else {
+                // 🧪 Caso rodando em IDE (filesystem)
+                File folder = new File(url.toURI());
+
+                for (File file : folder.listFiles()) {
+                    if (file.isFile()) {
+                        Path destination = targetPath.resolve(file.getName());
+                        Files.copy(file.toPath(), destination, StandardCopyOption.REPLACE_EXISTING);
+                    }
+                }
+            }
+
+            System.out.println("Arquivos copiados com sucesso para /public/utils");
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
 
 	// ==================== NOVO: CONSTRUÇÃO DA CHAVE ====================
 	private static String buildKey(String ip, String path) {
