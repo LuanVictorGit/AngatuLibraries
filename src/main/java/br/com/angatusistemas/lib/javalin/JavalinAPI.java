@@ -99,6 +99,12 @@ public final class JavalinAPI {
 			// Handler BEFORE - executado para TODAS as requisições (inclusive static files)
 			javalin.unsafe.routes.before(ctx -> {
 
+				String path = ctx.path();
+				if (path.toLowerCase().endsWith(".html")) {
+					ctx.redirect(path.replace(".html", new String()));
+					return;
+				}
+				
 				if (AngatuLib.getInstance().getOriginHost() == null) {
 					AngatuLib.getInstance().setOriginHost(ctx.scheme() + "://" + ctx.host());
 					Console.info("OriginHost definido: " + AngatuLib.getInstance().getOriginHost());
