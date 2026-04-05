@@ -1,6 +1,7 @@
 package br.com.angatusistemas.lib.javalin;
 
 import java.io.File;
+import java.io.IOException;
 import java.io.InputStream;
 import java.net.URL;
 import java.nio.file.Files;
@@ -113,7 +114,7 @@ public final class JavalinAPI {
 					ctx.redirect(path.replace(".html", new String()));
 					return;
 				}
-				
+
 				if (AngatuLib.getInstance().getOriginHost() == null) {
 					AngatuLib.getInstance().setOriginHost(ctx.scheme() + "://" + ctx.host());
 					Console.info("OriginHost definido: " + AngatuLib.getInstance().getOriginHost());
@@ -155,7 +156,7 @@ public final class JavalinAPI {
 				}
 			});
 
-			Task.runAsync(()-> {
+			Task.runAsync(() -> {
 				registerAllRoutes();
 				extractUtilsFiles();
 			});
@@ -171,68 +172,75 @@ public final class JavalinAPI {
 			return null;
 		}
 	}
-	
+
 	private static void extractUtilsFiles() {
-        String sourcePackage = "br/com/angatusistemas/files";
-        String targetDir = "public/utils";
+		String sourcePath = "br/com/angatusistemas/files"; // 🔥 origem real da sua lib
+		String targetDir = "public/utils";
 
-        try {
-            // Cria diretório de destino se não existir
-            Path targetPath = Paths.get(targetDir);
-            if (!Files.exists(targetPath)) {
-                Files.createDirectories(targetPath);
-            }
+		try {
+			Path targetPath = Paths.get(targetDir);
 
-            // Detecta se está rodando em JAR ou IDE
-            URL url = Thread.currentThread().getContextClassLoader().getResource(sourcePackage);
+			if (!Files.exists(targetPath)) {
+				Files.createDirectories(targetPath);
+			}
 
-            if (url == null) {
-                System.out.println("Package não encontrado: " + sourcePackage);
-                return;
-            }
+			ClassLoader classLoader = Thread.currentThread().getContextClassLoader();
+			URL url = classLoader.getResource(sourcePath);
 
-            if (url.getProtocol().equals("jar")) {
-                // 🔥 Caso rodando em JAR
-                String jarPath = url.getPath().substring(5, url.getPath().indexOf("!"));
-                try (JarFile jar = new JarFile(jarPath)) {
-                    Enumeration<JarEntry> entries = jar.entries();
+			if (url == null) {
+				System.out.println("Não encontrado no classpath: " + sourcePath);
+				return;
+			}
 
-                    while (entries.hasMoreElements()) {
-                        JarEntry entry = entries.nextElement();
+			if ("jar".equals(url.getProtocol())) {
+				// 🔥 Rodando via Maven (JAR da lib)
+				String jarPath = url.getPath().substring(5, url.getPath().indexOf("!"));
 
-                        if (entry.getName().startsWith(sourcePackage) && !entry.isDirectory()) {
-                            InputStream is = jar.getInputStream(entry);
+				try (JarFile jar = new JarFile(jarPath)) {
+					Enumeration<JarEntry> entries = jar.entries();
 
-                            Path filePath = targetPath.resolve(
-                                    entry.getName().replace(sourcePackage + "/", "")
-                            );
+					while (entries.hasMoreElements()) {
+						JarEntry entry = entries.nextElement();
 
-                            Files.createDirectories(filePath.getParent());
-                            Files.copy(is, filePath, StandardCopyOption.REPLACE_EXISTING);
+						if (entry.getName().startsWith(sourcePath) && !entry.isDirectory()) {
 
-                            is.close();
-                        }
-                    }
-                }
+							try (InputStream is = jar.getInputStream(entry)) {
 
-            } else {
-                // 🧪 Caso rodando em IDE (filesystem)
-                File folder = new File(url.toURI());
+								Path filePath = targetPath.resolve(entry.getName().substring(sourcePath.length() + 1));
 
-                for (File file : folder.listFiles()) {
-                    if (file.isFile()) {
-                        Path destination = targetPath.resolve(file.getName());
-                        Files.copy(file.toPath(), destination, StandardCopyOption.REPLACE_EXISTING);
-                    }
-                }
-            }
+								Files.createDirectories(filePath.getParent());
+								Files.copy(is, filePath, StandardCopyOption.REPLACE_EXISTING);
+							}
+						}
+					}
+				}
 
-            System.out.println("Arquivos copiados com sucesso para /public/utils");
+			} else {
+				// 🧪 Rodando em IDE
+				Path sourceDir = Paths.get(url.toURI());
+				Files.walk(sourceDir).forEach(path -> {
+					try {
+						Path destination = targetPath.resolve(sourceDir.relativize(path));
 
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-    }
+						if (Files.isDirectory(path)) {
+							Files.createDirectories(destination);
+						} else {
+							Files.createDirectories(destination.getParent());
+							Files.copy(path, destination, StandardCopyOption.REPLACE_EXISTING);
+						}
+
+					} catch (IOException e) {
+						e.printStackTrace();
+					}
+				});
+			}
+
+			System.out.println("Arquivos da AngatuLibraries copiados para /public/utils");
+
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
+	}
 
 	// ==================== NOVO: CONSTRUÇÃO DA CHAVE ====================
 	private static String buildKey(String ip, String path) {
@@ -372,28 +380,25 @@ public final class JavalinAPI {
 	}
 
 	private static void registerAllRoutes() {
-	    Reflections reflections = new Reflections(
-	        new org.reflections.util.ConfigurationBuilder()
-	            .setUrls(org.reflections.util.ClasspathHelper.forJavaClassPath())
-	            .setScanners(Scanners.SubTypes)
-	    );
+		Reflections reflections = new Reflections(new org.reflections.util.ConfigurationBuilder()
+				.setUrls(org.reflections.util.ClasspathHelper.forJavaClassPath()).setScanners(Scanners.SubTypes));
 
-	    Set<Class<? extends Route>> routeClasses = reflections.getSubTypesOf(Route.class);
+		Set<Class<? extends Route>> routeClasses = reflections.getSubTypesOf(Route.class);
 
-	    for (Class<? extends Route> routeClass : routeClasses) {
-	        try {
-	            // Evita classes abstratas ou interfaces
-	            if (java.lang.reflect.Modifier.isAbstract(routeClass.getModifiers()) || routeClass.isInterface()) {
-	                continue;
-	            }
+		for (Class<? extends Route> routeClass : routeClasses) {
+			try {
+				// Evita classes abstratas ou interfaces
+				if (java.lang.reflect.Modifier.isAbstract(routeClass.getModifiers()) || routeClass.isInterface()) {
+					continue;
+				}
 
-	            Route route = routeClass.getDeclaredConstructor().newInstance();
-	            route.register();
+				Route route = routeClass.getDeclaredConstructor().newInstance();
+				route.register();
 
-	        } catch (Exception e) {
-	            Console.error("Erro ao carregar rota: %s", e, routeClass.getName());
-	        }
-	    }
+			} catch (Exception e) {
+				Console.error("Erro ao carregar rota: %s", e, routeClass.getName());
+			}
+		}
 	}
 
 	public static Javalin get() {
