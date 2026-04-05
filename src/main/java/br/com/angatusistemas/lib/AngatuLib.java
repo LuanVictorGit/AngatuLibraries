@@ -24,7 +24,7 @@ public class AngatuLib {
 	private boolean localhost = false;
 	private String originHost;
 
-	public AngatuLib(String addressCertificate, int port, String pathPackageRoutes, boolean bloqByMaxRequisitions) {
+	public AngatuLib(String addressCertificate, int port, boolean bloqByMaxRequisitions) {
 		instance = this;
 		this.addressCertificate = addressCertificate.toLowerCase();
 		System.setOut(new PrintStream(new InterceptorOutputStream(), true));
@@ -42,7 +42,7 @@ public class AngatuLib {
 		
 		Task.runAsync(BrowserAPI::initPool);
 
-		javalin = JavalinAPI.setup(folderCerts, port, localhost, pathPackageRoutes, bloqByMaxRequisitions);
+		javalin = JavalinAPI.setup(folderCerts, port, localhost, bloqByMaxRequisitions);
 		if (javalin != null) {
 			System.out.println("Javalin configurado com sucesso! -> " + getOriginHost());
 		} else {

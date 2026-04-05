@@ -69,8 +69,7 @@ public final class JavalinAPI {
 	}
 
 	// ==================== SETUP PRINCIPAL ====================
-	public static Javalin setup(File folderCerts, int port, boolean localhost, String packagePath,
-			boolean enableMaxRequest) {
+	public static Javalin setup(File folderCerts, int port, boolean localhost, boolean enableMaxRequest) {
 		rateLimitingEnabled = enableMaxRequest;
 		try {
 			Javalin javalin = Javalin.create(config -> {
