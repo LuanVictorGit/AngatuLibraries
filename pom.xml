@@ -7,8 +7,10 @@
 	<groupId>AngatuLibraries</groupId>
 	<artifactId>AngatuLibraries</artifactId>
 	<version>latest</version>
+	<!-- 🔥 IMPORTANTE: Define que isso é uma biblioteca, não uma aplicação
+	executável -->
+	<packaging>jar</packaging>
 
-	<!-- Configurações do Java -->
 	<properties>
 		<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
 		<maven.compiler.source>21</maven.compiler.source>
@@ -16,15 +18,11 @@
 		<maven.compiler.release>21</maven.compiler.release>
 	</properties>
 
-	<!-- Repositórios -->
 	<repositories>
-		<!-- Maven Central -->
 		<repository>
 			<id>central</id>
 			<url>https://repo.maven.apache.org/maven2</url>
 		</repository>
-
-		<!-- JitPack (para libs do GitHub) -->
 		<repository>
 			<id>jitpack.io</id>
 			<url>https://jitpack.io</url>
@@ -33,21 +31,24 @@
 
 	<dependencies>
 
-		<!-- Lombok: reduz código boilerplate (getters, setters, etc) -->
+		<!-- Lombok: apenas em tempo de compilação -->
 		<dependency>
 			<groupId>org.projectlombok</groupId>
 			<artifactId>lombok</artifactId>
 			<version>1.18.44</version>
+			<scope>provided</scope> <!-- NÃO vai pro JAR final -->
 		</dependency>
 
-		<!-- Gson: conversão JSON <-> Java -->
+		<!-- Gson -->
 		<dependency>
 			<groupId>com.google.code.gson</groupId>
 			<artifactId>gson</artifactId>
 			<version>2.13.2</version>
+			<!-- Deixamos sem scope para ser compilada, mas se você não quer que 
+			     o usuário tenha que baixar manualmente, mantenha compile. 
+			     Se quiser JAR MUITO pequeno, mude para provided. -->
 		</dependency>
 
-		<!-- dotenv: leitura de variáveis de ambiente (.env) -->
 		<dependency>
 			<groupId>io.github.cdimascio</groupId>
 			<artifactId>dotenv-java</artifactId>
@@ -66,57 +67,55 @@
 			<version>7.0.2</version>
 		</dependency>
 
-		<!-- Javalin: framework web leve -->
+		<!-- Javalin (Framework pesado, melhor deixar como provided para a lib
+		ser leve) -->
 		<dependency>
 			<groupId>io.javalin</groupId>
 			<artifactId>javalin</artifactId>
 			<version>7.1.0</version>
+			<scope>provided</scope>
 		</dependency>
 
-		<!-- SLF4J Simple: logger simples para console -->
 		<dependency>
 			<groupId>org.slf4j</groupId>
 			<artifactId>slf4j-simple</artifactId>
 			<version>2.0.17</version>
+			<scope>provided</scope>
 		</dependency>
 
-		<!-- SSL Plugin: HTTPS no Javalin -->
 		<dependency>
 			<groupId>io.javalin.community.ssl</groupId>
 			<artifactId>ssl-plugin</artifactId>
 			<version>6.7.0</version>
+			<scope>provided</scope>
 		</dependency>
 
-		<!-- Source:
-		https://mvnrepository.com/artifact/io.javalin.community.ssl/javalin-ssl -->
 		<dependency>
 			<groupId>io.javalin.community.ssl</groupId>
 			<artifactId>javalin-ssl</artifactId>
 			<version>7.1.0</version>
-			<scope>compile</scope>
+			<scope>provided</scope>
 		</dependency>
 
-		<!-- Reflections: scan de classes/anotações -->
 		<dependency>
 			<groupId>org.reflections</groupId>
 			<artifactId>reflections</artifactId>
 			<version>0.10.2</version>
 		</dependency>
 
-		<!-- OkHttp: cliente HTTP moderno -->
 		<dependency>
 			<groupId>com.squareup.okhttp3</groupId>
 			<artifactId>okhttp</artifactId>
 			<version>5.3.2</version>
 		</dependency>
 
-		<!-- BCrypt: hash seguro de senhas -->
 		<dependency>
 			<groupId>org.mindrot</groupId>
 			<artifactId>jbcrypt</artifactId>
 			<version>0.4</version>
 		</dependency>
 
+		<!-- Playwright é gigante (vários MB), definitivamente provided -->
 		<dependency>
 			<groupId>com.microsoft.playwright</groupId>
 			<artifactId>playwright</artifactId>
@@ -124,14 +123,12 @@
 			<scope>provided</scope>
 		</dependency>
 
-		<!-- Thumbnailator para thumbnails de alta qualidade -->
 		<dependency>
 			<groupId>net.coobird</groupId>
 			<artifactId>thumbnailator</artifactId>
 			<version>0.4.21</version>
 		</dependency>
 
-		<!-- TwelveMonkeys para formatos adicionais (WebP, TIFF, etc.) -->
 		<dependency>
 			<groupId>com.twelvemonkeys.imageio</groupId>
 			<artifactId>imageio-webp</artifactId>
@@ -143,40 +140,68 @@
 			<version>3.12.0</version>
 		</dependency>
 
-		<!-- JCodec para manipulação de vídeos -->
 		<dependency>
 			<groupId>org.jcodec</groupId>
 			<artifactId>jcodec</artifactId>
 			<version>0.2.5</version>
 		</dependency>
-
 		<dependency>
 			<groupId>org.jcodec</groupId>
 			<artifactId>jcodec-javase</artifactId>
 			<version>0.2.5</version>
 		</dependency>
 
-		<!-- ZXing Core - Geração e leitura de QR Codes -->
 		<dependency>
 			<groupId>com.google.zxing</groupId>
 			<artifactId>core</artifactId>
 			<version>3.5.3</version>
 		</dependency>
-
-		<!-- ZXing JavaSE - Integração com BufferedImage -->
 		<dependency>
 			<groupId>com.google.zxing</groupId>
 			<artifactId>javase</artifactId>
 			<version>3.5.3</version>
 		</dependency>
 
-		<!-- Envio de e-mails -->
 		<dependency>
 			<groupId>com.sun.mail</groupId>
 			<artifactId>jakarta.mail</artifactId>
 			<version>2.0.1</version>
+			<scope>provided</scope>
 		</dependency>
 
 	</dependencies>
+
+	<build>
+		<plugins>
+			<!-- Plugin do compilador para Java 21 -->
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-compiler-plugin</artifactId>
+				<version>3.13.0</version>
+				<configuration>
+					<source>21</source>
+					<target>21</target>
+					<release>21</release>
+				</configuration>
+			</plugin>
+
+			<!-- 🔥 CRÍTICO: Se antes você usava maven-shade-plugin, REMOVA-O ou
+			configure 
+			     para NÃO criar uber-jar. Aqui garantimos que o JAR padrão só tenha seus .class -->
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-jar-plugin</artifactId>
+				<version>3.4.0</version>
+				<configuration>
+					<archive>
+						<manifest>
+							<!-- Não defina MainClass, pois é uma lib -->
+							<addClasspath>true</addClasspath>
+						</manifest>
+					</archive>
+				</configuration>
+			</plugin>
+		</plugins>
+	</build>
 
 </project>
