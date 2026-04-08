@@ -56,6 +56,7 @@ Adicione a dependência:
 ```
 
 > Substitua `VERSION` pela versão desejada disponível no JitPack.
+https://jitpack.io/#LuanVictorGit/AngatuLibraries
 
 ---
 
