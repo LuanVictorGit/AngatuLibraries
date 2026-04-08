@@ -224,6 +224,11 @@ public final class HtmlRouteAPI {
     public static List<String> getAllHtmlPages() {
         return AssetsAPI.listAllAssetsRecursive("/").stream()
                 .filter(file -> file.endsWith(".html"))
+                .filter(file -> {
+                    String normalized = file.replace("\\", "/");
+                    return !normalized.contains("/emails/")
+                            && !normalized.contains("/others/");
+                })
                 .collect(Collectors.toList());
     }
 
