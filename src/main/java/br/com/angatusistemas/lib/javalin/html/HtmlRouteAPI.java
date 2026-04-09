@@ -1,12 +1,11 @@
 package br.com.angatusistemas.lib.javalin.html;
 
 import java.util.Arrays;
+
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 import br.com.angatusistemas.lib.console.Console;
@@ -34,10 +33,6 @@ import io.javalin.Javalin;
  */
 public final class HtmlRouteAPI {
 
-	private static final Map<String, CachedHtml> PAGE_CACHE = new ConcurrentHashMap<>();
-	private static boolean cacheEnabled = true;
-	private static long cacheTtlMs = 60_000; // 1 minuto
-
 	// Lista de paths a serem ignorados (ex: "index", "admin")
 	private static final Set<String> IGNORED_PATHS = new HashSet<>(Arrays.asList());
 
@@ -46,25 +41,6 @@ public final class HtmlRouteAPI {
 	}
 
 	// ==================== CONFIGURAÇÃO ====================
-
-	/**
-	 * [PT] Ativa/desativa o cache das páginas HTML (ativo por padrão). [EN]
-	 * Enables/disables HTML page cache (enabled by default).
-	 */
-	public static void setCacheEnabled(boolean enabled) {
-		cacheEnabled = enabled;
-		if (!enabled)
-			PAGE_CACHE.clear();
-		Console.debug("Cache de rotas HTML " + (enabled ? "ativado" : "desativado"));
-	}
-
-	/**
-	 * [PT] Define o tempo de vida do cache (TTL) em milissegundos. [EN] Sets the
-	 * cache time-to-live (TTL) in milliseconds.
-	 */
-	public static void setCacheTtl(long ttlMs) {
-		cacheTtlMs = ttlMs;
-	}
 
 	/**
 	 * [PT] Adiciona um path a ser ignorado no registro automático.
@@ -139,8 +115,7 @@ public final class HtmlRouteAPI {
 	 * @param contentLoader    [PT] Carregador de conteúdo personalizado (opcional)
 	 *                         [EN] Custom content loader (optional)
 	 */
-	public static void registerAllRoutes(Javalin javalin, String baseTemplatePath, PageProvider pageProvider,
-			ContentLoader contentLoader) {
+	public static void registerAllRoutes(Javalin javalin, String baseTemplatePath, PageProvider pageProvider) {
 
 		List<String> htmlFiles = (pageProvider != null) ? pageProvider.getPages() : getAllHtmlPages();
 
@@ -162,29 +137,23 @@ public final class HtmlRouteAPI {
 
 					String baseHtml = null;
 					if (baseTemplatePath != null) {
-						baseHtml = loadContent(baseTemplatePath, contentLoader);
-						if (baseHtml == null) {
-							Console.warn("Template base não encontrado: " + baseTemplatePath);
-						}
+						baseHtml = loadContent(baseTemplatePath);
 					}
 
-					String pageContent = loadContent(finalFilePath, contentLoader);
+					String pageContent = loadContent(finalFilePath);
 					if (pageContent == null) {
 						ctx.status(404).result("Página não encontrada: " + finalFilePath);
 						return;
 					}
 
 					String renderedHtml;
-
 					if (baseHtml != null) {
-						renderedHtml = baseHtml.replace("{page}", StringAPI.capitalize(pageName)).replace("{content}",
-								pageContent);
+						renderedHtml = baseHtml.replace("{page}", StringAPI.capitalize(pageName)).replace("{content}",pageContent);
 						for (String otherPage : htmlFiles) {
 							String otherName = extractPageName(otherPage);
 							renderedHtml = renderedHtml.replace("{%" + otherName + "_active}",
 									pageName.equals(otherName) ? "bg-blue-600 text-white" : "");
 						}
-
 					} else {
 						renderedHtml = pageContent;
 					}
@@ -206,26 +175,12 @@ public final class HtmlRouteAPI {
 	 * [EN] Registers routes using default values (base template = "/index.html").
 	 */
 	public static void registerAllRoutes(Javalin javalin) {
-		registerAllRoutes(javalin, "/index.html", null, null);
+		registerAllRoutes(javalin, "/index.html", null);
 	}
 
 	// ==================== CARREGAMENTO DE CONTEÚDO ====================
 
-	private static String loadContent(String path, ContentLoader customLoader) {
-		if (customLoader != null) {
-			return customLoader.load(path);
-		}
-		if (cacheEnabled) {
-			CachedHtml cached = PAGE_CACHE.get(path);
-			if (cached != null && !cached.isExpired()) {
-				return cached.content;
-			}
-			String content = AssetsAPI.readAssetAsString(path);
-			if (content != null) {
-				PAGE_CACHE.put(path, new CachedHtml(content, cacheTtlMs));
-			}
-			return content;
-		}
+	private static String loadContent(String path) {
 		return AssetsAPI.readAssetAsString(path);
 	}
 
