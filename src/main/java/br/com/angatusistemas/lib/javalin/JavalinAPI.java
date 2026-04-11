@@ -67,7 +67,13 @@ public final class JavalinAPI {
 		SECURITY_HEADERS.put("X-XSS-Protection", "1; mode=block");
 		SECURITY_HEADERS.put("Referrer-Policy", "strict-origin-when-cross-origin");
 		SECURITY_HEADERS.put("Content-Security-Policy",
-				"default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net");
+		        "default-src 'self'; " +
+		        "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; " +
+		        "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; " +
+		        "img-src 'self' data: blob:; " +
+		        "font-src 'self' https://cdn.jsdelivr.net; " +
+		        "connect-src 'self';"
+		);
 		SECURITY_HEADERS.put("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
 	}
 
