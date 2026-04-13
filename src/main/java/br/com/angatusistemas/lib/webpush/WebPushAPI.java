@@ -487,7 +487,7 @@ public final class WebPushAPI {
 				nl.martijndwars.webpush.Urgency libUrgency = nl.martijndwars.webpush.Urgency.valueOf(urgency.name());
 
 				Notification notification = new Notification(subscription, payload, libUrgency);
-				
+
 				@SuppressWarnings("static-access")
 				NotificationBuilder builder = notification.builder();
 				builder.ttl(ttl);

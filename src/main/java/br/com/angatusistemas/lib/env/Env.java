@@ -22,7 +22,7 @@ public final class Env {
 
     // Instância única do Dotenv carregada uma única vez (Singleton pattern)
     // Single Dotenv instance loaded once (Singleton pattern)
-    private static final Dotenv DOTENV_INSTANCE = Dotenv.load();
+    private static Dotenv DOTENV_INSTANCE = Dotenv.load();
 
     /**
      * [PT] Construtor privado para evitar instanciação da classe utilitária.
@@ -53,5 +53,9 @@ public final class Env {
      */
     public static Dotenv get() {
         return DOTENV_INSTANCE;
+    }
+    
+    public static void reload() {
+    	DOTENV_INSTANCE = Dotenv.configure().ignoreIfMalformed().ignoreIfMissing().load();
     }
 }
