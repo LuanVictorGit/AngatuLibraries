@@ -87,6 +87,37 @@
 			<version>6.7.0</version>
 		</dependency>
 
+		<!-- Source: https://mvnrepository.com/artifact/nl.martijndwars/web-push -->
+		<dependency>
+			<groupId>nl.martijndwars</groupId>
+			<artifactId>web-push</artifactId>
+			<version>5.1.2</version>
+			<scope>compile</scope>
+		</dependency>
+
+		<!-- Source:
+		https://mvnrepository.com/artifact/org.bouncycastle/bcprov-jdk18on -->
+		<dependency>
+			<groupId>org.bouncycastle</groupId>
+			<artifactId>bcprov-jdk18on</artifactId>
+			<version>1.83</version>
+			<scope>compile</scope>
+		</dependency>
+
+		<dependency>
+			<groupId>org.bitbucket.b_c</groupId>
+			<artifactId>jose4j</artifactId>
+			<version>0.9.6</version>
+		</dependency>
+
+		<!-- Apache HttpClient — usada internamente pelo web-push para envio
+		HTTP -->
+		<dependency>
+			<groupId>org.apache.httpcomponents</groupId>
+			<artifactId>httpclient</artifactId>
+			<version>4.5.14</version>
+		</dependency>
+
 		<!-- Source:
 		https://mvnrepository.com/artifact/io.javalin.community.ssl/javalin-ssl -->
 		<dependency>

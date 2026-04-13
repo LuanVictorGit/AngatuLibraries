@@ -1,5 +1,11 @@
 package br.com.angatusistemas.lib.email;
 
+import java.io.File;
+import java.util.List;
+import java.util.Map;
+import java.util.Properties;
+import java.util.stream.Collectors;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -7,15 +13,19 @@ import br.com.angatusistemas.lib.env.Env;
 import br.com.angatusistemas.lib.javalin.AssetsAPI;
 import br.com.angatusistemas.lib.strings.StringAPI;
 import br.com.angatusistemas.lib.task.Task;
-import jakarta.mail.*;
-import jakarta.mail.internet.*;
 import jakarta.activation.DataHandler;
 import jakarta.activation.DataSource;
 import jakarta.activation.FileDataSource;
-
-import java.io.File;
-import java.util.*;
-import java.util.stream.Collectors;
+import jakarta.mail.Authenticator;
+import jakarta.mail.Message;
+import jakarta.mail.MessagingException;
+import jakarta.mail.PasswordAuthentication;
+import jakarta.mail.Session;
+import jakarta.mail.Transport;
+import jakarta.mail.internet.InternetAddress;
+import jakarta.mail.internet.MimeBodyPart;
+import jakarta.mail.internet.MimeMessage;
+import jakarta.mail.internet.MimeMultipart;
 
 /**
  * [PT] Classe utilitária para envio de e-mails via SMTP (Gmail).

@@ -1,7 +1,6 @@
 package br.com.angatusistemas.lib.javalin.html;
 
 import java.util.Arrays;
-
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
