@@ -236,14 +236,33 @@ public final class WebPushAPI {
 	public static VapidKeys generateVapidKeys() {
 		try {
 			KeyPairGenerator keyPairGen = KeyPairGenerator.getInstance("EC", BouncyCastleProvider.PROVIDER_NAME);
-			keyPairGen.initialize(256);
+			keyPairGen.initialize(new java.security.spec.ECGenParameterSpec("P-256"));
 			KeyPair keyPair = keyPairGen.generateKeyPair();
 
 			ECPublicKey publicKey = (ECPublicKey) keyPair.getPublic();
 			ECPrivateKey privateKey = (ECPrivateKey) keyPair.getPrivate();
 
-			String publicKeyBase64 = Base64.getUrlEncoder().withoutPadding().encodeToString(publicKey.getEncoded());
-			String privateKeyBase64 = Base64.getUrlEncoder().withoutPadding().encodeToString(privateKey.getEncoded());
+			// Chave pública: formato uncompressed EC point (04 || X || Y) — 65 bytes
+			// A biblioteca webpush-java (Utils.loadPublicKey) exige este formato.
+			// getEncoded() retorna DER/ASN.1 (começa com 0x30) e causa
+			// "Invalid point encoding 0x30".
+			org.bouncycastle.jce.interfaces.ECPublicKey bcPublicKey =
+				(org.bouncycastle.jce.interfaces.ECPublicKey) publicKey;
+			byte[] publicKeyBytes = bcPublicKey.getQ().getEncoded(false); // false = uncompressed
+
+			// Chave privada: apenas o valor escalar S (32 bytes big-endian)
+			// getEncoded() retorna PKCS#8 DER — formato errado para webpush-java.
+			byte[] sBytes = privateKey.getS().toByteArray();
+			// toByteArray() pode incluir byte de sinal 0x00 no início; normaliza para 32 bytes
+			byte[] privateKeyBytes = new byte[32];
+			if (sBytes.length >= 32) {
+				System.arraycopy(sBytes, sBytes.length - 32, privateKeyBytes, 0, 32);
+			} else {
+				System.arraycopy(sBytes, 0, privateKeyBytes, 32 - sBytes.length, sBytes.length);
+			}
+
+			String publicKeyBase64  = Base64.getUrlEncoder().withoutPadding().encodeToString(publicKeyBytes);
+			String privateKeyBase64 = Base64.getUrlEncoder().withoutPadding().encodeToString(privateKeyBytes);
 
 			Console.debug("Chaves VAPID geradas com sucesso");
 			return new VapidKeys(publicKeyBase64, privateKeyBase64);
