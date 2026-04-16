@@ -1,22 +1,8 @@
 package br.com.angatusistemas.lib.webpush;
 
-import br.com.angatusistemas.lib.console.Console;
-import br.com.angatusistemas.lib.gson.GsonAPI;
-import br.com.angatusistemas.lib.task.Task;
-import com.google.gson.Gson;
-import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
-import nl.martijndwars.webpush.Notification;
-import nl.martijndwars.webpush.Notification.NotificationBuilder;
-import nl.martijndwars.webpush.PushService;
-import nl.martijndwars.webpush.Subscription;
-import org.apache.http.HttpResponse;
-import org.bouncycastle.jce.provider.BouncyCastleProvider;
-import org.bouncycastle.util.io.pem.PemObject;
-import org.bouncycastle.util.io.pem.PemReader;
-import org.bouncycastle.util.io.pem.PemWriter;
-
-import java.io.*;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.io.StringReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -26,9 +12,32 @@ import java.security.KeyPairGenerator;
 import java.security.Security;
 import java.security.interfaces.ECPrivateKey;
 import java.security.interfaces.ECPublicKey;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
+
+import org.apache.http.HttpResponse;
+import org.bouncycastle.jce.provider.BouncyCastleProvider;
+import org.bouncycastle.util.io.pem.PemObject;
+import org.bouncycastle.util.io.pem.PemReader;
+import org.bouncycastle.util.io.pem.PemWriter;
+
+import com.google.gson.Gson;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+
+import br.com.angatusistemas.lib.console.Console;
+import br.com.angatusistemas.lib.gson.GsonAPI;
+import br.com.angatusistemas.lib.task.Task;
+import nl.martijndwars.webpush.Notification;
+import nl.martijndwars.webpush.Notification.NotificationBuilder;
+import nl.martijndwars.webpush.PushService;
+import nl.martijndwars.webpush.Subscription;
 
 /**
  * [PT] Classe utilitária para envio de notificações Web Push utilizando a

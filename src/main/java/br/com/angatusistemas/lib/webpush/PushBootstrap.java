@@ -1,11 +1,14 @@
 package br.com.angatusistemas.lib.webpush;
 
 import java.io.IOException;
-import java.nio.file.*;
-import java.util.*;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.HashMap;
+import java.util.Map;
 
-import br.com.angatusistemas.lib.env.Env;
 import br.com.angatusistemas.lib.console.Console;
+import br.com.angatusistemas.lib.env.Env;
 
 /**
  * [PT] Classe utilitária para inicialização e configuração automática do serviço Web Push.
