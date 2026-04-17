@@ -2,102 +2,65 @@ package br.com.angatusistemas.lib.ai;
 
 import br.com.angatusistemas.lib.console.Console;
 import br.com.angatusistemas.lib.env.Env;
-import br.com.angatusistemas.lib.task.Task;
 import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 
 import java.io.BufferedReader;
-import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
-import java.io.OutputStream;
-import java.net.HttpURLConnection;
 import java.net.URI;
-import java.net.URL;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.concurrent.CompletableFuture;
+import java.time.Duration;
+import java.util.function.Consumer;
 
 /**
- * [PT] Classe utilitária para integração com a API da DeepSeek (modelos de
- * linguagem).
+ * [PT] Cliente para a API da DeepSeek com suporte a instrução de sistema por
+ * chamada.
  * <p>
- * Permite enviar instruções (prompts) e receber respostas de forma síncrona ou
- * assíncrona. Suporta histórico de conversas, temperatura, tokens máximos e
- * outros parâmetros.
+ * Permite definir dinamicamente o comportamento do assistente (instrução de
+ * sistema) e enviar a mensagem do usuário em uma única chamada.
  * </p>
  * <p>
- * <b>Configuração necessária no arquivo .env:</b>
+ * Exemplo:
  * 
  * <pre>
- * DEEPSEEK_API_KEY=sk-...
- * DEEPSEEK_MODEL=deepseek-chat (opcional, padrão)
- * </pre>
- * </p>
- * <p>
- * <b>Exemplo de uso:</b>
- * 
- * <pre>
- * // Inicialização automática com credenciais do .env
+ * // Inicialização automática com token do .env
  * DeepSeek.initialize();
  *
- * // Envio simples e síncrono
- * String resposta = DeepSeek.ask("Explique o que é uma API REST");
+ * // Enviar instrução + mensagem do usuário
+ * String resposta = DeepSeek.ask("Você deve chamar o usuário sempre amorosamente", "Olá, tudo bem?");
  * System.out.println(resposta);
  *
- * // Com histórico de conversa
- * List&lt;DeepSeek.Message&gt; history = new ArrayList<>();
- * history.add(DeepSeek.userMessage("Qual é a capital do Brasil?"));
- * String resposta2 = DeepSeek.askWithHistory(history);
- * history.add(DeepSeek.assistantMessage(resposta2));
- * history.add(DeepSeek.userMessage("E a sua população?"));
- * String resposta3 = DeepSeek.askWithHistory(history);
- *
- * // Chamada assíncrona
- * DeepSeek.askAsync("Escreva um poema sobre Java", resposta -> {
- * 	System.out.println("Resposta: " + resposta);
- * });
+ * // Com streaming
+ * DeepSeek.askStream("Responda em português de forma criativa", "Crie uma história sobre um robô",
+ * 		chunk -> System.out.print(chunk));
  * </pre>
  * </p>
  *
- * [EN] Utility class for integration with the DeepSeek API (language models).
+ * [EN] DeepSeek API client with per‑call system instruction support.
  * <p>
- * Allows sending prompts and receiving responses synchronously or
- * asynchronously. Supports conversation history, temperature, max tokens and
- * other parameters.
+ * Allows dynamically setting the assistant's behavior (system instruction) and
+ * sending the user's message in a single call.
  * </p>
  * <p>
- * <b>Required configuration in .env file:</b>
+ * Example:
  * 
  * <pre>
- * DEEPSEEK_API_KEY=sk-...
- * DEEPSEEK_MODEL=deepseek-chat (optional, default)
- * </pre>
- * </p>
- * <p>
- * <b>Usage example:</b>
- * 
- * <pre>
- * // Automatic initialization with .env credentials
+ * // Automatic initialization with token from .env
  * DeepSeek.initialize();
  *
- * // Simple synchronous request
- * String response = DeepSeek.ask("Explain what a REST API is");
- * System.out.println(response);
+ * // Send instruction + user message
+ * String answer = DeepSeek.ask("You must always call the user affectionately", "Hello, how are you?");
+ * System.out.println(answer);
  *
- * // With conversation history
- * List&lt;DeepSeek.Message&gt; history = new ArrayList<>();
- * history.add(DeepSeek.userMessage("What is the capital of Brazil?"));
- * String response2 = DeepSeek.askWithHistory(history);
- * history.add(DeepSeek.assistantMessage(response2));
- * history.add(DeepSeek.userMessage("And its population?"));
- * String response3 = DeepSeek.askWithHistory(history);
- *
- * // Asynchronous call
- * DeepSeek.askAsync("Write a poem about Java", response -> {
- * 	System.out.println("Response: " + response);
- * });
+ * // With streaming
+ * DeepSeek.askStream("Answer in English in a creative way", "Tell me a story about a robot",
+ * 		chunk -> System.out.print(chunk));
  * </pre>
  * </p>
  *
@@ -106,16 +69,17 @@ import java.util.concurrent.CompletableFuture;
  */
 public final class DeepSeek {
 
-	private static final String DEFAULT_API_URL = "https://api.deepseek.com/v1/chat/completions";
-	private static final int DEFAULT_TIMEOUT_MS = 30000;
-	private static final double DEFAULT_TEMPERATURE = 0.7;
+	private static final String API_URL = "https://api.deepseek.com/v1/chat/completions";
+	private static final int TIMEOUT_SECONDS = 30;
+	private static final double DEFAULT_TEMPERATURE = 1.0;
 	private static final int DEFAULT_MAX_TOKENS = 2000;
 
 	private static String apiKey;
-	private static String model;
+	private static String model = "deepseek-chat";
 	private static boolean initialized = false;
 
-	private static final Gson gson = new Gson();
+	private static final HttpClient httpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
+	private static final Gson gson = new GsonBuilder().create();
 
 	private DeepSeek() {
 		throw new UnsupportedOperationException("Utility class cannot be instantiated");
@@ -124,296 +88,208 @@ public final class DeepSeek {
 	// ==================== INICIALIZAÇÃO ====================
 
 	/**
-	 * [PT] Inicializa o cliente DeepSeek com as configurações do arquivo .env.
-	 * <p>
-	 * Chaves esperadas: DEEPSEEK_API_KEY (obrigatória), DEEPSEEK_MODEL (opcional).
-	 * </p>
+	 * [PT] Inicializa o cliente com a chave da API lida do arquivo .env
+	 * (DEEPSEEK_API_KEY).
 	 *
-	 * [EN] Initializes the DeepSeek client with settings from the .env file.
-	 * <p>
-	 * Expected keys: DEEPSEEK_API_KEY (required), DEEPSEEK_MODEL (optional).
-	 * </p>
+	 * [EN] Initializes the client with the API key read from the .env file
+	 * (DEEPSEEK_API_KEY).
 	 *
-	 * @return [PT] true se inicializado com sucesso, false caso contrário [EN] true
-	 *         if initialized successfully, false otherwise
+	 * @return true se inicializado com sucesso, false caso contrário
 	 */
 	public static synchronized boolean initialize() {
 		if (initialized)
 			return true;
-
-		apiKey = Env.get().get("DEEPSEEK_API_KEY");
-		model = Env.get().get("DEEPSEEK_MODEL");
-		if (model == null || model.trim().isEmpty()) {
-			model = "deepseek-chat";
-		}
-
-		if (apiKey == null || apiKey.trim().isEmpty()) {
+		String key = Env.get().get("DEEPSEEK_API_KEY");
+		if (key == null || key.trim().isEmpty()) {
 			Console.error("DeepSeek API key não configurada. Adicione DEEPSEEK_API_KEY no .env");
 			return false;
 		}
-
+		apiKey = key;
 		initialized = true;
 		Console.log("DeepSeek inicializado com modelo: " + model);
 		return true;
 	}
 
 	/**
-	 * [PT] Inicializa o cliente DeepSeek com credenciais fornecidas explicitamente.
+	 * [PT] Inicializa o cliente com a chave e modelo fornecidos.
 	 *
-	 * [EN] Initializes the DeepSeek client with explicitly provided credentials.
+	 * [EN] Initializes the client with the provided key and model.
 	 *
-	 * @param apiKey [PT] chave da API DeepSeek [EN] DeepSeek API key
-	 * @param model  [PT] nome do modelo (ex: "deepseek-chat") [EN] model name
-	 *               (e.g., "deepseek-chat")
+	 * @param apiKey chave da API DeepSeek
+	 * @param model  nome do modelo (ex: "deepseek-chat", se null usa padrão)
 	 */
 	public static synchronized void initialize(String apiKey, String model) {
 		DeepSeek.apiKey = apiKey;
-		DeepSeek.model = (model != null && !model.isEmpty()) ? model : "deepseek-chat";
+		if (model != null && !model.trim().isEmpty()) {
+			DeepSeek.model = model;
+		}
 		initialized = true;
 		Console.log("DeepSeek inicializado com modelo: " + DeepSeek.model);
+	}
+
+	/**
+	 * [PT] Define o modelo padrão (caso não seja fornecido na inicialização).
+	 *
+	 * [EN] Sets the default model (if not provided during initialization).
+	 *
+	 * @param model nome do modelo
+	 */
+	public static void setModel(String model) {
+		DeepSeek.model = model;
 	}
 
 	// ==================== MÉTODOS PRINCIPAIS ====================
 
 	/**
-	 * [PT] Envia uma instrução simples e retorna a resposta (síncrono).
+	 * [PT] Envia uma instrução de sistema e uma mensagem do usuário, retornando a
+	 * resposta completa (síncrono).
 	 *
-	 * [EN] Sends a simple prompt and returns the response (synchronous).
+	 * [EN] Sends a system instruction and a user message, returning the full
+	 * response (synchronous).
 	 *
-	 * @param instruction [PT] texto da instrução/prompt [EN] instruction/prompt
-	 *                    text
-	 * @return [PT] resposta do modelo ou null em caso de erro [EN] model response
-	 *         or null on error
+	 * @param systemInstruction [PT] instrução que define o comportamento do
+	 *                          assistente (pode ser null ou vazio) [EN] instruction
+	 *                          that defines the assistant's behavior (may be null
+	 *                          or empty)
+	 * @param userMessage       [PT] texto enviado pelo usuário [EN] text sent by
+	 *                          the user
+	 * @return [PT] resposta do assistente ou null em caso de erro [EN] assistant's
+	 *         response or null on error
 	 */
-	public static String ask(String instruction) {
-		List<Message> messages = new ArrayList<>();
-		messages.add(userMessage(instruction));
-		return askWithHistory(messages);
-	}
-
-	/**
-	 * [PT] Envia uma conversa com histórico e retorna a resposta (síncrono).
-	 *
-	 * [EN] Sends a conversation with history and returns the response
-	 * (synchronous).
-	 *
-	 * @param history [PT] lista de mensagens (alternando usuário e assistente) [EN]
-	 *                list of messages (alternating user and assistant)
-	 * @return [PT] resposta do modelo ou null em caso de erro [EN] model response
-	 *         or null on error
-	 */
-	public static String askWithHistory(List<Message> history) {
-		return askWithHistory(history, DEFAULT_TEMPERATURE, DEFAULT_MAX_TOKENS);
-	}
-
-	/**
-	 * [PT] Envia uma conversa com parâmetros avançados (temperatura, tokens
-	 * máximos).
-	 *
-	 * [EN] Sends a conversation with advanced parameters (temperature, max tokens).
-	 *
-	 * @param history     [PT] lista de mensagens [EN] list of messages
-	 * @param temperature [PT] criatividade da resposta (0.0 a 1.0) [EN] response
-	 *                    creativity (0.0 to 1.0)
-	 * @param maxTokens   [PT] número máximo de tokens na resposta [EN] maximum
-	 *                    tokens in response
-	 * @return [PT] resposta do modelo ou null [EN] model response or null
-	 */
-	public static String askWithHistory(List<Message> history, double temperature, int maxTokens) {
-		if (!initialized && !initialize()) {
-			Console.error("DeepSeek não inicializado. Chame initialize() primeiro.");
+	public static String ask(String systemInstruction, String userMessage) {
+		if (!initialized && !initialize())
 			return null;
-		}
 
 		try {
-			JsonObject requestBody = buildRequest(history, temperature, maxTokens);
-			String responseJson = sendRequest(requestBody.toString());
-			return parseResponse(responseJson);
+			String jsonBody = buildRequestBody(systemInstruction, userMessage, false);
+			HttpRequest request = HttpRequest.newBuilder().uri(URI.create(API_URL))
+					.timeout(Duration.ofSeconds(TIMEOUT_SECONDS)).header("Content-Type", "application/json")
+					.header("Authorization", "Bearer " + apiKey).POST(HttpRequest.BodyPublishers.ofString(jsonBody))
+					.build();
+
+			HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+			if (response.statusCode() != 200) {
+				Console.error("Erro na API DeepSeek: HTTP {} - {}", response.statusCode(), response.body());
+				return null;
+			}
+			return parseResponse(response.body());
 		} catch (Exception e) {
 			Console.error("Erro ao chamar DeepSeek API: {}", e);
 			return null;
 		}
 	}
 
-	// ==================== MÉTODOS ASSÍNCRONOS ====================
-
 	/**
-	 * [PT] Envia uma instrução de forma assíncrona (usando a pool do Task).
+	 * [PT] Envia instrução de sistema e mensagem do usuário com streaming (resposta
+	 * em tempo real).
 	 *
-	 * [EN] Sends a prompt asynchronously (using the Task pool).
+	 * [EN] Sends system instruction and user message with streaming (real-time
+	 * response).
 	 *
-	 * @param instruction [PT] texto da instrução [EN] prompt text
-	 * @param callback    [PT] callback chamado com a resposta [EN] callback called
-	 *                    with the response
+	 * @param systemInstruction [PT] instrução de sistema (comportamento do
+	 *                          assistente) [EN] system instruction (assistant
+	 *                          behavior)
+	 * @param userMessage       [PT] mensagem do usuário [EN] user message
+	 * @param onChunk           [PT] callback que recebe cada pedaço de texto
+	 *                          (chunk) [EN] callback that receives each text chunk
 	 */
-	public static void askAsync(String instruction, DeepSeekCallback callback) {
-		Task.runAsync(() -> {
-			String response = ask(instruction);
-			callback.onResponse(response);
-		});
-	}
+	public static void askStream(String systemInstruction, String userMessage, Consumer<String> onChunk) {
+		if (!initialized && !initialize())
+			return;
 
-	/**
-	 * [PT] Envia uma conversa com histórico de forma assíncrona.
-	 *
-	 * [EN] Sends a conversation with history asynchronously.
-	 *
-	 * @param history  [PT] lista de mensagens [EN] list of messages
-	 * @param callback [PT] callback com a resposta [EN] callback with the response
-	 */
-	public static void askAsyncWithHistory(List<Message> history, DeepSeekCallback callback) {
-		Task.runAsync(() -> {
-			String response = askWithHistory(history);
-			callback.onResponse(response);
-		});
-	}
+		try {
+			String jsonBody = buildRequestBody(systemInstruction, userMessage, true);
+			HttpRequest request = HttpRequest.newBuilder().uri(URI.create(API_URL))
+					.timeout(Duration.ofSeconds(TIMEOUT_SECONDS)).header("Content-Type", "application/json")
+					.header("Authorization", "Bearer " + apiKey).POST(HttpRequest.BodyPublishers.ofString(jsonBody))
+					.build();
 
-	/**
-	 * [PT] Envia uma instrução e retorna um CompletableFuture (para programação
-	 * reativa).
-	 *
-	 * [EN] Sends a prompt and returns a CompletableFuture (for reactive
-	 * programming).
-	 *
-	 * @param instruction [PT] texto da instrução [EN] prompt text
-	 * @return [PT] CompletableFuture com a resposta [EN] CompletableFuture with the
-	 *         response
-	 */
-	public static CompletableFuture<String> askFuture(String instruction) {
-		return CompletableFuture.supplyAsync(() -> ask(instruction));
-	}
+			HttpResponse<InputStream> response = httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
+			if (response.statusCode() != 200) {
+				Console.error("Erro na API DeepSeek (stream): HTTP {}", response.statusCode());
+				return;
+			}
 
-	// ==================== CONSTRUÇÃO DE MENSAGENS ====================
-
-	/**
-	 * [PT] Cria uma mensagem do tipo usuário.
-	 *
-	 * [EN] Creates a user-type message.
-	 *
-	 * @param content [PT] conteúdo da mensagem [EN] message content
-	 * @return [PT] objeto Message [EN] Message object
-	 */
-	public static Message userMessage(String content) {
-		return new Message("user", content);
-	}
-
-	/**
-	 * [PT] Cria uma mensagem do tipo assistente.
-	 *
-	 * [EN] Creates an assistant-type message.
-	 *
-	 * @param content [PT] conteúdo da mensagem [EN] message content
-	 * @return [PT] objeto Message [EN] Message object
-	 */
-	public static Message assistantMessage(String content) {
-		return new Message("assistant", content);
-	}
-
-	/**
-	 * [PT] Cria uma mensagem do tipo sistema (para instruções de comportamento).
-	 *
-	 * [EN] Creates a system-type message (for behavior instructions).
-	 *
-	 * @param content [PT] conteúdo da mensagem [EN] message content
-	 * @return [PT] objeto Message [EN] Message object
-	 */
-	public static Message systemMessage(String content) {
-		return new Message("system", content);
+			try (BufferedReader reader = new BufferedReader(
+					new InputStreamReader(response.body(), StandardCharsets.UTF_8))) {
+				String line;
+				while ((line = reader.readLine()) != null) {
+					if (line.startsWith("data: ")) {
+						String data = line.substring(6).trim();
+						if ("[DONE]".equals(data))
+							break;
+						String chunk = parseStreamChunk(data);
+						if (chunk != null && !chunk.isEmpty()) {
+							onChunk.accept(chunk);
+						}
+					}
+				}
+			}
+		} catch (Exception e) {
+			Console.error("Erro no streaming da DeepSeek: {}", e);
+		}
 	}
 
 	// ==================== MÉTODOS INTERNOS ====================
 
-	private static JsonObject buildRequest(List<Message> messages, double temperature, int maxTokens) {
+	private static String buildRequestBody(String systemInstruction, String userMessage, boolean stream) {
 		JsonObject body = new JsonObject();
 		body.addProperty("model", model);
-		body.addProperty("temperature", temperature);
-		body.addProperty("max_tokens", maxTokens);
-		body.addProperty("stream", false);
+		body.addProperty("temperature", DEFAULT_TEMPERATURE);
+		body.addProperty("max_tokens", DEFAULT_MAX_TOKENS);
+		body.addProperty("stream", stream);
 
-		JsonArray msgArray = new JsonArray();
-		for (Message msg : messages) {
-			JsonObject msgObj = new JsonObject();
-			msgObj.addProperty("role", msg.role);
-			msgObj.addProperty("content", msg.content);
-			msgArray.add(msgObj);
-		}
-		body.add("messages", msgArray);
+		JsonArray messages = new JsonArray();
 
-		return body;
-	}
-
-	private static String sendRequest(String jsonBody) throws Exception {
-		URL url = URI.create(DEFAULT_API_URL).toURL();
-		HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-		conn.setRequestMethod("POST");
-		conn.setRequestProperty("Content-Type", "application/json");
-		conn.setRequestProperty("Authorization", "Bearer " + apiKey);
-		conn.setDoOutput(true);
-		conn.setConnectTimeout(DEFAULT_TIMEOUT_MS);
-		conn.setReadTimeout(DEFAULT_TIMEOUT_MS);
-
-		try (OutputStream os = conn.getOutputStream()) {
-			os.write(jsonBody.getBytes(StandardCharsets.UTF_8));
-			os.flush();
+		// Instrução de sistema (se fornecida)
+		if (systemInstruction != null && !systemInstruction.trim().isEmpty()) {
+			JsonObject system = new JsonObject();
+			system.addProperty("role", "system");
+			system.addProperty("content", systemInstruction);
+			messages.add(system);
 		}
 
-		int status = conn.getResponseCode();
-		if (status != 200) {
-			try (BufferedReader br = new BufferedReader(
-					new InputStreamReader(conn.getErrorStream(), StandardCharsets.UTF_8))) {
-				StringBuilder error = new StringBuilder();
-				String line;
-				while ((line = br.readLine()) != null)
-					error.append(line);
-				throw new IOException("HTTP " + status + ": " + error);
-			}
-		}
+		// Mensagem do usuário
+		JsonObject user = new JsonObject();
+		user.addProperty("role", "user");
+		user.addProperty("content", userMessage);
+		messages.add(user);
 
-		try (BufferedReader br = new BufferedReader(
-				new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8))) {
-			StringBuilder response = new StringBuilder();
-			String line;
-			while ((line = br.readLine()) != null)
-				response.append(line);
-			return response.toString();
-		}
+		body.add("messages", messages);
+		return gson.toJson(body);
 	}
 
 	private static String parseResponse(String json) {
-		JsonObject obj = gson.fromJson(json, JsonObject.class);
-		JsonArray choices = obj.getAsJsonArray("choices");
-		if (choices != null && choices.size() > 0) {
-			JsonObject firstChoice = choices.get(0).getAsJsonObject();
-			JsonObject message = firstChoice.getAsJsonObject("message");
-			if (message != null && message.has("content")) {
-				return message.get("content").getAsString();
+		try {
+			JsonObject obj = gson.fromJson(json, JsonObject.class);
+			JsonArray choices = obj.getAsJsonArray("choices");
+			if (choices != null && choices.size() > 0) {
+				JsonObject message = choices.get(0).getAsJsonObject().getAsJsonObject("message");
+				if (message != null && message.has("content")) {
+					return message.get("content").getAsString();
+				}
 			}
+		} catch (Exception e) {
+			Console.error("Erro ao parsear resposta DeepSeek: {}", e);
 		}
 		return null;
 	}
 
-	// ==================== CLASSES DE SUPORTE ====================
-
-	/**
-	 * [PT] Representa uma mensagem na conversa. [EN] Represents a message in the
-	 * conversation.
-	 */
-	public static class Message {
-		public final String role;
-		public final String content;
-
-		public Message(String role, String content) {
-			this.role = role;
-			this.content = content;
+	private static String parseStreamChunk(String chunkJson) {
+		try {
+			if (chunkJson == null || chunkJson.isEmpty())
+				return null;
+			JsonObject obj = gson.fromJson(chunkJson, JsonObject.class);
+			JsonArray choices = obj.getAsJsonArray("choices");
+			if (choices != null && choices.size() > 0) {
+				JsonObject delta = choices.get(0).getAsJsonObject().getAsJsonObject("delta");
+				if (delta != null && delta.has("content")) {
+					return delta.get("content").getAsString();
+				}
+			}
+		} catch (Exception e) {
+			// Ignorar erros de parse em chunks parciais
 		}
-	}
-
-	/**
-	 * [PT] Interface de callback para chamadas assíncronas. [EN] Callback interface
-	 * for asynchronous calls.
-	 */
-	@FunctionalInterface
-	public interface DeepSeekCallback {
-		void onResponse(String response);
+		return null;
 	}
 }
