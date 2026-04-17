@@ -1,4 +1,4 @@
-package br.com.angatusistemas.lib.bot;
+package br.com.angatusistemas.lib.discord;
 
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
@@ -94,13 +94,13 @@ import net.dv8tion.jda.api.utils.messages.MessageCreateBuilder;
  * @author Angatu Sistemas
  * @see <a href="https://github.com/discord-jda/JDA">JDA on GitHub</a>
  */
-public final class DiscordBot {
+public final class Bot {
 
     private static JDA jda;
     private static boolean initialized = false;
     private static final Map<String, Consumer<ButtonInteractionEvent>> buttonActions = new ConcurrentHashMap<>();
 
-    private DiscordBot() {
+    private Bot() {
         throw new UnsupportedOperationException("Utility class cannot be instantiated");
     }
 
