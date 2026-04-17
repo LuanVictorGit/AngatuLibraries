@@ -208,7 +208,7 @@ public final class JavalinAPI {
 					});
 					config.registerPlugin(plugin);
 				}
-				config.http.maxRequestSize = 200L * 1024L * 1024L;
+				config.http.maxRequestSize = 1000L * 1024L * 1024L;
 			}).start(localhost ? 80 : port);
 
 			javalinInstance = javalin;
