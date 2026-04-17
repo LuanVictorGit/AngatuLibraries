@@ -70,9 +70,8 @@ import java.util.function.Consumer;
 public final class DeepSeek {
 
 	private static final String API_URL = "https://api.deepseek.com/v1/chat/completions";
-	private static final int TIMEOUT_SECONDS = 30;
+	private static final int TIMEOUT_SECONDS = 300;
 	private static final double DEFAULT_TEMPERATURE = 1.0;
-	private static final int DEFAULT_MAX_TOKENS = 2000;
 
 	private static String apiKey;
 	private static String model = "deepseek-chat";
@@ -236,7 +235,6 @@ public final class DeepSeek {
 		JsonObject body = new JsonObject();
 		body.addProperty("model", model);
 		body.addProperty("temperature", DEFAULT_TEMPERATURE);
-		body.addProperty("max_tokens", DEFAULT_MAX_TOKENS);
 		body.addProperty("stream", stream);
 
 		JsonArray messages = new JsonArray();
