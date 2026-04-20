@@ -200,6 +200,7 @@ public final class JavalinAPI {
 					sf.location = Location.CLASSPATH;
 				});
 				if (!localhost) {
+					System.out.println("&bDefinido javalin para modo online!");
 					SslPlugin plugin = new SslPlugin(conf -> {
 						conf.pemFromPath(folderCerts + "/fullchain.pem", folderCerts + "/privkey.pem");
 						conf.secure = true;
@@ -207,9 +208,11 @@ public final class JavalinAPI {
 						conf.insecurePort = port + 1;
 					});
 					config.registerPlugin(plugin);
+				} else {
+					System.out.println("&bDefinido javalin para modo offline!");
 				}
 				config.http.maxRequestSize = 1000L * 1024L * 1024L;
-			}).start(localhost ? 80 : port);
+			}).start(localhost ? 80 : port+1);
 
 			javalinInstance = javalin;
 
