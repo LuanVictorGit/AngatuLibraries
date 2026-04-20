@@ -362,7 +362,7 @@ public final class JavalinAPI {
      * proteção contra inputs maliciosos e rate limiting em todas as rotas.
      */
     private static void registerSecurityHandler(Javalin javalin) {
-        javalin.unsafe.routes.before(ctx -> {
+        javalin.before(ctx -> {
             String path = ctx.path();
 
             // Redireciona URLs com extensão .html para a versão sem extensão

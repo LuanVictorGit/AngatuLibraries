@@ -36,12 +36,12 @@ public abstract class Route {
 
     public void register() {
         switch (type) {
-            case GET -> app.unsafe.routes.get(path, handler);
-            case POST -> app.unsafe.routes.post(path, handler);
-            case PUT -> app.unsafe.routes.put(path, handler);
-            case DELETE -> app.unsafe.routes.delete(path, handler);
-            case PATCH -> app.unsafe.routes.patch(path, handler);
-            case WS -> app.unsafe.routes.ws(path, wsHandler);
+            case GET -> app.get(path, handler);
+            case POST -> app.post(path, handler);
+            case PUT -> app.put(path, handler);
+            case DELETE -> app.delete(path, handler);
+            case PATCH -> app.patch(path, handler);
+            case WS -> app.ws(path, wsHandler);
         }
 
         System.out.println("&6Rota registrada: [" + type + "] " + path);

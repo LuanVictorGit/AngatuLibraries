@@ -78,7 +78,7 @@
 		<dependency>
 			<groupId>io.javalin</groupId>
 			<artifactId>javalin</artifactId>
-			<version>7.1.0</version>
+			<version>6.7.0</version>
 		</dependency>
 
 		<!-- SLF4J Simple: logger simples para console -->
