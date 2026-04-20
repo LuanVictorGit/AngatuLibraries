@@ -212,7 +212,7 @@ public final class JavalinAPI {
 					System.out.println("&bDefinido javalin para modo offline!");
 				}
 				config.http.maxRequestSize = 1000L * 1024L * 1024L;
-			}).start(localhost ? 80 : port+1);
+			}).start(localhost ? 80 : port);
 
 			javalinInstance = javalin;
 
