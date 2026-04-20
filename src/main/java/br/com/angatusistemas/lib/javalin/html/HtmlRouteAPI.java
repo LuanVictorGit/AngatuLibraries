@@ -129,7 +129,7 @@ public final class HtmlRouteAPI {
 			String routePath = "/" + pageName;
 			String finalFilePath = filePath;
 
-			javalin.get(routePath, ctx -> {
+			javalin.unsafe.routes.get(routePath, ctx -> {
 				try {
 					String clientIp = ctx.ip();
 					Console.debug("Acessando rota [%s] -> %s", clientIp, routePath);

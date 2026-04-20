@@ -172,13 +172,7 @@ public final class JavalinAPI {
 
         try {
             Javalin javalin = Javalin.create(config -> {
-                // CORS: permite qualquer origem
                 config.bundledPlugins.enableCors(cors -> cors.addRule(rule -> rule.anyHost()));
-
-                // Arquivos estáticos — configuração robusta para HTTP e HTTPS
-                // IMPORTANTE: Em modo HTTPS (SslPlugin), o Javalin serve dois servidores
-                // (seguro e inseguro). É necessário registrar os arquivos estáticos
-                // ANTES de iniciar o servidor para que ambos os canais os ensirvam.
                 config.staticFiles.add(sf -> {
                     sf.hostedPath = "/";
                     sf.directory = "/public";
@@ -362,7 +356,7 @@ public final class JavalinAPI {
      * proteção contra inputs maliciosos e rate limiting em todas as rotas.
      */
     private static void registerSecurityHandler(Javalin javalin) {
-        javalin.before(ctx -> {
+        javalin.unsafe.routes.before(ctx -> {
             String path = ctx.path();
 
             // Redireciona URLs com extensão .html para a versão sem extensão
