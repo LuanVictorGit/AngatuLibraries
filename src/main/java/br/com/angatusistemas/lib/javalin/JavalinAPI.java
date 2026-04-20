@@ -73,21 +73,6 @@ public final class JavalinAPI {
 
 	// ==================== HEADERS DE SEGURANÇA ====================
 	private static final Map<String, String> SECURITY_HEADERS = new HashMap<>();
-	static {
-		SECURITY_HEADERS.put("X-Frame-Options", "DENY");
-		SECURITY_HEADERS.put("X-Content-Type-Options", "nosniff");
-		SECURITY_HEADERS.put("X-XSS-Protection", "1; mode=block");
-		SECURITY_HEADERS.put("Referrer-Policy", "strict-origin-when-cross-origin");
-		SECURITY_HEADERS.put("Content-Security-Policy",
-		        "default-src 'self' data: blob:; " +
-		        "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; " +
-		        "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; " +
-		        "img-src * data: blob:; " +
-		        "font-src 'self' https://cdn.jsdelivr.net; " +
-		        "connect-src *;"
-		);
-		SECURITY_HEADERS.put("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
-	}
 
 	private static Javalin javalinInstance;
 	private static boolean initialized = false;
