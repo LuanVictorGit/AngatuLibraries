@@ -1,12 +1,5 @@
 package br.com.angatusistemas.lib.ai;
 
-import br.com.angatusistemas.lib.console.Console;
-import br.com.angatusistemas.lib.env.Env;
-import com.google.gson.Gson;
-import com.google.gson.GsonBuilder;
-import com.google.gson.JsonArray;
-import com.google.gson.JsonObject;
-
 import java.io.BufferedReader;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -17,6 +10,14 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.function.Consumer;
+
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
+
+import br.com.angatusistemas.lib.console.Console;
+import br.com.angatusistemas.lib.env.Env;
 
 /**
  * [PT] Cliente para a API da DeepSeek com suporte a instrução de sistema por

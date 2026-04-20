@@ -35,6 +35,7 @@ import io.javalin.community.ssl.SslPlugin;
 import io.javalin.http.Context;
 import io.javalin.http.HandlerType;
 import io.javalin.http.staticfiles.Location;
+import io.javalin.http.staticfiles.StaticFileConfig;
 
 /**
  * API principal para configuração do servidor Javalin com rate limiting
@@ -177,6 +178,7 @@ public final class JavalinAPI {
                     sf.hostedPath = "/";
                     sf.directory = "/public";
                     sf.location = Location.CLASSPATH;
+                   configureMimeTypes(sf);
                 });
                 
                 config.router.contextPath = "/";
@@ -221,6 +223,58 @@ public final class JavalinAPI {
             Console.error("Falha ao iniciar Javalin", e);
             return null;
         }
+    }
+    
+    private static void configureMimeTypes(StaticFileConfig sf) {
+    	// JavaScript
+        sf.mimeTypes.add("js", "application/javascript");
+        sf.mimeTypes.add("mjs", "application/javascript");
+
+        // CSS
+        sf.mimeTypes.add("css", "text/css");
+
+        // HTML
+        sf.mimeTypes.add("html", "text/html");
+        sf.mimeTypes.add("htm", "text/html");
+
+        // JSON
+        sf.mimeTypes.add("json", "application/json");
+
+        // Imagens
+        sf.mimeTypes.add("png", "image/png");
+        sf.mimeTypes.add("jpg", "image/jpeg");
+        sf.mimeTypes.add("jpeg", "image/jpeg");
+        sf.mimeTypes.add("gif", "image/gif");
+        sf.mimeTypes.add("svg", "image/svg+xml");
+        sf.mimeTypes.add("webp", "image/webp");
+        sf.mimeTypes.add("ico", "image/x-icon");
+
+        // Fontes
+        sf.mimeTypes.add("woff", "font/woff");
+        sf.mimeTypes.add("woff2", "font/woff2");
+        sf.mimeTypes.add("ttf", "font/ttf");
+        sf.mimeTypes.add("otf", "font/otf");
+        sf.mimeTypes.add("eot", "application/vnd.ms-fontobject");
+
+        // Texto
+        sf.mimeTypes.add("txt", "text/plain");
+        sf.mimeTypes.add("xml", "application/xml");
+
+        // PDFs
+        sf.mimeTypes.add("pdf", "application/pdf");
+
+        // Vídeo
+        sf.mimeTypes.add("mp4", "video/mp4");
+        sf.mimeTypes.add("webm", "video/webm");
+
+        // Áudio
+        sf.mimeTypes.add("mp3", "audio/mpeg");
+        sf.mimeTypes.add("wav", "audio/wav");
+        sf.mimeTypes.add("ogg", "audio/ogg");
+
+        // Outros úteis
+        sf.mimeTypes.add("zip", "application/zip");
+        sf.mimeTypes.add("rar", "application/vnd.rar");
     }
 
     /**
