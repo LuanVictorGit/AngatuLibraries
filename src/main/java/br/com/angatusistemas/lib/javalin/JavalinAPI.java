@@ -178,6 +178,10 @@ public final class JavalinAPI {
                     sf.directory = "/public";
                     sf.location = Location.CLASSPATH;
                 });
+                
+                config.router.contextPath = "/";
+                config.router.ignoreTrailingSlashes = true;
+                config.router.treatMultipleSlashesAsSingleSlash = true;
 
                 // Tamanho máximo do body (1 GB)
                 config.http.maxRequestSize = 1_000L * 1_024L * 1_024L;
