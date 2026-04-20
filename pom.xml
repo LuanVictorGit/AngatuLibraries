@@ -88,11 +88,13 @@
 			<version>2.0.17</version>
 		</dependency>
 
-		<!-- SSL Plugin: HTTPS no Javalin -->
+		<!-- Source:
+		https://mvnrepository.com/artifact/io.javalin.community.ssl/javalin-ssl -->
 		<dependency>
 			<groupId>io.javalin.community.ssl</groupId>
-			<artifactId>ssl-plugin</artifactId>
-			<version>6.7.0</version>
+			<artifactId>javalin-ssl</artifactId>
+			<version>7.1.0</version>
+			<scope>compile</scope>
 		</dependency>
 
 		<!-- Source: https://mvnrepository.com/artifact/nl.martijndwars/web-push -->
@@ -124,15 +126,6 @@
 			<groupId>org.apache.httpcomponents</groupId>
 			<artifactId>httpclient</artifactId>
 			<version>4.5.14</version>
-		</dependency>
-
-		<!-- Source:
-		https://mvnrepository.com/artifact/io.javalin.community.ssl/javalin-ssl -->
-		<dependency>
-			<groupId>io.javalin.community.ssl</groupId>
-			<artifactId>javalin-ssl</artifactId>
-			<version>7.1.0</version>
-			<scope>compile</scope>
 		</dependency>
 
 		<!-- Reflections: scan de classes/anotações -->
