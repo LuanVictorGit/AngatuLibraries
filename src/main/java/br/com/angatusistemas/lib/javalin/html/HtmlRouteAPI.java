@@ -5,6 +5,7 @@ import java.util.stream.Collectors;
 
 import br.com.angatusistemas.lib.console.Console;
 import br.com.angatusistemas.lib.javalin.AssetsAPI;
+import br.com.angatusistemas.lib.javalin.IP;
 import br.com.angatusistemas.lib.strings.StringAPI;
 import io.javalin.Javalin;
 
@@ -67,7 +68,7 @@ public final class HtmlRouteAPI {
 
             javalin.unsafe.routes.get(routePath, ctx -> {
                 try {
-                    Console.debug("Acessando [%s] -> %s", ctx.ip(), routePath);
+                    Console.debug("Acessando [%s] -> %s", IP.get(ctx), routePath);
 
                     String baseHtml = null;
                     if (baseTemplatePath != null) {
