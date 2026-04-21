@@ -27,8 +27,6 @@ public class AngatuLib {
 		instance = this;
 		this.addressCertificate = addressCertificate.toLowerCase();
 		System.setOut(new PrintStream(new InterceptorOutputStream(), true));
-		this.printBanner(addressCertificate);
-		
 		this.PATH_FOLDER_CERTS = "/etc/letsencrypt/live/"+addressCertificate;
 		
 		File folderCerts = new File(PATH_FOLDER_CERTS);
@@ -44,6 +42,7 @@ public class AngatuLib {
 		javalin = JavalinAPI.setup(folderCerts, port, localhost, bloqByMaxRequisitions);
 		if (javalin != null) {
 			System.out.println("Javalin configurado com sucesso! -> " + getOriginHost());
+			this.printBanner(addressCertificate);
 		} else {
 			Console.error("Para inicializar o javalin você precisa criar a pasta /public dentro de resources e adicionar o index.html");
 		}
