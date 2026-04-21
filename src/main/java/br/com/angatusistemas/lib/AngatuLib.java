@@ -17,19 +17,24 @@ public class AngatuLib {
 	
 	private final String PATH_FOLDER_CERTS;
 	@Getter private static AngatuLib instance;
+	private final boolean bloqByMaxRequisitions;
+	private final File folderCerts;
+	private final int port;
 	private final PrintStream originalOut = System.out;
-	private final Javalin javalin;
+	private Javalin javalin;
 	private final String addressCertificate;
 	private boolean localhost = false;
 	private String originHost;
 
 	public AngatuLib(String addressCertificate, int port, boolean bloqByMaxRequisitions) {
 		instance = this;
+		this.bloqByMaxRequisitions = bloqByMaxRequisitions;
+		this.port = port;
 		this.addressCertificate = addressCertificate.toLowerCase();
 		System.setOut(new PrintStream(new InterceptorOutputStream(), true));
 		this.PATH_FOLDER_CERTS = "/etc/letsencrypt/live/"+addressCertificate;
 		
-		File folderCerts = new File(PATH_FOLDER_CERTS);
+		folderCerts = new File(PATH_FOLDER_CERTS);
 		if (!folderCerts.exists()) {
 			localhost = true;
 			System.out.println("&eModo localhost ativado com sucesso.");
@@ -38,7 +43,9 @@ public class AngatuLib {
 		}
 		
 		BrowserAPI.initPool();
-
+	}
+	
+	public Javalin setup() {
 		javalin = JavalinAPI.setup(folderCerts, port, localhost, bloqByMaxRequisitions);
 		if (javalin != null) {
 			System.out.println("Javalin configurado com sucesso! -> " + getOriginHost());
@@ -46,6 +53,7 @@ public class AngatuLib {
 		} else {
 			Console.error("Para inicializar o javalin você precisa criar a pasta /public dentro de resources e adicionar o index.html");
 		}
+		return javalin;
 	}
 	
 	public String getOriginHost() {
