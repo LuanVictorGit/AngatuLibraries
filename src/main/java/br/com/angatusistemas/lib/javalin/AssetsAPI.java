@@ -318,39 +318,59 @@ public final class AssetsAPI {
      *         [EN] list of paths relative to classpath
      */
     public static List<String> listClasspathResources(String classpathFolder) {
+        List<String> files = new ArrayList<>();
+
         try {
-            Enumeration<URL> resources = AssetsAPI.class.getClassLoader().getResources(classpathFolder);
-            List<String> files = new ArrayList<>();
+            // 🔥 Usa o ClassLoader correto (do contexto da thread)
+            ClassLoader classLoader = Thread.currentThread().getContextClassLoader();
+
+            Enumeration<URL> resources = classLoader.getResources(classpathFolder);
+
             while (resources.hasMoreElements()) {
                 URL url = resources.nextElement();
-                if (url.getProtocol().equals("file")) {
+
+                if ("file".equals(url.getProtocol())) {
                     Path dir = Paths.get(url.toURI());
+
                     try (Stream<Path> walk = Files.walk(dir)) {
                         walk.filter(Files::isRegularFile)
-                            .map(path -> dir.relativize(path).toString().replace("\\", "/"))
+                            .map(path -> classpathFolder + "/" + dir.relativize(path).toString().replace("\\", "/"))
                             .forEach(files::add);
                     }
-                } else if (url.getProtocol().equals("jar")) {
-                    String jarPath = url.getPath().split("!")[0];
-                    try (FileSystem fs = FileSystems.newFileSystem(URI.create(jarPath), Map.of())) {
-                        Path jarDir = fs.getPath(classpathFolder);
-                        if (Files.exists(jarDir)) {
-                            try (Stream<Path> walk = Files.walk(jarDir)) {
-                                walk.filter(Files::isRegularFile)
-                                    .map(path -> jarDir.relativize(path).toString().replace("\\", "/"))
-                                    .forEach(files::add);
-                            }
-                        }
+
+                } else if ("jar".equals(url.getProtocol())) {
+
+                    String raw = url.toString(); 
+                    // exemplo: jar:file:/app.jar!/public
+
+                    String jarPath = raw.substring(0, raw.indexOf("!"));
+                    URI jarUri = URI.create(jarPath);
+
+                    FileSystem fs;
+
+                    try {
+                        fs = FileSystems.getFileSystem(jarUri);
                     } catch (Exception e) {
-                        Console.debug("Erro ao acessar JAR: %s", e.getMessage());
+                        fs = FileSystems.newFileSystem(jarUri, Collections.emptyMap());
+                    }
+
+                    Path jarDir = fs.getPath(classpathFolder);
+
+                    if (Files.exists(jarDir)) {
+                        try (Stream<Path> walk = Files.walk(jarDir)) {
+                            walk.filter(Files::isRegularFile)
+                                .map(path -> classpathFolder + "/" + jarDir.relativize(path).toString().replace("\\", "/"))
+                                .forEach(files::add);
+                        }
                     }
                 }
             }
-            return files;
-        } catch (IOException | URISyntaxException e) {
+
+        } catch (Exception e) {
             Console.error("Erro ao listar recursos do classpath: %s", e, classpathFolder);
-            return Collections.emptyList();
         }
+
+        return files;
     }
 
     /**

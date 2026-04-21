@@ -21,7 +21,7 @@ public class AngatuLib {
 	private final File folderCerts;
 	private final int port;
 	private final PrintStream originalOut = System.out;
-	private Javalin javalin;
+	private final Javalin javalin;
 	private final String addressCertificate;
 	private boolean localhost = false;
 	private String originHost;
@@ -43,9 +43,7 @@ public class AngatuLib {
 		}
 		
 		BrowserAPI.initPool();
-	}
-	
-	public Javalin setup() {
+		
 		javalin = JavalinAPI.setup(folderCerts, port, localhost, bloqByMaxRequisitions);
 		if (javalin != null) {
 			System.out.println("Javalin configurado com sucesso! -> " + getOriginHost());
@@ -53,7 +51,6 @@ public class AngatuLib {
 		} else {
 			Console.error("Para inicializar o javalin você precisa criar a pasta /public dentro de resources e adicionar o index.html");
 		}
-		return javalin;
 	}
 	
 	public String getOriginHost() {

@@ -116,57 +116,81 @@ public final class HtmlRouteAPI {
 	 */
 	public static void registerAllRoutes(Javalin javalin, String baseTemplatePath, PageProvider pageProvider) {
 
-		List<String> htmlFiles = (pageProvider != null) ? pageProvider.getPages() : getAllHtmlPages();
+	    List<String> htmlFiles = (pageProvider != null) ? pageProvider.getPages() : getAllHtmlPages();
 
-		for (String filePath : htmlFiles) {
-			String pageName = extractPageName(filePath);
+	    if (htmlFiles == null || htmlFiles.isEmpty()) {
+	        Console.error("Nenhum arquivo HTML encontrado para registrar rotas!");
+	        return;
+	    }
 
-			if (IGNORED_PATHS.contains(pageName)) {
-				Console.debug("Página ignorada: " + pageName);
-				continue;
-			}
+	    Console.log("Arquivos HTML encontrados: " + htmlFiles.size());
 
-			String routePath = "/" + pageName;
-			String finalFilePath = filePath;
+	    for (String filePath : htmlFiles) {
 
-			javalin.unsafe.routes.get(routePath, ctx -> {
-				try {
-					String clientIp = ctx.ip();
-					Console.debug("Acessando rota [%s] -> %s", clientIp, routePath);
+	        if (filePath == null || !filePath.endsWith(".html")) continue;
 
-					String baseHtml = null;
-					if (baseTemplatePath != null) {
-						baseHtml = loadContent(baseTemplatePath);
-					}
+	        String pageName = extractPageName(filePath);
 
-					String pageContent = loadContent(finalFilePath);
-					if (pageContent == null) {
-						ctx.status(404).result("Página não encontrada: " + finalFilePath);
-						return;
-					}
+	        // Ignorar template base (ex: index.html)
+	        if (baseTemplatePath != null && filePath.equalsIgnoreCase(baseTemplatePath)) {
+	            Console.debug("Template base ignorado como rota: " + filePath);
+	            continue;
+	        }
 
-					String renderedHtml;
-					if (baseHtml != null) {
-						renderedHtml = baseHtml.replace("{page}", StringAPI.capitalize(pageName)).replace("{content}",pageContent);
-						for (String otherPage : htmlFiles) {
-							String otherName = extractPageName(otherPage);
-							renderedHtml = renderedHtml.replace("{%" + otherName + "_active}",
-									pageName.equals(otherName) ? "bg-blue-600 text-white" : "");
-						}
-					} else {
-						renderedHtml = pageContent;
-					}
+	        if (IGNORED_PATHS.contains(pageName)) {
+	            Console.debug("Página ignorada: " + pageName);
+	            continue;
+	        }
 
-					ctx.html(renderedHtml).status(200);
+	        // Rota especial: index vira "/"
+	        String routePath = pageName.equalsIgnoreCase("index") ? "/" : "/" + pageName;
+	        String finalFilePath = filePath;
 
-				} catch (Exception e) {
-					Console.error("Erro ao processar rota: " + routePath, e);
-					ctx.result("Não foi possível acessar esta página!").status(500);
-				}
-			});
+	        javalin.unsafe.routes.get(routePath, ctx -> {
+	            try {
+	                String clientIp = ctx.ip();
+	                Console.debug("Acessando rota [%s] -> %s", clientIp, routePath);
 
-			Console.log("Rota [%s] registrada com sucesso!", routePath);
-		}
+	                String baseHtml = null;
+	                if (baseTemplatePath != null) {
+	                    baseHtml = loadContent(baseTemplatePath);
+	                }
+
+	                String pageContent = loadContent(finalFilePath);
+	                if (pageContent == null) {
+	                    ctx.status(404).result("Página não encontrada: " + finalFilePath);
+	                    return;
+	                }
+
+	                String renderedHtml;
+
+	                if (baseHtml != null) {
+	                    renderedHtml = baseHtml
+	                            .replace("{page}", StringAPI.capitalize(pageName))
+	                            .replace("{content}", pageContent);
+
+	                    for (String otherPage : htmlFiles) {
+	                        String otherName = extractPageName(otherPage);
+	                        renderedHtml = renderedHtml.replace(
+	                                "{%" + otherName + "_active}",
+	                                pageName.equals(otherName) ? "bg-blue-600 text-white" : ""
+	                        );
+	                    }
+	                } else {
+	                    renderedHtml = pageContent;
+	                }
+
+	                ctx.contentType("text/html");
+	                ctx.result(renderedHtml).status(200);
+
+	            } catch (Exception e) {
+	                Console.error("Erro ao processar rota: " + routePath, e);
+	                ctx.result("Não foi possível acessar esta página!").status(500);
+	            }
+	        });
+
+	        Console.log("Rota [%s] registrada com sucesso! (arquivo: %s)", routePath, filePath);
+	    }
 	}
 
 	/**
