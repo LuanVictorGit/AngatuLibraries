@@ -7,7 +7,6 @@ import br.com.angatusistemas.lib.browser.BrowserAPI;
 import br.com.angatusistemas.lib.console.Console;
 import br.com.angatusistemas.lib.console.InterceptorOutputStream;
 import br.com.angatusistemas.lib.javalin.JavalinAPI;
-import br.com.angatusistemas.lib.task.Task;
 import io.javalin.Javalin;
 import lombok.Getter;
 import lombok.Setter;
@@ -40,7 +39,7 @@ public class AngatuLib {
 			System.out.println("pasta dos certificados configurados com sucesso.");
 		}
 		
-		Task.runAsync(BrowserAPI::initPool);
+		BrowserAPI.initPool();
 
 		javalin = JavalinAPI.setup(folderCerts, port, localhost, bloqByMaxRequisitions);
 		if (javalin != null) {
