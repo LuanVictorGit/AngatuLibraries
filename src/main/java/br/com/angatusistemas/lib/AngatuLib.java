@@ -7,6 +7,7 @@ import br.com.angatusistemas.lib.browser.BrowserAPI;
 import br.com.angatusistemas.lib.console.Console;
 import br.com.angatusistemas.lib.console.InterceptorOutputStream;
 import br.com.angatusistemas.lib.javalin.JavalinAPI;
+import br.com.angatusistemas.lib.javalin.html.HtmlRouteAPI;
 import io.javalin.Javalin;
 import lombok.Getter;
 import lombok.Setter;
@@ -46,6 +47,7 @@ public class AngatuLib {
 		
 		javalin = JavalinAPI.setup(folderCerts, port, localhost, bloqByMaxRequisitions);
 		if (javalin != null) {
+			HtmlRouteAPI.registerAllRoutes(javalin);
 			System.out.println("Javalin configurado com sucesso! -> " + getOriginHost());
 			this.printBanner(addressCertificate);
 		} else {

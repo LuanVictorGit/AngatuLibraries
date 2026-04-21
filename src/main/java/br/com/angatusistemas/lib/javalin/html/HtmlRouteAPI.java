@@ -224,13 +224,32 @@ public final class HtmlRouteAPI {
 	 * (e.g., "/about.html" -> "about").
 	 */
 	public static String extractPageName(String filePath) {
-		if (filePath == null)
-			return "";
-		String fileName = filePath.contains("/") ? filePath.substring(filePath.lastIndexOf('/') + 1) : filePath;
-		if (fileName.contains(".")) {
-			fileName = fileName.substring(0, fileName.lastIndexOf('.'));
-		}
-		return fileName.toLowerCase();
+	    if (filePath == null || filePath.isEmpty())
+	        return "";
+
+	    filePath = filePath.replace("\\", "/");
+
+	    if (filePath.startsWith("//")) {
+	        filePath = filePath.substring(1);
+	    }
+
+	    while (filePath.contains("//")) {
+	        filePath = filePath.replace("//", "/");
+	    }
+
+	    if (filePath.endsWith("/")) {
+	        filePath = filePath.substring(0, filePath.length() - 1);
+	    }
+
+	    String fileName = filePath.contains("/")
+	            ? filePath.substring(filePath.lastIndexOf('/') + 1)
+	            : filePath;
+
+	    if (fileName.contains(".")) {
+	        fileName = fileName.substring(0, fileName.lastIndexOf('.'));
+	    }
+
+	    return fileName.toLowerCase();
 	}
 
 }
