@@ -52,6 +52,7 @@ public final class WebPushAPI {
 	private static PushService pushService;
 	private static boolean initialized = false;
 	private static String vapidPublicKey;
+	private static String vapidPrivateKey;
 
 	private WebPushAPI() {
 		throw new UnsupportedOperationException("Utility class cannot be instantiated");
@@ -63,7 +64,6 @@ public final class WebPushAPI {
 		if (initialized) return true;
 
 		try {
-			
 			Key key = Saveable.findById(Key.class, "key");
 			
 			String pubKey = key.getPublicKey();
@@ -88,21 +88,56 @@ public final class WebPushAPI {
 
 	private static boolean initializeInternal(String publicKey, String privateKey, String subject) {
 		try {
+			// Remover padding e quebras de linha das chaves
+			publicKey = cleanBase64Key(publicKey);
+			privateKey = cleanBase64Key(privateKey);
+			
+			// Validar formato das chaves
+			if (!isValidBase64Url(publicKey) || !isValidBase64Url(privateKey)) {
+				Console.error("Chaves VAPID em formato inválido. Use WebPushAPI.generateVapidKeys() para gerar chaves corretas.");
+				return false;
+			}
+			
+			// Criar instância do PushService com as chaves
 			pushService = new PushService(publicKey, privateKey, subject);
+			
 			vapidPublicKey = publicKey;
+			vapidPrivateKey = privateKey;
 			initialized = true;
+			
 			Console.log("WebPushAPI inicializado com sucesso. Subject: {}", subject);
+			Console.debug("Public Key (primeiros 20 chars): {}", 
+				vapidPublicKey.substring(0, Math.min(20, vapidPublicKey.length())));
+			
 			return true;
 		} catch (Exception e) {
 			Console.error("Falha ao inicializar WebPushAPI: {}", e);
 			initialized = false;
+			pushService = null;
 			return false;
 		}
+	}
+	
+	private static String cleanBase64Key(String key) {
+		if (key == null) return null;
+		// Remove padding, quebras de linha e espaços
+		return key.replace("=", "")
+				  .replace("\n", "")
+				  .replace("\r", "")
+				  .replace(" ", "")
+				  .trim();
+	}
+	
+	private static boolean isValidBase64Url(String key) {
+		if (key == null || key.isEmpty()) return false;
+		// Deve conter apenas caracteres Base64URL (A-Z, a-z, 0-9, -, _)
+		return key.matches("^[A-Za-z0-9_-]+$");
 	}
 
 	public static synchronized void reset() {
 		pushService = null;
 		vapidPublicKey = null;
+		vapidPrivateKey = null;
 		initialized = false;
 		Console.debug("WebPushAPI resetado");
 	}
@@ -116,6 +151,7 @@ public final class WebPushAPI {
 	}
 
 	// ==================== GERAÇÃO DE CHAVES VAPID ====================
+	
 	public static VapidKeys generateVapidKeys() {
 	    try {
 	        KeyPairGenerator kpg = KeyPairGenerator.getInstance("EC");
@@ -137,13 +173,14 @@ public final class WebPushAPI {
 	        ECPrivateKey priv = (ECPrivateKey) kp.getPrivate();
 	        byte[] privBytes = to32(priv.getS().toByteArray());
 
+	        // IMPORTANTE: SEM PADDING (withoutPadding())
 	        String pubKey = Base64.getUrlEncoder().withoutPadding().encodeToString(pubBytes);
 	        String privKey = Base64.getUrlEncoder().withoutPadding().encodeToString(privBytes);
 
 	        return new VapidKeys(pubKey, privKey);
 
 	    } catch (Exception e) {
-	        throw new RuntimeException(e);
+	        throw new RuntimeException("Erro ao gerar chaves VAPID", e);
 	    }
 	}
 
@@ -159,6 +196,33 @@ public final class WebPushAPI {
 	    }
 
 	    return dst;
+	}
+	
+	// ==================== MÉTODO AUXILIAR PARA TESTE ====================
+	
+	public static boolean testConfiguration() {
+		if (!initialized) {
+			Console.error("WebPushAPI não está inicializado");
+			return false;
+		}
+		
+		Console.log("=== TESTE DE CONFIGURAÇÃO WebPushAPI ===");
+		Console.log("Initialized: {}", initialized);
+		Console.log("Public Key length: {}", vapidPublicKey != null ? vapidPublicKey.length() : "null");
+		Console.log("Private Key length: {}", vapidPrivateKey != null ? vapidPrivateKey.length() : "null");
+		
+		// Verificar formato da chave pública
+		if (vapidPublicKey != null && !vapidPublicKey.isEmpty()) {
+			boolean validFormat = vapidPublicKey.matches("^[A-Za-z0-9_-]+$");
+			Console.log("Public Key format valid: {}", validFormat);
+			Console.log("Public Key (primeiros 20): {}", 
+				vapidPublicKey.substring(0, Math.min(20, vapidPublicKey.length())));
+		}
+		
+		Console.log("PushService instance: {}", pushService != null ? "OK" : "NULL");
+		Console.log("=========================================");
+		
+		return vapidPublicKey != null && vapidPrivateKey != null && pushService != null;
 	}
 
 	// ==================== ENVIO DE NOTIFICAÇÕES ====================
@@ -239,8 +303,14 @@ public final class WebPushAPI {
 	        Urgency urgency) {
 
 	    CompletableFuture<SendResult> future = new CompletableFuture<>();
+	    
 	    Task.runAsync(() -> {
 	        try {
+	            // Log da tentativa de envio
+	            Console.debug("Enviando notificação para endpoint: {}", 
+	                truncateEndpoint(subscription.endpoint));
+	            
+	            // Criar notificação
 	            Notification notification = new Notification(
 	                    subscription.endpoint,
 	                    subscription.keys.p256dh,
@@ -249,6 +319,7 @@ public final class WebPushAPI {
 	                    ttl
 	            );
 
+	            // Enviar a notificação
 	            HttpResponse response = pushService.send(notification);
 
 	            int statusCode = response.getStatusLine().getStatusCode();
@@ -264,59 +335,69 @@ public final class WebPushAPI {
 	                }
 	            }
 
-	            // Header opcional
+	            // Header opcional Retry-After
 	            String retryAfter = null;
 	            if (response.getFirstHeader("Retry-After") != null) {
 	                retryAfter = response.getFirstHeader("Retry-After").getValue();
 	            }
 
-	            String baseLog =
-	                    "Status: " + statusCode +
+	            String baseLog = "Status: " + statusCode +
 	                    " | Reason: " + reason +
 	                    " | Body: " + responseBody +
 	                    " | Retry-After: " + retryAfter;
 
 	            if (statusCode >= 200 && statusCode < 300) {
-
-	                Console.debug("Notificação enviada com sucesso | " + baseLog +
-	                        " | Endpoint: " + subscription.endpoint);
-
+	                // Sucesso
+	                Console.debug("Notificação enviada com sucesso | {} | Endpoint: {}", 
+	                    baseLog, truncateEndpoint(subscription.endpoint));
 	                future.complete(SendResult.success(statusCode));
 
 	            } else if (statusCode == 410 || statusCode == 404) {
-
+	                // Assinatura expirada/inválida
 	                String msg = "Assinatura inválida/expirada (HTTP " + statusCode + ")";
-
-	                Console.warn(msg +
-	                        " | " + baseLog +
-	                        " | Subscription: " + GsonAPI.get().toJson(subscription));
-
+	                Console.warn("{} | {} | Subscription: {}", 
+	                    msg, baseLog, GsonAPI.get().toJson(subscription));
 	                future.complete(SendResult.expired(statusCode, msg + " | " + reason));
 
+	            } else if (statusCode == 403) {
+	                // Erro de autenticação/permissão
+	                String msg = "Erro de autenticação/permissão (HTTP 403)";
+	                Console.error("{} | {}", msg, baseLog);
+	                
+	                // Diagnóstico específico para erro de crypto-key
+	                if (responseBody != null && responseBody.contains("crypto-key header")) {
+	                    Console.error("CAUSA: Formato inválido do header Crypto-Key");
+	                    Console.error("SOLUÇÃO: Verifique se as chaves VAPID foram geradas com WebPushAPI.generateVapidKeys()");
+	                    Console.error("Chave pública atual (primeiros 30 chars): {}", 
+	                        vapidPublicKey != null ? vapidPublicKey.substring(0, Math.min(30, vapidPublicKey.length())) : "null");
+	                    Console.error("Tamanho da chave pública: {}", vapidPublicKey != null ? vapidPublicKey.length() : 0);
+	                }
+	                
+	                future.complete(SendResult.failure(statusCode, msg + " | " + reason));
+
 	            } else {
-
+	                // Outros erros
 	                String msg = "Falha ao enviar notificação (HTTP " + statusCode + ")";
-
-	                Console.error(msg +
-	                        " | " + baseLog +
-	                        " | Subscription: " + GsonAPI.get().toJson(subscription));
-
+	                Console.error("{} | {} | Subscription: {}", 
+	                    msg, baseLog, GsonAPI.get().toJson(subscription));
 	                future.complete(SendResult.failure(statusCode, msg + " | " + reason));
 	            }
 
 	        } catch (Exception e) {
-
-	            Console.error("Exceção ao enviar notificação | Subscription: "
-	                    + GsonAPI.get().toJson(subscription)
-	                    + " | Erro: " + e.toString());
-
+	            Console.error("Exceção ao enviar notificação | Subscription: {} | Erro: {}", 
+	                GsonAPI.get().toJson(subscription), e.toString());
 	            e.printStackTrace();
-
 	            future.completeExceptionally(e);
 	        }
 	    });
 
 	    return future;
+	}
+	
+	private static String truncateEndpoint(String endpoint) {
+		if (endpoint == null) return "null";
+		if (endpoint.length() <= 60) return endpoint;
+		return endpoint.substring(0, 30) + "..." + endpoint.substring(endpoint.length() - 30);
 	}
 
 	private static String buildPayload(String title, String body, String iconUrl, String clickUrl,
