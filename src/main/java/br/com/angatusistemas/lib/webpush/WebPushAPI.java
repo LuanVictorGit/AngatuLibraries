@@ -35,7 +35,6 @@ import br.com.angatusistemas.lib.console.Console;
 import br.com.angatusistemas.lib.gson.GsonAPI;
 import br.com.angatusistemas.lib.task.Task;
 import nl.martijndwars.webpush.Notification;
-import nl.martijndwars.webpush.Notification.NotificationBuilder;
 import nl.martijndwars.webpush.PushService;
 import nl.martijndwars.webpush.Subscription;
 
@@ -255,14 +254,14 @@ public final class WebPushAPI {
 			// A biblioteca webpush-java (Utils.loadPublicKey) exige este formato.
 			// getEncoded() retorna DER/ASN.1 (começa com 0x30) e causa
 			// "Invalid point encoding 0x30".
-			org.bouncycastle.jce.interfaces.ECPublicKey bcPublicKey =
-				(org.bouncycastle.jce.interfaces.ECPublicKey) publicKey;
+			org.bouncycastle.jce.interfaces.ECPublicKey bcPublicKey = (org.bouncycastle.jce.interfaces.ECPublicKey) publicKey;
 			byte[] publicKeyBytes = bcPublicKey.getQ().getEncoded(false); // false = uncompressed
 
 			// Chave privada: apenas o valor escalar S (32 bytes big-endian)
 			// getEncoded() retorna PKCS#8 DER — formato errado para webpush-java.
 			byte[] sBytes = privateKey.getS().toByteArray();
-			// toByteArray() pode incluir byte de sinal 0x00 no início; normaliza para 32 bytes
+			// toByteArray() pode incluir byte de sinal 0x00 no início; normaliza para 32
+			// bytes
 			byte[] privateKeyBytes = new byte[32];
 			if (sBytes.length >= 32) {
 				System.arraycopy(sBytes, sBytes.length - 32, privateKeyBytes, 0, 32);
@@ -270,7 +269,7 @@ public final class WebPushAPI {
 				System.arraycopy(sBytes, 0, privateKeyBytes, 32 - sBytes.length, sBytes.length);
 			}
 
-			String publicKeyBase64  = Base64.getUrlEncoder().withoutPadding().encodeToString(publicKeyBytes);
+			String publicKeyBase64 = Base64.getUrlEncoder().withoutPadding().encodeToString(publicKeyBytes);
 			String privateKeyBase64 = Base64.getUrlEncoder().withoutPadding().encodeToString(privateKeyBytes);
 
 			Console.debug("Chaves VAPID geradas com sucesso");
@@ -504,22 +503,20 @@ public final class WebPushAPI {
 	}
 
 	// ==================== IMPLEMENTAÇÃO INTERNA ====================
-
 	private static CompletableFuture<SendResult> doSendAsync(Subscription subscription, String payload, int ttl,
 			Urgency urgency) {
 		CompletableFuture<SendResult> future = new CompletableFuture<>();
 
 		Task.runAsync(() -> {
 			try {
-				// Usar o construtor correto: Notification(Subscription, String, Urgency)
-				nl.martijndwars.webpush.Urgency libUrgency = nl.martijndwars.webpush.Urgency.valueOf(urgency.name());
 
-				Notification notification = new Notification(subscription, payload, libUrgency);
-
-				@SuppressWarnings("static-access")
-				NotificationBuilder builder = notification.builder();
-				builder.ttl(ttl);
-				notification = builder.build();
+				// Notification(String, String, String, byte[], int)
+				Notification notification = new Notification(
+						subscription.endpoint, 
+						subscription.keys.p256dh,
+						subscription.keys.auth, 
+						payload.getBytes(StandardCharsets.UTF_8), 
+						ttl);
 
 				HttpResponse response = pushService.send(notification);
 				int statusCode = response.getStatusLine().getStatusCode();
@@ -528,7 +525,6 @@ public final class WebPushAPI {
 					Console.debug("Notificação enviada. Status: {} | Endpoint: {}", statusCode, subscription.endpoint);
 					future.complete(SendResult.success(statusCode));
 				} else if (statusCode == 410 || statusCode == 404) {
-					// Assinatura expirada/inválida — deve ser removida do banco de dados
 					String msg = "Assinatura inválida/expirada (HTTP " + statusCode + "). Remova do banco.";
 					Console.warn(msg + " Endpoint: {}", subscription.endpoint);
 					future.complete(SendResult.expired(statusCode, msg));
@@ -538,7 +534,8 @@ public final class WebPushAPI {
 					future.complete(SendResult.failure(statusCode, msg));
 				}
 			} catch (Exception e) {
-				Console.error("Exceção ao enviar notificação para "+GsonAPI.get().toJson(subscription)+ " -> " + e.getMessage());
+				Console.error("Exceção ao enviar notificação para " + GsonAPI.get().toJson(subscription) + " -> "
+						+ e.getMessage());
 				future.completeExceptionally(e);
 			}
 		});
