@@ -32,6 +32,7 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
 import br.com.angatusistemas.lib.console.Console;
+import br.com.angatusistemas.lib.env.Env;
 import br.com.angatusistemas.lib.gson.GsonAPI;
 import br.com.angatusistemas.lib.task.Task;
 import nl.martijndwars.webpush.Notification;
@@ -509,11 +510,11 @@ public final class WebPushAPI {
 
 		Task.runAsync(() -> {
 			try {
-
-				// Notification(String, String, String, byte[], int)
+				
+				String key = Env.get().get("VAPID_PUBLIC_KEY");
 				Notification notification = new Notification(
 						subscription.endpoint, 
-						subscription.keys.p256dh,
+						key,
 						subscription.keys.auth, 
 						payload.getBytes(StandardCharsets.UTF_8), 
 						ttl);
@@ -530,7 +531,7 @@ public final class WebPushAPI {
 					future.complete(SendResult.expired(statusCode, msg));
 				} else {
 					String msg = "Falha ao enviar notificação. HTTP " + statusCode;
-					Console.error(msg + " | Endpoint: {}", subscription.endpoint);
+					Console.error(msg + " | Endpoint: "+subscription.endpoint);
 					future.complete(SendResult.failure(statusCode, msg));
 				}
 			} catch (Exception e) {
