@@ -13,41 +13,29 @@ import br.com.angatusistemas.lib.time.DataTime;
  * Exemplos de uso:
  * <pre>
  * Console.log("Servidor iniciado");
+ * Console.log("Valor: %s", "teste");
+ * Console.log("Mensagem: ", "texto1", "texto2", "texto3");
  * Console.info("Usuário logado: %s", username);
  * Console.warn("Disco quase cheio: %d%% usado", percent);
  * Console.error("Falha na conexão", exception);
- * Console.debug("Valor recebido: " + valor);
+ * Console.error("Erro: ", "asdada");
+ * Console.error("Erro: %s | Código: %d", "mensagem", 500);
+ * Console.debug("Valor recebido: %s", valor);
  * </pre>
  * </p>
  *
  * [EN] Utility class for console logging with ANSI color support and date/time formatting.
- * <p>
- * Wraps the system's original output (managed by {@link AngatuLib}) and applies visual styles
- * via {@link AnsiColor}. Date/time is obtained from {@link DataTime#getData()}.
- * </p>
- * <p>
- * Usage examples:
- * <pre>
- * Console.log("Server started");
- * Console.info("User logged in: %s", username);
- * Console.warn("Disk almost full: %d%% used", percent);
- * Console.error("Connection failed", exception);
- * Console.debug("Received value: " + value);
- * </pre>
- * </p>
  *
- * @author [Sua equipe]
+ * @author Sua equipe
  * @see AnsiColor
  * @see DataTime
  */
 public final class Console {
 
     // Formato base do log: [data/hora] mensagem
-    // Base log format: [date/time] message
     private static final String LOG_PATTERN = "&6[%s] &7%s";
 
     // Instância do AngatuLib para acesso ao output original
-    // AngatuLib instance to access original output
     private static final AngatuLib ANGATU_LIB = AngatuLib.getInstance();
 
     private Console() {
@@ -55,21 +43,14 @@ public final class Console {
     }
 
     // ==================== MÉTODOS PRINCIPAIS ====================
-    // ==================== CORE METHODS ====================
 
     /**
      * [PT] Registra uma mensagem genérica no console (nível padrão).
-     * <p>
-     * A mensagem é convertida para minúsculas e exibida com timestamp e cor neutra.
-     * </p>
      *
      * [EN] Logs a generic message to the console (default level).
-     * <p>
-     * The message is converted to lowercase and displayed with timestamp and neutral color.
-     * </p>
      *
-     * @param obj [PT] objeto a ser logado (qualquer tipo, será convertido via {@link String#valueOf})
-     *            [EN] object to log (any type, will be converted via {@link String#valueOf})
+     * @param obj [PT] objeto a ser logado
+     *            [EN] object to log
      */
     public static void log(Object obj) {
         String formatted = formatLogMessage(obj);
@@ -78,16 +59,23 @@ public final class Console {
 
     /**
      * [PT] Registra uma mensagem formatada (como {@code printf}) no nível genérico.
+     * <p>
+     * Suporta múltiplos argumentos e concatenação automática quando não há formato.
+     * </p>
      *
      * [EN] Logs a formatted message (like {@code printf}) at generic level.
+     * <p>
+     * Supports multiple arguments and automatic concatenation when no format is present.
+     * </p>
      *
-     * @param format [PT] string de formato (ex: "Usuário: %s")
-     *               [EN] format string (e.g., "User: %s")
-     * @param args   [PT] argumentos para formatação
-     *               [EN] arguments for formatting
+     * @param format [PT] string de formato ou mensagem base
+     *               [EN] format string or base message
+     * @param args   [PT] argumentos para formatação ou concatenação
+     *               [EN] arguments for formatting or concatenation
      */
     public static void log(String format, Object... args) {
-        log(String.format(format, args));
+        String message = processMessage(format, args);
+        log(message);
     }
 
     /**
@@ -107,13 +95,14 @@ public final class Console {
      *
      * [EN] Logs a formatted info message.
      *
-     * @param format [PT] string de formato
-     *               [EN] format string
-     * @param args   [PT] argumentos
-     *               [EN] arguments
+     * @param format [PT] string de formato ou mensagem base
+     *               [EN] format string or base message
+     * @param args   [PT] argumentos para formatação ou concatenação
+     *               [EN] arguments for formatting or concatenation
      */
     public static void info(String format, Object... args) {
-        info(String.format(format, args));
+        String message = processMessage(format, args);
+        info(message);
     }
 
     /**
@@ -133,13 +122,14 @@ public final class Console {
      *
      * [EN] Logs a formatted warning.
      *
-     * @param format [PT] string de formato
-     *               [EN] format string
-     * @param args   [PT] argumentos
-     *               [EN] arguments
+     * @param format [PT] string de formato ou mensagem base
+     *               [EN] format string or base message
+     * @param args   [PT] argumentos para formatação ou concatenação
+     *               [EN] arguments for formatting or concatenation
      */
     public static void warn(String format, Object... args) {
-        warn(String.format(format, args));
+        String message = processMessage(format, args);
+        warn(message);
     }
 
     /**
@@ -166,9 +156,6 @@ public final class Console {
         String coloredPattern = String.format("&c[%s] &7%s", timestamp, message);
         ANGATU_LIB.getOriginalOut().println(AnsiColor.parse(coloredPattern));
         
-        // Log de argumentos adicionais se fornecidos via varargs no error(String, Object...)
-        // Nota: Este método não tem acesso aos varargs, apenas ao obj e t
-        
         // Log da stack trace se houver exceção
         if (t != null) {
             t.printStackTrace(ANGATU_LIB.getOriginalOut());
@@ -189,46 +176,47 @@ public final class Console {
 
     /**
      * [PT] Registra um erro formatado com múltiplos argumentos.
+     * <p>
+     * Suporta múltiplos argumentos e concatenação automática quando não há formato.
+     * Se o último argumento for uma Throwable, ela é tratada como exceção.
+     * </p>
      *
      * [EN] Logs a formatted error with multiple arguments.
+     * <p>
+     * Supports multiple arguments and automatic concatenation when no format is present.
+     * If the last argument is a Throwable, it is treated as an exception.
+     * </p>
      *
-     * @param format [PT] string de formato
-     *               [EN] format string
-     * @param args   [PT] argumentos para formatação
-     *               [EN] arguments for formatting
+     * @param format [PT] string de formato ou mensagem base
+     *               [EN] format string or base message
+     * @param args   [PT] argumentos para formatação ou concatenação
+     *               [EN] arguments for formatting or concatenation
      */
     public static void error(String format, Object... args) {
-        String formattedMessage = String.format(format, args);
-        
         // Verifica se o último argumento é uma Throwable
         Throwable throwable = null;
+        Object[] actualArgs = args;
+        
         if (args.length > 0 && args[args.length - 1] instanceof Throwable) {
             throwable = (Throwable) args[args.length - 1];
-            // Se o último argumento é uma exceção, precisamos formatar sem ele
-            if (args.length > 1) {
-                Object[] newArgs = new Object[args.length - 1];
-                System.arraycopy(args, 0, newArgs, 0, args.length - 1);
-                formattedMessage = String.format(format, newArgs);
-            } else {
-                // Se só tem a exceção, a mensagem é a própria exceção
-                formattedMessage = format;
-            }
+            // Remove a exceção dos argumentos
+            actualArgs = new Object[args.length - 1];
+            System.arraycopy(args, 0, actualArgs, 0, args.length - 1);
         }
         
-        error(formattedMessage, throwable);
+        String message = processMessage(format, actualArgs);
+        error(message, throwable);
     }
 
     /**
      * [PT] Registra uma mensagem de depuração (nível DEBUG) com cor cinza.
      * <p>
      * Por padrão, essas mensagens não são exibidas a menos que a flag de debug esteja ativa.
-     * Para ativar, defina a propriedade {@code angatu.debug=true} ou configure via {@link #setDebugEnabled(boolean)}.
      * </p>
      *
      * [EN] Logs a debug message (DEBUG level) with gray color.
      * <p>
      * By default, these messages are not shown unless the debug flag is enabled.
-     * To enable, set the system property {@code angatu.debug=true} or use {@link #setDebugEnabled(boolean)}.
      * </p>
      *
      * @param obj [PT] objeto a ser logado
@@ -245,19 +233,19 @@ public final class Console {
      *
      * [EN] Logs a formatted debug message.
      *
-     * @param format [PT] string de formato
-     *               [EN] format string
-     * @param args   [PT] argumentos
-     *               [EN] arguments
+     * @param format [PT] string de formato ou mensagem base
+     *               [EN] format string or base message
+     * @param args   [PT] argumentos para formatação ou concatenação
+     *               [EN] arguments for formatting or concatenation
      */
     public static void debug(String format, Object... args) {
         if (isDebugEnabled()) {
-            debug(String.format(format, args));
+            String message = processMessage(format, args);
+            debug(message);
         }
     }
 
     // ==================== MÉTODOS DE CONTROLE DE DEBUG ====================
-    // ==================== DEBUG CONTROL METHODS ====================
 
     private static boolean debugEnabled = Boolean.parseBoolean(System.getProperty("angatu.debug", "false"));
 
@@ -284,11 +272,73 @@ public final class Console {
     }
 
     // ==================== MÉTODOS PRIVADOS AUXILIARES ====================
-    // ==================== PRIVATE HELPER METHODS ====================
 
     /**
-     * [PT] Formata a mensagem de log com timestamp e remove espaços da data.
-     * [EN] Formats log message with timestamp and removes spaces from date.
+     * [PT] Processa a mensagem tratando formatação e múltiplos argumentos.
+     * <p>
+     * Regras:
+     * <ul>
+     *   <li>Se não houver argumentos, retorna o format como está</li>
+     *   <li>Se format contiver % (placeholder de formatação), usa String.format</li>
+     *   <li>Se não houver placeholders, concatena todos os argumentos</li>
+     * </ul>
+     * </p>
+     *
+     * [EN] Processes the message handling formatting and multiple arguments.
+     * <p>
+     * Rules:
+     * <ul>
+     *   <li>If no arguments, returns format as is</li>
+     *   <li>If format contains % (format placeholder), uses String.format</li>
+     *   <li>If no placeholders, concatenates all arguments</li>
+     * </ul>
+     * </p>
+     *
+     * @param format [PT] string de formato ou mensagem base
+     *               [EN] format string or base message
+     * @param args   [PT] argumentos para processamento
+     *               [EN] arguments for processing
+     * @return [PT] mensagem processada
+     *         [EN] processed message
+     */
+    private static String processMessage(String format, Object... args) {
+        // Caso 1: Sem argumentos
+        if (args == null || args.length == 0) {
+            return format;
+        }
+        
+        // Caso 2: Verifica se é uma string de formato (contém %)
+        boolean hasFormatPlaceholder = format.contains("%");
+        
+        if (hasFormatPlaceholder) {
+            try {
+                // Tenta formatar com os argumentos
+                return String.format(format, args);
+            } catch (Exception e) {
+                // Se falhar, faz concatenação simples
+                StringBuilder sb = new StringBuilder(format);
+                for (Object arg : args) {
+                    sb.append(" ").append(arg);
+                }
+                return sb.toString();
+            }
+        }
+        
+        // Caso 3: Sem placeholders, concatena todos os argumentos
+        StringBuilder result = new StringBuilder(format);
+        for (Object arg : args) {
+            if (result.length() > 0 && !format.endsWith(" ")) {
+                result.append(" ");
+            }
+            result.append(arg);
+        }
+        
+        return result.toString();
+    }
+
+    /**
+     * [PT] Formata a mensagem de log com timestamp.
+     * [EN] Formats log message with timestamp.
      *
      * @param obj [PT] objeto a ser logado
      *            [EN] object to log
