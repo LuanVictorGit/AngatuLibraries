@@ -118,63 +118,44 @@ public final class WebPushAPI {
 	// ==================== GERAÇÃO DE CHAVES VAPID ====================
 	public static VapidKeys generateVapidKeys() {
 	    try {
-	        KeyPairGenerator keyPairGen = KeyPairGenerator.getInstance("EC");
-	        keyPairGen.initialize(new ECGenParameterSpec("secp256r1")); // P-256
+	        KeyPairGenerator kpg = KeyPairGenerator.getInstance("EC");
+	        kpg.initialize(new ECGenParameterSpec("secp256r1"));
 
-	        KeyPair keyPair = keyPairGen.generateKeyPair();
+	        KeyPair kp = kpg.generateKeyPair();
 
-	        // ===== PUBLIC KEY (65 bytes: 0x04 + X + Y) =====
-	        ECPublicKey publicKey = (ECPublicKey) keyPair.getPublic();
-	        ECPoint point = publicKey.getW();
+	        ECPublicKey pub = (ECPublicKey) kp.getPublic();
+	        ECPoint point = pub.getW();
 
-	        byte[] x = toUnsignedBytes(point.getAffineX(), 32);
-	        byte[] y = toUnsignedBytes(point.getAffineY(), 32);
+	        byte[] x = to32(point.getAffineX().toByteArray());
+	        byte[] y = to32(point.getAffineY().toByteArray());
 
-	        byte[] publicKeyBytes = new byte[65];
-	        publicKeyBytes[0] = 0x04; // uncompressed
-	        System.arraycopy(x, 0, publicKeyBytes, 1, 32);
-	        System.arraycopy(y, 0, publicKeyBytes, 33, 32);
+	        byte[] pubBytes = new byte[65];
+	        pubBytes[0] = 0x04;
+	        System.arraycopy(x, 0, pubBytes, 1, 32);
+	        System.arraycopy(y, 0, pubBytes, 33, 32);
 
-	        // ===== PRIVATE KEY (32 bytes fixos) =====
-	        ECPrivateKey privateKey = (ECPrivateKey) keyPair.getPrivate();
-	        byte[] privateKeyBytes = toUnsignedBytes(privateKey.getS(), 32);
+	        ECPrivateKey priv = (ECPrivateKey) kp.getPrivate();
+	        byte[] privBytes = to32(priv.getS().toByteArray());
 
-	        // ===== BASE64 URL (sem padding) =====
-	        String publicKeyBase64 = Base64.getUrlEncoder().withoutPadding().encodeToString(publicKeyBytes);
-	        String privateKeyBase64 = Base64.getUrlEncoder().withoutPadding().encodeToString(privateKeyBytes);
+	        String pubKey = Base64.getUrlEncoder().withoutPadding().encodeToString(pubBytes);
+	        String privKey = Base64.getUrlEncoder().withoutPadding().encodeToString(privBytes);
 
-	        // ===== validação =====
-	        if (publicKeyBytes.length != 65 || privateKeyBytes.length != 32) {
-	            Console.error("Erro ao gerar VAPID | pubBytes=" + publicKeyBytes.length +
-	                    " privBytes=" + privateKeyBytes.length);
-	            return null;
-	        }
-
-	        Console.log("VAPID OK | pubLen=" + publicKeyBase64.length() +
-	                " privLen=" + privateKeyBase64.length());
-
-	        return new VapidKeys(publicKeyBase64, privateKeyBase64);
+	        return new VapidKeys(pubKey, privKey);
 
 	    } catch (Exception e) {
-	        Console.error("Erro ao gerar VAPID: " + e.toString());
-	        e.printStackTrace();
-	        return null;
+	        throw new RuntimeException(e);
 	    }
 	}
 
-	// ===== helper CRÍTICO =====
-	private static byte[] toUnsignedBytes(java.math.BigInteger value, int size) {
-	    byte[] src = value.toByteArray();
-	    byte[] dst = new byte[size];
+	private static byte[] to32(byte[] src) {
+	    byte[] dst = new byte[32];
 
-	    if (src.length == size) {
-	        return src;
-	    }
+	    if (src.length == 32) return src;
 
-	    if (src.length > size) {
-	        System.arraycopy(src, src.length - size, dst, 0, size);
+	    if (src.length > 32) {
+	        System.arraycopy(src, src.length - 32, dst, 0, 32);
 	    } else {
-	        System.arraycopy(src, 0, dst, size - src.length, src.length);
+	        System.arraycopy(src, 0, dst, 32 - src.length, src.length);
 	    }
 
 	    return dst;
