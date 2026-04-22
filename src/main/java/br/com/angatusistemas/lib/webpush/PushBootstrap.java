@@ -107,8 +107,8 @@ public final class PushBootstrap {
         try {
         	
         	Key key = Saveable.findById(Key.class, "key");
-            String pub = key.getPublicKey();
-            String priv = key.getPrivateKey();
+            String pub = key == null ? null : key.getPublicKey();
+            String priv = key == null ? null : key.getPrivateKey();
             String subject = DEFAULT_SUBJECT;
 
             if (isBlank(pub) || isBlank(priv)) {
