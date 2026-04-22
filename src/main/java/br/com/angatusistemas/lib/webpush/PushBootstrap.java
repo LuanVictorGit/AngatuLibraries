@@ -1,13 +1,7 @@
 package br.com.angatusistemas.lib.webpush;
 
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.util.HashMap;
-import java.util.Map;
-
 import br.com.angatusistemas.lib.console.Console;
+import br.com.angatusistemas.lib.database.Saveable;
 import br.com.angatusistemas.lib.env.Env;
 
 /**
@@ -61,8 +55,7 @@ import br.com.angatusistemas.lib.env.Env;
  */
 public final class PushBootstrap {
 
-    private static final String ENV_FILE = ".env";
-    private static final String DEFAULT_SUBJECT = "mailto:angatusistemas@gmail.com";
+    public static final String DEFAULT_SUBJECT = "mailto:angatusistemas@gmail.com";
 
     private PushBootstrap() {
         throw new UnsupportedOperationException("Utility class cannot be instantiated");
@@ -112,9 +105,11 @@ public final class PushBootstrap {
      */
     public static void setup() {
         try {
-            String pub = Env.get().get("VAPID_PUBLIC_KEY");
-            String priv = Env.get().get("VAPID_PRIVATE_KEY");
-            String subject = Env.get().get("VAPID_SUBJECT");
+        	
+        	Key key = Saveable.findById(Key.class, "key");
+            String pub = key.getPublicKey();
+            String priv = key.getPrivateKey();
+            String subject = DEFAULT_SUBJECT;
 
             if (isBlank(pub) || isBlank(priv)) {
                 Console.log("Chaves VAPID não encontradas. Gerando automaticamente...");
@@ -125,22 +120,14 @@ public final class PushBootstrap {
                     throw new RuntimeException("Falha ao gerar chaves VAPID");
                 }
 
-                Map<String, String> env = readEnvFile();
+                key = new Key(keys.privateKey, keys.publicKey);
+                key.save();
 
-                env.put("VAPID_PUBLIC_KEY", keys.publicKey);
-                env.put("VAPID_PRIVATE_KEY", keys.privateKey);
-                env.put("VAPID_SUBJECT", DEFAULT_SUBJECT);
+                pub = key.getPublicKey();
+                priv = key.getPrivateKey();
+                subject = DEFAULT_SUBJECT;
 
-                writeEnvFile(env);
-
-                // Recarrega as variáveis de ambiente
-                Env.reload();
-
-                pub = Env.get().get("VAPID_PUBLIC_KEY");
-                priv = Env.get().get("VAPID_PRIVATE_KEY");
-                subject = Env.get().get("VAPID_SUBJECT");
-
-                Console.log("Chaves VAPID geradas e salvas com sucesso em " + ENV_FILE);
+                Console.log("Chaves VAPID geradas e salvas com sucesso em " + Key.class.getSimpleName());
             } else {
                 Console.debug("Chaves VAPID já configuradas. Inicializando WebPushAPI...");
             }
@@ -153,84 +140,7 @@ public final class PushBootstrap {
             throw new RuntimeException("Erro ao configurar WebPush: " + e.getMessage(), e);
         }
     }
-
-    // ==================== MÉTODOS DE MANIPULAÇÃO DO ARQUIVO .ENV ====================
-
-    /**
-     * [PT] Lê o arquivo {@code .env} e retorna um mapa com as variáveis configuradas.
-     * <p>
-     * Ignora linhas vazias, comentários (iniciadas com '#') e linhas mal formatadas.
-     * </p>
-     *
-     * [EN] Reads the {@code .env} file and returns a map of configured variables.
-     * <p>
-     * Ignores empty lines, comments (starting with '#') and malformed lines.
-     * </p>
-     *
-     * @return [PT] mapa contendo as variáveis do arquivo {@code .env} (pode ser vazio)
-     *         [EN] map containing variables from the {@code .env} file (may be empty)
-     * @throws IOException [PT] se ocorrer erro na leitura do arquivo
-     *                     [EN] if an error occurs while reading the file
-     */
-    private static Map<String, String> readEnvFile() throws IOException {
-        Map<String, String> map = new HashMap<>();
-        Path path = Paths.get(ENV_FILE);
-
-        if (!Files.exists(path)) {
-            Console.debug("Arquivo " + ENV_FILE + " não encontrado. Será criado.");
-            return map;
-        }
-
-        for (String line : Files.readAllLines(path)) {
-            String trimmed = line.trim();
-            if (trimmed.isEmpty() || trimmed.startsWith("#")) {
-                continue;
-            }
-            String[] parts = line.split("=", 2);
-            if (parts.length == 2) {
-                map.put(parts[0], parts[1]);
-                Console.debug("Variável carregada: {} = {}", parts[0], maskValue(parts[1]));
-            }
-        }
-
-        return map;
-    }
-
-    /**
-     * [PT] Escreve as variáveis de ambiente no arquivo {@code .env}.
-     * <p>
-     * Substitui completamente o conteúdo existente.
-     * </p>
-     *
-     * [EN] Writes environment variables to the {@code .env} file.
-     * <p>
-     * Completely replaces the existing content.
-     * </p>
-     *
-     * @param env [PT] mapa contendo as variáveis a serem escritas
-     *            [EN] map containing variables to write
-     * @throws IOException [PT] se ocorrer erro na escrita do arquivo
-     *                     [EN] if an error occurs while writing the file
-     */
-    private static void writeEnvFile(Map<String, String> env) throws IOException {
-        StringBuilder sb = new StringBuilder();
-
-        // Adiciona cabeçalho comentado
-        sb.append("# Arquivo gerado automaticamente pelo PushBootstrap\n");
-        sb.append("# Chaves VAPID para Web Push\n");
-        sb.append("# Não modifique manualmente a menos que saiba o que está fazendo\n\n");
-
-        for (Map.Entry<String, String> entry : env.entrySet()) {
-            sb.append(entry.getKey())
-              .append("=")
-              .append(entry.getValue())
-              .append("\n");
-        }
-
-        Files.write(Paths.get(ENV_FILE), sb.toString().getBytes());
-        Console.debug("Arquivo " + ENV_FILE + " salvo com " + env.size() + " variáveis");
-    }
-
+    
     // ==================== MÉTODOS UTILITÁRIOS ====================
 
     /**
@@ -246,26 +156,5 @@ public final class PushBootstrap {
     private static boolean isBlank(String s) {
         return s == null || s.trim().isEmpty();
     }
-
-    /**
-     * [PT] Mascara o valor de uma variável para exibição segura nos logs.
-     * <p>
-     * Exibe apenas os primeiros 20 caracteres seguidos de "...".
-     * </p>
-     *
-     * [EN] Masks a variable value for safe display in logs.
-     * <p>
-     * Shows only the first 20 characters followed by "...".
-     * </p>
-     *
-     * @param value [PT] valor a ser mascarado
-     *              [EN] value to mask
-     * @return [PT] valor mascarado
-     *         [EN] masked value
-     */
-    private static String maskValue(String value) {
-        if (value == null) return "null";
-        if (value.length() <= 20) return value + " (length: " + value.length() + ")";
-        return value.substring(0, 20) + "... (length: " + value.length() + ")";
-    }
+    
 }

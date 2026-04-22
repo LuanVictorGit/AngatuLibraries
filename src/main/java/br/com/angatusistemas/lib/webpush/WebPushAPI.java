@@ -31,6 +31,7 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
 import br.com.angatusistemas.lib.console.Console;
+import br.com.angatusistemas.lib.database.Saveable;
 import br.com.angatusistemas.lib.gson.GsonAPI;
 import br.com.angatusistemas.lib.task.Task;
 import nl.martijndwars.webpush.Notification;
@@ -62,13 +63,15 @@ public final class WebPushAPI {
 	// ==================== INICIALIZAÇÃO ====================
 
 	public static synchronized boolean initialize() {
-		if (initialized)
-			return true;
+		if (initialized) return true;
 
 		try {
-			String pubKey = System.getenv("VAPID_PUBLIC_KEY");
-			String privKey = System.getenv("VAPID_PRIVATE_KEY");
-			String subject = System.getenv("VAPID_SUBJECT");
+			
+			Key key = Saveable.findById(Key.class, "key");
+			
+			String pubKey = key.getPublicKey();
+			String privKey = key.getPrivateKey();
+			String subject = PushBootstrap.DEFAULT_SUBJECT;
 
 			if (isBlank(pubKey) || isBlank(privKey) || isBlank(subject)) {
 				Console.warn("Chaves VAPID não configuradas. Use WebPushAPI.generateVapidKeys() para criá-las.");
@@ -126,11 +129,7 @@ public final class WebPushAPI {
 			org.bouncycastle.jce.interfaces.ECPublicKey bcPublicKey =
 				(org.bouncycastle.jce.interfaces.ECPublicKey) keyPair.getPublic();
 			ECPrivateKey privateKey = (ECPrivateKey) keyPair.getPrivate();
-
-			// Chave pública: ponto EC não comprimido (04 || X || Y) = 65 bytes
 			byte[] publicKeyBytes = bcPublicKey.getQ().getEncoded(false);
-
-			// Chave privada: scalar S em exatamente 32 bytes (big-endian, sem byte de sinal)
 			byte[] sBytes = privateKey.getS().toByteArray();
 			byte[] privateKeyBytes = new byte[32];
 			if (sBytes.length >= 32) {
@@ -138,14 +137,9 @@ public final class WebPushAPI {
 			} else {
 				System.arraycopy(sBytes, 0, privateKeyBytes, 32 - sBytes.length, sBytes.length);
 			}
-
-			// Ambas sem padding '=' conforme exige a lib
+			
 			String publicKeyBase64  = Base64.getUrlEncoder().withoutPadding().encodeToString(publicKeyBytes);
 			String privateKeyBase64 = Base64.getUrlEncoder().withoutPadding().encodeToString(privateKeyBytes);
-
-			// Valida tamanhos esperados antes de retornar
-			// Chave pública: 65 bytes → ~87 chars Base64
-			// Chave privada: 32 bytes → ~43 chars Base64
 			if (publicKeyBase64.length() < 80 || privateKeyBase64.length() < 40) {
 				Console.error("Chaves VAPID geradas com tamanho inválido. pub={} priv={}",
 					publicKeyBase64.length(), privateKeyBase64.length());
