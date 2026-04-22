@@ -538,7 +538,7 @@ public final class WebPushAPI {
 					future.complete(SendResult.failure(statusCode, msg));
 				}
 			} catch (Exception e) {
-				Console.error("Exceção ao enviar notificação para {}: {}", subscription.endpoint, e);
+				Console.error("Exceção ao enviar notificação para "+GsonAPI.get().toJson(subscription)+ " -> " + e.getMessage());
 				future.completeExceptionally(e);
 			}
 		});
