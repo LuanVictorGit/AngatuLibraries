@@ -1,7 +1,9 @@
 package br.com.angatusistemas.lib.webpush;
 
+import java.io.BufferedReader;
 import java.io.FileWriter;
 import java.io.IOException;
+import java.io.InputStreamReader;
 import java.io.StringReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -19,6 +21,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
+import java.util.stream.Collectors;
 
 import org.apache.http.HttpResponse;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
@@ -273,41 +276,87 @@ public final class WebPushAPI {
 	// ==================== IMPLEMENTAÇÃO INTERNA ====================
 
 	private static CompletableFuture<SendResult> doSendAsync(Subscription subscription, String payload, int ttl,
-			Urgency urgency) {
-		CompletableFuture<SendResult> future = new CompletableFuture<>();
+	        Urgency urgency) {
 
-		Task.runAsync(() -> {
-			try {
-				Notification notification = new Notification(
-						subscription.endpoint,
-						subscription.keys.p256dh,
-						subscription.keys.auth,
-						payload.getBytes(StandardCharsets.UTF_8),
-						ttl);
+	    CompletableFuture<SendResult> future = new CompletableFuture<>();
+	    Task.runAsync(() -> {
+	        try {
+	            Notification notification = new Notification(
+	                    subscription.endpoint,
+	                    subscription.keys.p256dh,
+	                    subscription.keys.auth,
+	                    payload.getBytes(StandardCharsets.UTF_8),
+	                    ttl
+	            );
 
-				HttpResponse response = pushService.send(notification);
-				int statusCode = response.getStatusLine().getStatusCode();
+	            HttpResponse response = pushService.send(notification);
 
-				if (statusCode >= 200 && statusCode < 300) {
-					Console.debug("Notificação enviada. Status: {} | Endpoint: {}", statusCode, subscription.endpoint);
-					future.complete(SendResult.success(statusCode));
-				} else if (statusCode == 410 || statusCode == 404) {
-					String msg = "Assinatura inválida/expirada (HTTP " + statusCode + "). Remova do banco.";
-					Console.warn(msg + " Endpoint: {}"+GsonAPI.get().toJson(subscription));
-					future.complete(SendResult.expired(statusCode, msg));
-				} else {
-					String msg = "Falha ao enviar notificação. HTTP " + statusCode;
-					Console.error(msg + " | Endpoint: {}"+GsonAPI.get().toJson(subscription));
-					future.complete(SendResult.failure(statusCode, msg));
-				}
-			} catch (Exception e) {
-				Console.error("Exceção ao enviar notificação para " + GsonAPI.get().toJson(subscription) + " -> "
-						+ e.getMessage());
-				future.completeExceptionally(e);
-			}
-		});
+	            int statusCode = response.getStatusLine().getStatusCode();
+	            String reason = response.getStatusLine().getReasonPhrase();
 
-		return future;
+	            // Ler body da resposta
+	            String responseBody = null;
+	            if (response.getEntity() != null) {
+	                try (BufferedReader reader = new BufferedReader(
+	                        new InputStreamReader(response.getEntity().getContent(), StandardCharsets.UTF_8))) {
+
+	                    responseBody = reader.lines().collect(Collectors.joining("\n"));
+	                }
+	            }
+
+	            // Header opcional
+	            String retryAfter = null;
+	            if (response.getFirstHeader("Retry-After") != null) {
+	                retryAfter = response.getFirstHeader("Retry-After").getValue();
+	            }
+
+	            String baseLog =
+	                    "Status: " + statusCode +
+	                    " | Reason: " + reason +
+	                    " | Body: " + responseBody +
+	                    " | Retry-After: " + retryAfter;
+
+	            if (statusCode >= 200 && statusCode < 300) {
+
+	                Console.debug("Notificação enviada com sucesso | " + baseLog +
+	                        " | Endpoint: " + subscription.endpoint);
+
+	                future.complete(SendResult.success(statusCode));
+
+	            } else if (statusCode == 410 || statusCode == 404) {
+
+	                String msg = "Assinatura inválida/expirada (HTTP " + statusCode + ")";
+
+	                Console.warn(msg +
+	                        " | " + baseLog +
+	                        " | Subscription: " + GsonAPI.get().toJson(subscription));
+
+	                future.complete(SendResult.expired(statusCode, msg + " | " + reason));
+
+	            } else {
+
+	                String msg = "Falha ao enviar notificação (HTTP " + statusCode + ")";
+
+	                Console.error(msg +
+	                        " | " + baseLog +
+	                        " | Subscription: " + GsonAPI.get().toJson(subscription));
+
+	                future.complete(SendResult.failure(statusCode, msg + " | " + reason));
+	            }
+
+	        } catch (Exception e) {
+
+	            Console.error("Exceção ao enviar notificação | Subscription: "
+	                    + GsonAPI.get().toJson(subscription)
+	                    + " | Erro: " + e.toString());
+
+	            e.printStackTrace();
+
+	            future.completeExceptionally(e);
+	        }
+	    });
+
+	    return future;
 	}
 
 	private static String buildPayload(String title, String body, String iconUrl, String clickUrl,
