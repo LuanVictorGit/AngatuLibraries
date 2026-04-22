@@ -1,18 +1,15 @@
 package br.com.angatusistemas.lib.webpush;
 
 import java.io.BufferedReader;
-import java.io.FileWriter;
-import java.io.IOException;
 import java.io.InputStreamReader;
-import java.io.StringReader;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.Security;
 import java.security.interfaces.ECPrivateKey;
+import java.security.interfaces.ECPublicKey;
+import java.security.spec.ECGenParameterSpec;
+import java.security.spec.ECPoint;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.LinkedHashMap;
@@ -25,9 +22,6 @@ import java.util.stream.Collectors;
 
 import org.apache.http.HttpResponse;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
-import org.bouncycastle.util.io.pem.PemObject;
-import org.bouncycastle.util.io.pem.PemReader;
-import org.bouncycastle.util.io.pem.PemWriter;
 
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
@@ -122,83 +116,68 @@ public final class WebPushAPI {
 	}
 
 	// ==================== GERAÇÃO DE CHAVES VAPID ====================
-
 	public static VapidKeys generateVapidKeys() {
-		try {
-			KeyPairGenerator keyPairGen = KeyPairGenerator.getInstance("EC", BouncyCastleProvider.PROVIDER_NAME);
-			keyPairGen.initialize(new java.security.spec.ECGenParameterSpec("P-256"));
-			KeyPair keyPair = keyPairGen.generateKeyPair();
+	    try {
+	        KeyPairGenerator keyPairGen = KeyPairGenerator.getInstance("EC");
+	        keyPairGen.initialize(new ECGenParameterSpec("secp256r1")); // P-256
 
-			org.bouncycastle.jce.interfaces.ECPublicKey bcPublicKey =
-				(org.bouncycastle.jce.interfaces.ECPublicKey) keyPair.getPublic();
-			ECPrivateKey privateKey = (ECPrivateKey) keyPair.getPrivate();
-			byte[] publicKeyBytes = bcPublicKey.getQ().getEncoded(false);
-			byte[] sBytes = privateKey.getS().toByteArray();
-			byte[] privateKeyBytes = new byte[32];
-			if (sBytes.length >= 32) {
-				System.arraycopy(sBytes, sBytes.length - 32, privateKeyBytes, 0, 32);
-			} else {
-				System.arraycopy(sBytes, 0, privateKeyBytes, 32 - sBytes.length, sBytes.length);
-			}
-			
-			String publicKeyBase64  = Base64.getUrlEncoder().withoutPadding().encodeToString(publicKeyBytes);
-			String privateKeyBase64 = Base64.getUrlEncoder().withoutPadding().encodeToString(privateKeyBytes);
-			if (publicKeyBase64.length() < 80 || privateKeyBase64.length() < 40) {
-				Console.error("Chaves VAPID geradas com tamanho inválido. pub={} priv={}",
-					publicKeyBase64.length(), privateKeyBase64.length());
-				return null;
-			}
+	        KeyPair keyPair = keyPairGen.generateKeyPair();
 
-			Console.log("Chaves VAPID geradas. pub={} chars, priv={} chars",
-				publicKeyBase64.length(), privateKeyBase64.length());
+	        // ===== PUBLIC KEY (65 bytes: 0x04 + X + Y) =====
+	        ECPublicKey publicKey = (ECPublicKey) keyPair.getPublic();
+	        ECPoint point = publicKey.getW();
 
-			return new VapidKeys(publicKeyBase64, privateKeyBase64);
-		} catch (Exception e) {
-			Console.error("Falha ao gerar chaves VAPID: {}", e);
-			return null;
-		}
+	        byte[] x = toUnsignedBytes(point.getAffineX(), 32);
+	        byte[] y = toUnsignedBytes(point.getAffineY(), 32);
+
+	        byte[] publicKeyBytes = new byte[65];
+	        publicKeyBytes[0] = 0x04; // uncompressed
+	        System.arraycopy(x, 0, publicKeyBytes, 1, 32);
+	        System.arraycopy(y, 0, publicKeyBytes, 33, 32);
+
+	        // ===== PRIVATE KEY (32 bytes fixos) =====
+	        ECPrivateKey privateKey = (ECPrivateKey) keyPair.getPrivate();
+	        byte[] privateKeyBytes = toUnsignedBytes(privateKey.getS(), 32);
+
+	        // ===== BASE64 URL (sem padding) =====
+	        String publicKeyBase64 = Base64.getUrlEncoder().withoutPadding().encodeToString(publicKeyBytes);
+	        String privateKeyBase64 = Base64.getUrlEncoder().withoutPadding().encodeToString(privateKeyBytes);
+
+	        // ===== validação =====
+	        if (publicKeyBytes.length != 65 || privateKeyBytes.length != 32) {
+	            Console.error("Erro ao gerar VAPID | pubBytes=" + publicKeyBytes.length +
+	                    " privBytes=" + privateKeyBytes.length);
+	            return null;
+	        }
+
+	        Console.log("VAPID OK | pubLen=" + publicKeyBase64.length() +
+	                " privLen=" + privateKeyBase64.length());
+
+	        return new VapidKeys(publicKeyBase64, privateKeyBase64);
+
+	    } catch (Exception e) {
+	        Console.error("Erro ao gerar VAPID: " + e.toString());
+	        e.printStackTrace();
+	        return null;
+	    }
 	}
 
-	public static VapidKeys loadVapidKeysFromFile(String filePath) throws IOException {
-		Path path = Paths.get(filePath);
-		if (!Files.exists(path)) {
-			throw new IOException("Arquivo não encontrado: " + filePath);
-		}
+	// ===== helper CRÍTICO =====
+	private static byte[] toUnsignedBytes(java.math.BigInteger value, int size) {
+	    byte[] src = value.toByteArray();
+	    byte[] dst = new byte[size];
 
-		String content = Files.readString(path, StandardCharsets.UTF_8);
-		String publicKey = null;
-		String privateKey = null;
+	    if (src.length == size) {
+	        return src;
+	    }
 
-		try (PemReader pemReader = new PemReader(new StringReader(content))) {
-			PemObject pemObject;
-			while ((pemObject = pemReader.readPemObject()) != null) {
-				switch (pemObject.getType()) {
-				case "PUBLIC KEY":
-					publicKey = Base64.getUrlEncoder().withoutPadding().encodeToString(pemObject.getContent());
-					break;
-				case "PRIVATE KEY":
-					privateKey = Base64.getUrlEncoder().withoutPadding().encodeToString(pemObject.getContent());
-					break;
-				default:
-					Console.warn("Tipo PEM desconhecido ignorado: {}", pemObject.getType());
-				}
-			}
-		}
+	    if (src.length > size) {
+	        System.arraycopy(src, src.length - size, dst, 0, size);
+	    } else {
+	        System.arraycopy(src, 0, dst, size - src.length, src.length);
+	    }
 
-		if (publicKey == null || privateKey == null) {
-			throw new IOException("Arquivo PEM não contém par de chaves válido (PUBLIC KEY + PRIVATE KEY)");
-		}
-
-		return new VapidKeys(publicKey, privateKey);
-	}
-
-	public static void saveVapidKeys(VapidKeys keys, String filePath) throws IOException {
-		Objects.requireNonNull(keys, "VapidKeys não pode ser null");
-		try (PemWriter pemWriter = new PemWriter(new FileWriter(filePath, StandardCharsets.UTF_8))) {
-			pemWriter.writeObject(new PemObject("PUBLIC KEY", Base64.getUrlDecoder().decode(keys.publicKey)));
-			pemWriter.writeObject(new PemObject("PRIVATE KEY", Base64.getUrlDecoder().decode(keys.privateKey)));
-		}
-		Console.debug("Chaves VAPID salvas em: {}", filePath);
+	    return dst;
 	}
 
 	// ==================== ENVIO DE NOTIFICAÇÕES ====================
