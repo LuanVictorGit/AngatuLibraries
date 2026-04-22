@@ -278,7 +278,12 @@ public final class WebPushAPI {
 
 		Task.runAsync(() -> {
 			try {
-				Notification notification = new Notification(subscription, payload);
+				Notification notification = new Notification(
+						subscription.endpoint,
+						subscription.keys.p256dh,
+						subscription.keys.auth,
+						payload.getBytes(StandardCharsets.UTF_8),
+						ttl);
 
 				HttpResponse response = pushService.send(notification);
 				int statusCode = response.getStatusLine().getStatusCode();
@@ -288,11 +293,11 @@ public final class WebPushAPI {
 					future.complete(SendResult.success(statusCode));
 				} else if (statusCode == 410 || statusCode == 404) {
 					String msg = "Assinatura inválida/expirada (HTTP " + statusCode + "). Remova do banco.";
-					Console.warn(msg + " Endpoint: {}", subscription.endpoint);
+					Console.warn(msg + " Endpoint: {}"+GsonAPI.get().toJson(subscription));
 					future.complete(SendResult.expired(statusCode, msg));
 				} else {
 					String msg = "Falha ao enviar notificação. HTTP " + statusCode;
-					Console.error(msg + " | Endpoint: {}", subscription.endpoint);
+					Console.error(msg + " | Endpoint: {}"+GsonAPI.get().toJson(subscription));
 					future.complete(SendResult.failure(statusCode, msg));
 				}
 			} catch (Exception e) {
