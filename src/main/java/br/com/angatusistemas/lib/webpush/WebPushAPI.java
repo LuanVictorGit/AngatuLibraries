@@ -278,12 +278,7 @@ public final class WebPushAPI {
 
 		Task.runAsync(() -> {
 			try {
-				Notification notification = new Notification(
-						subscription.endpoint,
-						subscription.keys.p256dh,
-						subscription.keys.auth,
-						payload.getBytes(StandardCharsets.UTF_8),
-						ttl);
+				Notification notification = new Notification(subscription, payload);
 
 				HttpResponse response = pushService.send(notification);
 				int statusCode = response.getStatusLine().getStatusCode();

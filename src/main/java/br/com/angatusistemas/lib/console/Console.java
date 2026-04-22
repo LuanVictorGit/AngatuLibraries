@@ -153,13 +153,23 @@ public final class Console {
      * If a {@link Throwable} is provided, its stack trace is printed.
      * </p>
      *
-     * @param obj [PT] objeto a ser logado
-     *            [EN] object to log
+     * @param obj [PT] objeto a ser logado (pode ser string ou objeto)
+     *            [EN] object to log (can be string or object)
      * @param t   [PT] exceção opcional (pode ser nula)
      *            [EN] optional exception (may be null)
      */
     public static void error(Object obj, Throwable t) {
-        logColored(obj, "&c");
+        String timestamp = DataTime.getData().replace(" ", "");
+        String message = String.valueOf(obj);
+        
+        // Log da mensagem principal
+        String coloredPattern = String.format("&c[%s] &7%s", timestamp, message);
+        ANGATU_LIB.getOriginalOut().println(AnsiColor.parse(coloredPattern));
+        
+        // Log de argumentos adicionais se fornecidos via varargs no error(String, Object...)
+        // Nota: Este método não tem acesso aos varargs, apenas ao obj e t
+        
+        // Log da stack trace se houver exceção
         if (t != null) {
             t.printStackTrace(ANGATU_LIB.getOriginalOut());
         }
@@ -178,17 +188,34 @@ public final class Console {
     }
 
     /**
-     * [PT] Registra um erro formatado.
+     * [PT] Registra um erro formatado com múltiplos argumentos.
      *
-     * [EN] Logs a formatted error.
+     * [EN] Logs a formatted error with multiple arguments.
      *
      * @param format [PT] string de formato
      *               [EN] format string
-     * @param args   [PT] argumentos
-     *               [EN] arguments
+     * @param args   [PT] argumentos para formatação
+     *               [EN] arguments for formatting
      */
     public static void error(String format, Object... args) {
-        error(String.format(format, args));
+        String formattedMessage = String.format(format, args);
+        
+        // Verifica se o último argumento é uma Throwable
+        Throwable throwable = null;
+        if (args.length > 0 && args[args.length - 1] instanceof Throwable) {
+            throwable = (Throwable) args[args.length - 1];
+            // Se o último argumento é uma exceção, precisamos formatar sem ele
+            if (args.length > 1) {
+                Object[] newArgs = new Object[args.length - 1];
+                System.arraycopy(args, 0, newArgs, 0, args.length - 1);
+                formattedMessage = String.format(format, newArgs);
+            } else {
+                // Se só tem a exceção, a mensagem é a própria exceção
+                formattedMessage = format;
+            }
+        }
+        
+        error(formattedMessage, throwable);
     }
 
     /**
@@ -224,7 +251,9 @@ public final class Console {
      *               [EN] arguments
      */
     public static void debug(String format, Object... args) {
-        debug(String.format(format, args));
+        if (isDebugEnabled()) {
+            debug(String.format(format, args));
+        }
     }
 
     // ==================== MÉTODOS DE CONTROLE DE DEBUG ====================
@@ -269,7 +298,7 @@ public final class Console {
     private static String formatLogMessage(Object obj) {
         String timestamp = DataTime.getData().replace(" ", "");
         String message = String.valueOf(obj);
-        return LOG_PATTERN.formatted(timestamp, message);
+        return String.format(LOG_PATTERN, timestamp, message);
     }
 
     /**
@@ -285,7 +314,7 @@ public final class Console {
     private static void logColored(Object obj, String color) {
         String timestamp = DataTime.getData().replace(" ", "");
         String message = String.valueOf(obj);
-        String coloredPattern = color + "[%s] &7%s".formatted(timestamp, message);
+        String coloredPattern = String.format("%s[%s] &7%s", color, timestamp, message);
         ANGATU_LIB.getOriginalOut().println(AnsiColor.parse(coloredPattern));
     }
 }
