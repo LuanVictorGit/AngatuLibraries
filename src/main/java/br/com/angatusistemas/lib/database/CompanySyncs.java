@@ -201,6 +201,14 @@ public final class CompanySyncs {
     // ==================== API PÚBLICA ====================
 
     /**
+     * Inicializa a sincronização com configurações padrão (todos os arquivos, 30 dias).
+     * Equivalente a {@code builder().build().start()}.
+     */
+    public static void init() {
+        builder().build().start();
+    }
+    
+    /**
      * Inicia o agendamento. Se já existe uma sincronização pendente/atrasada,
      * ela é disparada imediatamente. Caso contrário, aguarda o prazo.
      */
