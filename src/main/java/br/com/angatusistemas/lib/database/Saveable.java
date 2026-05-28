@@ -207,6 +207,9 @@ public abstract class Saveable {
      *         [EN] {@code true} if saved successfully
      */
     public boolean save() {
+        // Garante que o cache está carregado antes de modificar
+        ensureCacheLoaded(this.getClass());
+
         String id = getId();
         if (id == null || id.isEmpty()) {
             id = UUID.randomUUID().toString();
@@ -271,6 +274,8 @@ public abstract class Saveable {
     public Saveable reload() {
         String id = getId();
         if (id == null) return null;
+
+        ensureCacheLoaded(this.getClass());
 
         String tableName = getTableName(this.getClass());
         String sql = "SELECT data FROM " + tableName + " WHERE id = ?";
@@ -433,7 +438,10 @@ public abstract class Saveable {
         String sql = "DELETE FROM " + tableName + " WHERE id = ?";
         try (Connection conn = getDataSource(clazz).getConnection();
              PreparedStatement pstmt = conn.prepareStatement(sql)) {
-            boolean deleted = pstmt.executeUpdate() > 0;
+            // CORREÇÃO: definir o parâmetro antes de executar
+            pstmt.setString(1, id);
+            int affectedRows = pstmt.executeUpdate();
+            boolean deleted = affectedRows > 0;
             if (deleted) {
                 Map<String, Object> classCache = CACHE.get(clazz);
                 if (classCache != null) classCache.remove(id);
