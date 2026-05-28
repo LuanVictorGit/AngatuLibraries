@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
@@ -23,7 +24,8 @@ import br.com.angatusistemas.lib.console.Console;
 import br.com.angatusistemas.lib.gson.GsonAPI;
 
 /**
- * [PT] Classe abstrata que fornece persistência automática em SQLite para objetos Java.
+ * [PT] Classe abstrata que fornece persistência automática em SQLite para objetos Java,
+ * com cache total em memória (identity map) que garante a mesma instância para cada ID.
  * <p>
  * Cada subclasse concreta (ex: {@code Usuario}, {@code Produto}) é mapeada para uma tabela própria
  * no banco de dados {@code database.db}. O nome da tabela é o nome da classe em minúsculas,
@@ -35,6 +37,12 @@ import br.com.angatusistemas.lib.gson.GsonAPI;
  * A tabela possui uma chave primária {@code id} (TEXT), que é o identificador único do objeto.
  * </p>
  * <p>
+ * <b>Cache total:</b> Ao primeiro acesso a uma classe (ex: {@link #findById} ou {@link #findAll}),
+ * todos os registros da tabela são carregados para um cache em memória. A partir daí,
+ * qualquer operação de busca retorna a <strong>mesma instância Java</strong> para um mesmo ID.
+ Isso resolve problemas de concorrência e inconsistência (ex: modificar um objeto em dois lugares diferentes).
+ * </p>
+ * <p>
  * <b>Gerenciamento de ID:</b>
  * O ID é obtido através do método abstrato {@link #getId()}. Se o objeto não tiver um ID
  * (retornar {@code null} ou vazio), um UUID aleatório é gerado e injetado via reflexão no campo
@@ -42,18 +50,25 @@ import br.com.angatusistemas.lib.gson.GsonAPI;
  * passa a ter esse ID permanentemente.
  * </p>
  * <p>
+ * <b>Sincronização:</b>
+ * Os métodos {@link #save()}, {@link #delete()} e {@link #deleteById(Class, String)} mantêm
+ * o cache atualizado automaticamente. O método {@link #reload()} recarrega os dados do banco
+ * e atualiza a instância atual (que permanece a mesma no cache).
+ * </p>
+ * <p>
  * <b>Concorrência e performance:</b>
  * A classe utiliza um pool de conexões HikariCP (máx. 20 conexões) e configura o SQLite em modo
  * WAL ({@code PRAGMA journal_mode=WAL}), permitindo leituras concorrentes durante escritas.
  * Escritas são transacionais e bloqueiam apenas a linha em questão (devido ao uso de
- * {@code INSERT OR REPLACE}). Leituras por ID são extremamente rápidas (índice implícito na PK).
+ * {@code INSERT OR REPLACE}). Leituras por ID são extremamente rápidas (acesso direto ao cache).
  * </p>
  * <p>
  * <b>Suporte a milhões de objetos:</b>
- * O SQLite suporta até dezenas/centenas de milhões de linhas com desempenho aceitável,
- * desde que consultas usem índices apropriados. <strong>Não utilize {@link #findAll(Class)}</strong>
- * em conjuntos grandes – use {@link #query(Class, String, Object...)} com cláusulas {@code WHERE}
- * e índices nos campos filtrados.
+ * <strong>Atenção:</strong> O cache total carrega <strong>todos</strong> os objetos da tabela na memória.
+ * Para tabelas com milhões de registros, isso pode causar {@code OutOfMemoryError}.
+ * Se você precisa trabalhar com grandes volumes, modifique o método {@link #loadAllIntoCache(Class)}
+ * para implementar um cache lazy (sob demanda). Esta implementação é ideal para conjuntos de dados
+ * de até centenas de milhares de registros.
  * </p>
  * <p>
  * <b>Índices customizados:</b>
@@ -66,19 +81,25 @@ import br.com.angatusistemas.lib.gson.GsonAPI;
  * </p>
  * <p>
  * <b>Encerramento do pool:</b>
- * Ao final da aplicação, chame {@link #shutdown()} para fechar todas as conexões.
+ * Ao final da aplicação, chame {@link #shutdown()} para fechar todas as conexões e limpar o cache.
  * </p>
  *
- * [EN] Abstract class that provides automatic SQLite persistence for Java objects.
+ * [EN] Abstract class that provides automatic SQLite persistence for Java objects,
+ * with full in‑memory caching (identity map) ensuring the same instance per ID.
  * <p>
  * Each concrete subclass (e.g. {@code User}, {@code Product}) is mapped to its own table
  * in the {@code database.db} file. The table name is the lowercased class name, plus an 's'
- * if it doesn't already end with 's' (e.g. {@code User} → {@code users},
- * {@code Product} → {@code products}).
+ * if it doesn't already end with 's' (e.g. {@code User} → {@code users}).
  * </p>
  * <p>
  * Objects are serialized to JSON (via Gson) and stored in a {@code data} column.
  * The table has a primary key {@code id} (TEXT) which is the unique identifier.
+ * </p>
+ * <p>
+ * <b>Full caching:</b> On first access to a class (e.g. {@link #findById} or {@link #findAll}),
+ * all records are loaded into an in‑memory cache. From that point on, any lookup returns the
+ * <strong>same Java instance</strong> for a given ID. This solves concurrency and inconsistency issues
+ * (e.g., modifying an object in two different places).
  * </p>
  * <p>
  * <b>ID management:</b>
@@ -88,18 +109,24 @@ import br.com.angatusistemas.lib.gson.GsonAPI;
  * permanently owns that ID.
  * </p>
  * <p>
+ * <b>Synchronization:</b>
+ * Methods {@link #save()}, {@link #delete()} and {@link #deleteById(Class, String)} keep the cache
+ * updated automatically. {@link #reload()} fetches fresh data from the database and updates the
+ * current instance (which remains the same in the cache).
+ * </p>
+ * <p>
  * <b>Concurrency and performance:</b>
  * A HikariCP connection pool (max 20 connections) is used. SQLite is configured in WAL mode
  * ({@code PRAGMA journal_mode=WAL}), allowing concurrent reads during writes.
  * Writes are transactional and lock only the affected row (due to {@code INSERT OR REPLACE}).
- * Reads by ID are extremely fast (implicit index on PK).
+ * Reads by ID are extremely fast (direct cache access).
  * </p>
  * <p>
  * <b>Support for millions of objects:</b>
- * SQLite can handle tens/hundreds of millions of rows with acceptable performance,
- * as long as queries use proper indexes. <strong>Do not use {@link #findAll(Class)}</strong>
- * on large datasets – use {@link #query(Class, String, Object...)} with {@code WHERE} clauses
- * and indexes on filtered fields.
+ * <strong>Caution:</strong> Full caching loads <strong>all</strong> objects into memory.
+ * For tables with millions of rows, this may cause {@code OutOfMemoryError}.
+ * If you work with large datasets, modify {@link #loadAllIntoCache(Class)} to implement lazy caching.
+ * This implementation is ideal for up to hundreds of thousands of records.
  * </p>
  * <p>
  * <b>Custom indexes:</b>
@@ -112,20 +139,23 @@ import br.com.angatusistemas.lib.gson.GsonAPI;
  * </p>
  * <p>
  * <b>Shutdown:</b>
- * Call {@link #shutdown()} when your application terminates to close all connections.
+ * Call {@link #shutdown()} when your application terminates to close all connections and clear the cache.
  * </p>
  *
- * @author [Sua equipe]
+ * @author Equipe Anguti Sistemas
  * @see GsonAPI
  * @see <a href="https://www.sqlite.org/wal.html">SQLite WAL mode</a>
  */
 public abstract class Saveable {
 
-    // Mapeia cada classe para seu pool de conexões (criado sob demanda)
+    // Pool de conexões por classe
     private static final Map<Class<?>, HikariDataSource> DATA_SOURCES = new HashMap<>();
     private static final Object DATA_SOURCE_LOCK = new Object();
 
-    // Carrega o driver JDBC do SQLite estaticamente
+    // Cache principal: classe -> (id -> instância)
+    // Carregado completamente na primeira vez que a classe é acessada
+    private static final Map<Class<?>, Map<String, Object>> CACHE = new ConcurrentHashMap<>();
+
     static {
         try {
             Class.forName("org.sqlite.JDBC");
@@ -162,13 +192,15 @@ public abstract class Saveable {
      * [PT] Salva o objeto atual no banco de dados (INSERT OR REPLACE).
      * <p>
      * Se o objeto não possuir um ID, um UUID é gerado, injetado no objeto via reflexão,
-     * e então o registro é salvo. Operação thread-safe.
+     * e então o registro é salvo. Após salvar, o cache é atualizado com a mesma instância.
+     * Operação thread-safe.
      * </p>
      *
      * [EN] Saves the current object to the database (INSERT OR REPLACE).
      * <p>
      * If the object has no ID, a UUID is generated, injected via reflection,
-     * and then the record is saved. Thread-safe operation.
+     * and then the record is saved. After saving, the cache is updated with the same instance.
+     * Thread-safe operation.
      * </p>
      *
      * @return [PT] {@code true} se salvo com sucesso
@@ -193,6 +225,8 @@ public abstract class Saveable {
             pstmt.setString(1, id);
             pstmt.setString(2, json);
             pstmt.executeUpdate();
+            // Atualiza o cache com a mesma instância (já é a atual)
+            cachePut(this.getClass(), id, this);
             return true;
         } catch (SQLException e) {
             Console.error("Erro ao salvar %s id=%s", e, this.getClass().getSimpleName(), id);
@@ -202,8 +236,10 @@ public abstract class Saveable {
 
     /**
      * [PT] Exclui o objeto atual do banco de dados, baseado em seu ID.
+     * Também o remove do cache.
      *
      * [EN] Deletes the current object from the database based on its ID.
+     * Also removes it from the cache.
      *
      * @return [PT] {@code true} se o registro foi removido ou não existia
      *         [EN] {@code true} if the record was removed or did not exist
@@ -218,13 +254,15 @@ public abstract class Saveable {
      * [PT] Recarrega os dados do objeto a partir do banco de dados, sobrescrevendo
      * os campos atuais com os valores persistidos.
      * <p>
-     * Útil quando o objeto pode ter sido modificado externamente.
+     * Útil quando o objeto pode ter sido modificado externamente. A instância
+     * permanece a mesma (e continua no cache).
      * </p>
      *
      * [EN] Reloads the object's data from the database, overwriting current fields
      * with persisted values.
      * <p>
-     * Useful when the object may have been modified externally.
+     * Useful when the object may have been modified externally. The instance remains
+     * the same (and stays in the cache).
      * </p>
      *
      * @return [PT] a própria instância recarregada, ou {@code null} se o ID for inválido ou não encontrado
@@ -233,24 +271,41 @@ public abstract class Saveable {
     public Saveable reload() {
         String id = getId();
         if (id == null) return null;
-        Saveable reloaded = findById(this.getClass(), id);
-        if (reloaded != null) {
-            copyFields(reloaded, this);
+
+        String tableName = getTableName(this.getClass());
+        String sql = "SELECT data FROM " + tableName + " WHERE id = ?";
+        try (Connection conn = getDataSource(this.getClass()).getConnection();
+             PreparedStatement pstmt = conn.prepareStatement(sql)) {
+            pstmt.setString(1, id);
+            ResultSet rs = pstmt.executeQuery();
+            if (rs.next()) {
+                String json = rs.getString("data");
+                Saveable fresh = (Saveable) GsonAPI.get().fromJson(json, this.getClass());
+                copyFields(fresh, this);
+                // A instância já está no cache (garantido pelo carregamento inicial ou save)
+                cachePut(this.getClass(), id, this);
+                return this;
+            }
+            return null;
+        } catch (SQLException e) {
+            Console.error("Erro ao recarregar %s id=%s", e, this.getClass().getSimpleName(), id);
+            return null;
         }
-        return reloaded;
     }
 
     // ==================== MÉTODOS ESTÁTICOS (MANAGER) ====================
 
     /**
-     * [PT] Busca um objeto pelo ID.
+     * [PT] Busca um objeto pelo ID. Sempre retorna a mesma instância para um mesmo ID.
      * <p>
-     * Performance: O(log n) devido ao índice primário. Milissegundos mesmo com milhões de registros.
+     * Performance: acesso direto ao cache (O(1)). Milissegundos mesmo com milhões de registros.
+     * Se o cache ainda não foi carregado, todos os registros da tabela são carregados na memória.
      * </p>
      *
-     * [EN] Finds an object by its ID.
+     * [EN] Finds an object by its ID. Always returns the same instance for the same ID.
      * <p>
-     * Performance: O(log n) due to primary index. Milliseconds even with millions of records.
+     * Performance: direct cache access (O(1)). Milliseconds even with millions of records.
+     * If the cache hasn't been loaded yet, all records are loaded into memory.
      * </p>
      *
      * @param clazz [PT] classe do objeto (ex: Usuario.class)
@@ -263,36 +318,27 @@ public abstract class Saveable {
      *         [EN] found object or {@code null}
      */
     public static <T> T findById(Class<T> clazz, String id) {
-        String tableName = getTableName(clazz);
-        String sql = "SELECT data FROM " + tableName + " WHERE id = ?";
-        try (Connection conn = getDataSource(clazz).getConnection();
-             PreparedStatement pstmt = conn.prepareStatement(sql)) {
-            pstmt.setString(1, id);
-            ResultSet rs = pstmt.executeQuery();
-            if (rs.next()) {
-                String json = rs.getString("data");
-                return GsonAPI.get().fromJson(json, clazz);
-            }
-            return null;
-        } catch (SQLException e) {
-            Console.error("Erro ao buscar %s id=%s", e, clazz.getSimpleName(), id);
-            return null;
+        ensureCacheLoaded(clazz);
+        Map<String, Object> classCache = CACHE.get(clazz);
+        if (classCache != null && classCache.containsKey(id)) {
+            return clazz.cast(classCache.get(id));
         }
+        return null;
     }
 
     /**
-     * [PT] Retorna TODOS os objetos da classe.
+     * [PT] Retorna TODOS os objetos da classe (do cache).
      * <p>
-     * <strong>ATENÇÃO:</strong> Este método carrega todos os registros da tabela em memória.
-     * <strong>Não use com milhões de objetos</strong> – isso causará OutOfMemoryError e lentidão extrema.
-     * Para grandes volumes, prefira {@link #query(Class, String, Object...)} com paginação ou filtros.
+     * <strong>ATENÇÃO:</strong> Este método retorna todos os objetos do cache em memória.
+     * Se você estiver usando cache total, isso é rápido mas consome memória.
+     * Para grandes volumes, o cache total não é recomendado.
      * </p>
      *
-     * [EN] Returns ALL objects of the class.
+     * [EN] Returns ALL objects of the class (from cache).
      * <p>
-     * <strong>WARNING:</strong> This method loads all table records into memory.
-     * <strong>Do not use with millions of objects</strong> – it will cause OutOfMemoryError and extreme slowness.
-     * For large datasets, prefer {@link #query(Class, String, Object...)} with pagination or filters.
+     * <strong>WARNING:</strong> This method returns all objects from the in‑memory cache.
+     * If you use full caching, this is fast but consumes memory.
+     * For large datasets, full caching is not recommended.
      * </p>
      *
      * @param clazz [PT] classe dos objetos
@@ -303,33 +349,23 @@ public abstract class Saveable {
      *         [EN] list with all objects (may be empty)
      */
     public static <T> List<T> findAll(Class<T> clazz) {
-        String tableName = getTableName(clazz);
-        String sql = "SELECT data FROM " + tableName;
-        List<T> list = new ArrayList<>();
-        try (Connection conn = getDataSource(clazz).getConnection();
-             Statement stmt = conn.createStatement();
-             ResultSet rs = stmt.executeQuery(sql)) {
-            Gson gson = GsonAPI.get();
-            while (rs.next()) {
-                list.add(gson.fromJson(rs.getString("data"), clazz));
-            }
-        } catch (SQLException e) {
-            Console.error("Erro ao listar %s", e, clazz.getSimpleName());
-        }
-        return list;
+        ensureCacheLoaded(clazz);
+        Map<String, Object> classCache = CACHE.get(clazz);
+        if (classCache == null) return new ArrayList<>();
+        return new ArrayList<>(classCache.values()).stream()
+                .map(clazz::cast)
+                .collect(Collectors.toList());
     }
 
     /**
-     * [PT] Filtra objetos usando um predicado em memória.
+     * [PT] Filtra objetos usando um predicado em memória (sobre o cache).
      * <p>
-     * <strong>Não use com milhões de objetos</strong> – carrega todos os registros antes de filtrar.
-     * Prefira usar {@link #query(Class, String, Object...)} com cláusula WHERE no SQL.
+     * Como opera sobre o cache, é eficiente para conjuntos carregados.
      * </p>
      *
-     * [EN] Filters objects using an in‑memory predicate.
+     * [EN] Filters objects using an in‑memory predicate (over the cache).
      * <p>
-     * <strong>Do not use with millions of objects</strong> – loads all records before filtering.
-     * Prefer {@link #query(Class, String, Object...)} with a WHERE clause in SQL.
+     * Since it operates on the cache, it is efficient for loaded sets.
      * </p>
      *
      * @param clazz     [PT] classe dos objetos
@@ -346,14 +382,14 @@ public abstract class Saveable {
     }
 
     /**
-     * [PT] Busca objetos por um campo via reflexão (carrega todos e filtra em memória).
+     * [PT] Busca objetos por um campo via reflexão (sobre o cache).
      * <p>
-     * <strong>Não é eficiente para grandes volumes.</strong> Crie um índice e use {@link #query(Class, String, Object...)}.
+     * Como opera sobre o cache, é rápido para conjuntos carregados.
      * </p>
      *
-     * [EN] Finds objects by a field using reflection (loads all and filters in memory).
+     * [EN] Finds objects by a field using reflection (over the cache).
      * <p>
-     * <strong>Not efficient for large datasets.</strong> Create an index and use {@link #query(Class, String, Object...)}.
+     * Since it operates on the cache, it is fast for loaded sets.
      * </p>
      *
      * @param clazz     [PT] classe dos objetos
@@ -380,9 +416,9 @@ public abstract class Saveable {
     }
 
     /**
-     * [PT] Exclui um objeto pelo ID.
+     * [PT] Exclui um objeto pelo ID (banco e cache).
      *
-     * [EN] Deletes an object by its ID.
+     * [EN] Deletes an object by its ID (database and cache).
      *
      * @param clazz [PT] classe do objeto
      *              [EN] object class
@@ -392,12 +428,17 @@ public abstract class Saveable {
      *         [EN] {@code true} if the record was deleted
      */
     public static boolean deleteById(Class<?> clazz, String id) {
+        ensureCacheLoaded(clazz);
         String tableName = getTableName(clazz);
         String sql = "DELETE FROM " + tableName + " WHERE id = ?";
         try (Connection conn = getDataSource(clazz).getConnection();
              PreparedStatement pstmt = conn.prepareStatement(sql)) {
-            pstmt.setString(1, id);
-            return pstmt.executeUpdate() > 0;
+            boolean deleted = pstmt.executeUpdate() > 0;
+            if (deleted) {
+                Map<String, Object> classCache = CACHE.get(clazz);
+                if (classCache != null) classCache.remove(id);
+            }
+            return deleted;
         } catch (SQLException e) {
             Console.error("Erro ao deletar %s id=%s", e, clazz.getSimpleName(), id);
             return false;
@@ -405,9 +446,9 @@ public abstract class Saveable {
     }
 
     /**
-     * [PT] Exclui todos os objetos da classe (remove todos os registros da tabela).
+     * [PT] Exclui todos os objetos da classe (remove todos os registros da tabela e limpa o cache).
      *
-     * [EN] Deletes all objects of the class (truncates the table).
+     * [EN] Deletes all objects of the class (truncates the table and clears the cache).
      *
      * @param clazz [PT] classe dos objetos
      *              [EN] object class
@@ -415,11 +456,16 @@ public abstract class Saveable {
      *         [EN] number of records removed
      */
     public static int deleteAll(Class<?> clazz) {
+        ensureCacheLoaded(clazz);
         String tableName = getTableName(clazz);
         String sql = "DELETE FROM " + tableName;
         try (Connection conn = getDataSource(clazz).getConnection();
              Statement stmt = conn.createStatement()) {
-            return stmt.executeUpdate(sql);
+            int deleted = stmt.executeUpdate(sql);
+            if (deleted > 0) {
+                CACHE.remove(clazz); // remove todo o cache da classe
+            }
+            return deleted;
         } catch (SQLException e) {
             Console.error("Erro ao deletar todos %s", e, clazz.getSimpleName());
             return 0;
@@ -427,9 +473,9 @@ public abstract class Saveable {
     }
 
     /**
-     * [PT] Verifica se existe um objeto com o ID informado.
+     * [PT] Verifica se existe um objeto com o ID informado (usando cache).
      *
-     * [EN] Checks whether an object with the given ID exists.
+     * [EN] Checks whether an object with the given ID exists (using cache).
      *
      * @param clazz [PT] classe
      *              [EN] class
@@ -439,22 +485,15 @@ public abstract class Saveable {
      *         [EN] {@code true} if exists
      */
     public static boolean exists(Class<?> clazz, String id) {
-        String tableName = getTableName(clazz);
-        String sql = "SELECT 1 FROM " + tableName + " WHERE id = ? LIMIT 1";
-        try (Connection conn = getDataSource(clazz).getConnection();
-             PreparedStatement pstmt = conn.prepareStatement(sql)) {
-            pstmt.setString(1, id);
-            ResultSet rs = pstmt.executeQuery();
-            return rs.next();
-        } catch (SQLException e) {
-            return false;
-        }
+        ensureCacheLoaded(clazz);
+        Map<String, Object> classCache = CACHE.get(clazz);
+        return classCache != null && classCache.containsKey(id);
     }
 
     /**
-     * [PT] Retorna a quantidade total de objetos persistidos da classe.
+     * [PT] Retorna a quantidade total de objetos persistidos (tamanho do cache).
      *
-     * [EN] Returns the total number of persisted objects of the class.
+     * [EN] Returns the total number of persisted objects (cache size).
      *
      * @param clazz [PT] classe
      *              [EN] class
@@ -462,22 +501,16 @@ public abstract class Saveable {
      *         [EN] count of records
      */
     public static long count(Class<?> clazz) {
-        String tableName = getTableName(clazz);
-        String sql = "SELECT COUNT(*) FROM " + tableName;
-        try (Connection conn = getDataSource(clazz).getConnection();
-             Statement stmt = conn.createStatement();
-             ResultSet rs = stmt.executeQuery(sql)) {
-            return rs.getLong(1);
-        } catch (SQLException e) {
-            return 0;
-        }
+        ensureCacheLoaded(clazz);
+        Map<String, Object> classCache = CACHE.get(clazz);
+        return classCache == null ? 0 : classCache.size();
     }
 
     /**
      * [PT] Executa uma consulta SQL customizada que retorna objetos a partir da coluna {@code data}.
      * <p>
      * A consulta deve retornar uma coluna chamada {@code data} contendo o JSON do objeto.
-     * Isso permite usar cláusulas {@code WHERE}, {@code ORDER BY}, {@code LIMIT}, e índices.
+     * Os objetos resultantes são transformados para as instâncias cacheadas (garantindo identidade).
      * </p>
      * <p>
      * <b>Exemplo de uso eficiente:</b>
@@ -498,7 +531,7 @@ public abstract class Saveable {
      * [EN] Executes a custom SQL query that returns objects from the {@code data} column.
      * <p>
      * The query must return a column named {@code data} containing the object's JSON.
-     * This allows using {@code WHERE}, {@code ORDER BY}, {@code LIMIT}, and indexes.
+     * The resulting objects are resolved to cached instances (guaranteeing identity).
      * </p>
      * <p>
      * <b>Efficient usage example:</b>
@@ -530,6 +563,7 @@ public abstract class Saveable {
      *                                       [EN] if the query does not return a "data" column
      */
     public static <T> List<T> query(Class<T> clazz, String sql, Object... params) {
+        ensureCacheLoaded(clazz);
         List<T> list = new ArrayList<>();
         try (Connection conn = getDataSource(clazz).getConnection();
              PreparedStatement pstmt = conn.prepareStatement(sql)) {
@@ -550,7 +584,22 @@ public abstract class Saveable {
             }
             Gson gson = GsonAPI.get();
             while (rs.next()) {
-                list.add(gson.fromJson(rs.getString("data"), clazz));
+                String json = rs.getString("data");
+                T obj = gson.fromJson(json, clazz);
+                // Obtém o ID do objeto desserializado para buscar a instância cacheada
+                String id = extractId(obj);
+                if (id != null) {
+                    T cached = findById(clazz, id);
+                    if (cached != null) {
+                        list.add(cached);
+                        continue;
+                    }
+                }
+                // Se não encontrou no cache (ex: registro novo inserido externamente), adiciona ao cache
+                if (id != null) {
+                    cachePut(clazz, id, obj);
+                }
+                list.add(obj);
             }
         } catch (SQLException e) {
             Console.error("Erro na query customizada: %s", e, sql);
@@ -559,11 +608,11 @@ public abstract class Saveable {
     }
 
     /**
-     * [PT] Fecha todos os pools de conexão. Deve ser chamado ao encerrar a aplicação
+     * [PT] Fecha todos os pools de conexão e limpa o cache. Deve ser chamado ao encerrar a aplicação
      * para evitar vazamento de recursos.
      *
-     * [EN] Closes all connection pools. Should be called when shutting down the application
-     * to avoid resource leaks.
+     * [EN] Closes all connection pools and clears the cache. Should be called when shutting down
+     * the application to avoid resource leaks.
      */
     public static void shutdown() {
         synchronized (DATA_SOURCE_LOCK) {
@@ -572,6 +621,7 @@ public abstract class Saveable {
             }
             DATA_SOURCES.clear();
         }
+        CACHE.clear();
     }
 
     // ==================== MÉTODOS INTERNOS PRIVADOS ====================
@@ -586,13 +636,14 @@ public abstract class Saveable {
                 config.setMinimumIdle(2);
                 config.setIdleTimeout(30000);
                 config.setPoolName("Saveable-" + clazz.getSimpleName());
-                // Otimizações SQLite para concorrência
                 config.addDataSourceProperty("journal_mode", "WAL");
                 config.addDataSourceProperty("synchronous", "NORMAL");
                 config.addDataSourceProperty("cache_size", 10000);
                 config.addDataSourceProperty("temp_store", "MEMORY");
                 DATA_SOURCES.put(clazz, new HikariDataSource(config));
                 createTable(clazz);
+                // Carrega todos os registros da tabela para o cache
+                loadAllIntoCache(clazz);
             }
             return DATA_SOURCES.get(clazz);
         }
@@ -604,12 +655,47 @@ public abstract class Saveable {
         try (Connection conn = getDataSource(clazz).getConnection();
              Statement stmt = conn.createStatement()) {
             stmt.execute(sql);
-            // Garantir WAL mesmo que o pool já tenha definido
             stmt.execute("PRAGMA journal_mode=WAL");
             stmt.execute("PRAGMA synchronous=NORMAL");
         } catch (SQLException e) {
             throw new RuntimeException("Erro ao criar tabela " + tableName, e);
         }
+    }
+
+    /**
+     * Carrega todos os registros da tabela para o cache.
+     */
+    private static void loadAllIntoCache(Class<?> clazz) {
+        String tableName = getTableName(clazz);
+        String sql = "SELECT id, data FROM " + tableName;
+        Map<String, Object> classCache = new ConcurrentHashMap<>();
+        try (Connection conn = getDataSource(clazz).getConnection();
+             Statement stmt = conn.createStatement();
+             ResultSet rs = stmt.executeQuery(sql)) {
+            Gson gson = GsonAPI.get();
+            while (rs.next()) {
+                String id = rs.getString("id");
+                String json = rs.getString("data");
+                Object obj = gson.fromJson(json, clazz);
+                classCache.put(id, obj);
+            }
+            CACHE.put(clazz, classCache);
+        } catch (SQLException e) {
+            Console.error("Erro ao carregar cache para %s", e, clazz.getSimpleName());
+            CACHE.put(clazz, new ConcurrentHashMap<>()); // cache vazio
+        }
+    }
+
+    private static void ensureCacheLoaded(Class<?> clazz) {
+        if (!CACHE.containsKey(clazz)) {
+            // Dispara a criação da tabela e carregamento via getDataSource
+            getDataSource(clazz);
+        }
+    }
+
+    private static void cachePut(Class<?> clazz, String id, Object obj) {
+        Map<String, Object> classCache = CACHE.computeIfAbsent(clazz, k -> new ConcurrentHashMap<>());
+        classCache.put(id, obj);
     }
 
     private static String getTableName(Class<?> clazz) {
@@ -644,6 +730,21 @@ public abstract class Saveable {
                 field.setAccessible(true);
                 field.set(to, field.get(from));
             } catch (IllegalAccessException ignored) {}
+        }
+    }
+
+    private static String extractId(Object obj) {
+        if (obj instanceof Saveable) {
+            return ((Saveable) obj).getId();
+        }
+        // Fallback: tentar ler campo 'id' via reflexão
+        try {
+            java.lang.reflect.Field idField = obj.getClass().getDeclaredField("id");
+            idField.setAccessible(true);
+            Object idValue = idField.get(obj);
+            return idValue != null ? idValue.toString() : null;
+        } catch (Exception e) {
+            return null;
         }
     }
 }

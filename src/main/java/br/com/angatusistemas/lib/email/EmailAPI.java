@@ -4,6 +4,7 @@ import java.io.File;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 
 import org.slf4j.Logger;
@@ -20,6 +21,7 @@ import jakarta.mail.Authenticator;
 import jakarta.mail.Message;
 import jakarta.mail.MessagingException;
 import jakarta.mail.PasswordAuthentication;
+import jakarta.mail.SendFailedException;
 import jakarta.mail.Session;
 import jakarta.mail.Transport;
 import jakarta.mail.internet.InternetAddress;
@@ -46,11 +48,11 @@ import jakarta.mail.internet.MimeMultipart;
  * <b>Exemplo de uso:</b>
  * <pre>
  * // E-mail simples (assunto final: "Bem-vindo #A7F")
- * EmailAPI.sendSimple("cliente@email.com", "Bem-vindo", "Olá, seja bem-vindo!");
+ * boolean ok = EmailAPI.sendSimple("cliente@email.com", "Bem-vindo", "Olá, seja bem-vindo!").join();
  *
  * // E-mail HTML com template
  * String html = EmailAPI.loadHtmlTemplate("/emails/welcome.html", Map.of("nome", "João"));
- * EmailAPI.sendHtml("cliente@email.com", "Bem-vindo", html);
+ * boolean ok = EmailAPI.sendHtml("cliente@email.com", "Bem-vindo", html).join();
  * </pre>
  * </p>
  *
@@ -72,11 +74,11 @@ import jakarta.mail.internet.MimeMultipart;
  * <b>Usage example:</b>
  * <pre>
  * // Simple email (final subject: "Welcome #A7F")
- * EmailAPI.sendSimple("client@email.com", "Welcome", "Hello, welcome!");
+ * boolean ok = EmailAPI.sendSimple("client@email.com", "Welcome", "Hello, welcome!").join();
  *
  * // HTML email with template
  * String html = EmailAPI.loadHtmlTemplate("/emails/welcome.html", Map.of("name", "John"));
- * EmailAPI.sendHtml("client@email.com", "Welcome", html);
+ * boolean ok = EmailAPI.sendHtml("client@email.com", "Welcome", html).join();
  * </pre>
  * </p>
  *
@@ -131,9 +133,11 @@ public final class EmailAPI {
      *                     [EN] email subject (random code will be added)
      * @param corpo        [PT] corpo do e-mail em texto puro
      *                     [EN] plain text email body
+     * @return [PT] {@code CompletableFuture<Boolean>} — true se enviado, false se o endereço não existir ou falhar
+     *         [EN] {@code CompletableFuture<Boolean>} — true if sent, false if address does not exist or fails
      */
-    public static void sendSimple(String destinatario, String assunto, String corpo) {
-        sendSimple(List.of(destinatario), null, null, assunto, corpo);
+    public static CompletableFuture<Boolean> sendSimple(String destinatario, String assunto, String corpo) {
+        return sendSimple(List.of(destinatario), null, null, assunto, corpo);
     }
 
     /**
@@ -155,9 +159,11 @@ public final class EmailAPI {
      *                     [EN] email subject (random code will be added)
      * @param corpoHtml    [PT] corpo do e-mail em HTML
      *                     [EN] HTML email body
+     * @return [PT] {@code CompletableFuture<Boolean>} — true se enviado, false se o endereço não existir ou falhar
+     *         [EN] {@code CompletableFuture<Boolean>} — true if sent, false if address does not exist or fails
      */
-    public static void sendHtml(String destinatario, String assunto, String corpoHtml) {
-        sendHtml(List.of(destinatario), null, null, assunto, corpoHtml);
+    public static CompletableFuture<Boolean> sendHtml(String destinatario, String assunto, String corpoHtml) {
+        return sendHtml(List.of(destinatario), null, null, assunto, corpoHtml);
     }
 
     /**
@@ -171,9 +177,11 @@ public final class EmailAPI {
      *                      [EN] email subject (random code will be added)
      * @param corpo         [PT] corpo do e-mail em texto puro
      *                      [EN] plain text email body
+     * @return [PT] {@code CompletableFuture<Boolean>} — true se enviado, false se o endereço não existir ou falhar
+     *         [EN] {@code CompletableFuture<Boolean>} — true if sent, false if address does not exist or fails
      */
-    public static void sendSimpleToMultiple(List<String> destinatarios, String assunto, String corpo) {
-        sendSimple(destinatarios, null, null, assunto, corpo);
+    public static CompletableFuture<Boolean> sendSimpleToMultiple(List<String> destinatarios, String assunto, String corpo) {
+        return sendSimple(destinatarios, null, null, assunto, corpo);
     }
 
     /**
@@ -187,9 +195,11 @@ public final class EmailAPI {
      *                      [EN] email subject (random code will be added)
      * @param corpoHtml     [PT] corpo do e-mail em HTML
      *                      [EN] HTML email body
+     * @return [PT] {@code CompletableFuture<Boolean>} — true se enviado, false se o endereço não existir ou falhar
+     *         [EN] {@code CompletableFuture<Boolean>} — true if sent, false if address does not exist or fails
      */
-    public static void sendHtmlToMultiple(List<String> destinatarios, String assunto, String corpoHtml) {
-        sendHtml(destinatarios, null, null, assunto, corpoHtml);
+    public static CompletableFuture<Boolean> sendHtmlToMultiple(List<String> destinatarios, String assunto, String corpoHtml) {
+        return sendHtml(destinatarios, null, null, assunto, corpoHtml);
     }
 
     // ==================== MÉTODOS AVANÇADOS ====================
@@ -209,19 +219,28 @@ public final class EmailAPI {
      *                      [EN] email subject (random code will be added)
      * @param corpo         [PT] corpo do e-mail em texto puro
      *                      [EN] plain text email body
+     * @return [PT] {@code CompletableFuture<Boolean>} — true se enviado, false se o endereço não existir ou falhar
+     *         [EN] {@code CompletableFuture<Boolean>} — true if sent, false if address does not exist or fails
      */
-    public static void sendSimple(List<String> destinatarios, List<String> cc, List<String> bcc,
-                                   String assunto, String corpo) {
+    public static CompletableFuture<Boolean> sendSimple(List<String> destinatarios, List<String> cc, List<String> bcc,
+                                                         String assunto, String corpo) {
+        CompletableFuture<Boolean> future = new CompletableFuture<>();
         Task.runAsync(() -> {
             try {
                 Message message = criarMensagem(destinatarios, cc, bcc, assunto);
                 message.setText(corpo);
                 Transport.send(message);
                 logger.info("E-mail simples enviado para: {}", destinatarios);
+                future.complete(true);
+            } catch (SendFailedException e) {
+                logger.error("E-mail inválido ou inexistente para {}: {}", destinatarios, e.getMessage());
+                future.complete(false);
             } catch (Exception e) {
                 logger.error("Falha ao enviar e-mail simples para {}: {}", destinatarios, e.getMessage());
+                future.complete(false);
             }
         });
+        return future;
     }
 
     /**
@@ -239,19 +258,28 @@ public final class EmailAPI {
      *                      [EN] email subject (random code will be added)
      * @param corpoHtml     [PT] corpo do e-mail em HTML
      *                      [EN] HTML email body
+     * @return [PT] {@code CompletableFuture<Boolean>} — true se enviado, false se o endereço não existir ou falhar
+     *         [EN] {@code CompletableFuture<Boolean>} — true if sent, false if address does not exist or fails
      */
-    public static void sendHtml(List<String> destinatarios, List<String> cc, List<String> bcc,
-                                 String assunto, String corpoHtml) {
+    public static CompletableFuture<Boolean> sendHtml(List<String> destinatarios, List<String> cc, List<String> bcc,
+                                                       String assunto, String corpoHtml) {
+        CompletableFuture<Boolean> future = new CompletableFuture<>();
         Task.runAsync(() -> {
             try {
                 Message message = criarMensagem(destinatarios, cc, bcc, assunto);
                 message.setContent(corpoHtml, "text/html; charset=utf-8");
                 Transport.send(message);
                 logger.info("E-mail HTML enviado para: {}", destinatarios);
+                future.complete(true);
+            } catch (SendFailedException e) {
+                logger.error("E-mail inválido ou inexistente para {}: {}", destinatarios, e.getMessage());
+                future.complete(false);
             } catch (Exception e) {
                 logger.error("Falha ao enviar e-mail HTML para {}: {}", destinatarios, e.getMessage());
+                future.complete(false);
             }
         });
+        return future;
     }
 
     /**
@@ -269,10 +297,12 @@ public final class EmailAPI {
      *                     [EN] list of files to attach
      * @param isHtml       [PT] true se o corpo for HTML, false para texto puro
      *                     [EN] true if body is HTML, false for plain text
+     * @return [PT] {@code CompletableFuture<Boolean>} — true se enviado, false se o endereço não existir ou falhar
+     *         [EN] {@code CompletableFuture<Boolean>} — true if sent, false if address does not exist or fails
      */
-    public static void sendWithAttachments(String destinatario, String assunto, String corpo,
-                                            List<File> anexos, boolean isHtml) {
-        sendWithAttachments(List.of(destinatario), null, null, assunto, corpo, anexos, isHtml);
+    public static CompletableFuture<Boolean> sendWithAttachments(String destinatario, String assunto, String corpo,
+                                                                  List<File> anexos, boolean isHtml) {
+        return sendWithAttachments(List.of(destinatario), null, null, assunto, corpo, anexos, isHtml);
     }
 
     /**
@@ -294,18 +324,20 @@ public final class EmailAPI {
      *                      [EN] list of files to attach
      * @param isHtml        [PT] true se o corpo for HTML
      *                      [EN] true if body is HTML
+     * @return [PT] {@code CompletableFuture<Boolean>} — true se enviado, false se o endereço não existir ou falhar
+     *         [EN] {@code CompletableFuture<Boolean>} — true if sent, false if address does not exist or fails
      */
-    public static void sendWithAttachments(List<String> destinatarios, List<String> cc, List<String> bcc,
-                                            String assunto, String corpo, List<File> anexos, boolean isHtml) {
+    public static CompletableFuture<Boolean> sendWithAttachments(List<String> destinatarios, List<String> cc,
+                                                                  List<String> bcc, String assunto, String corpo,
+                                                                  List<File> anexos, boolean isHtml) {
+        CompletableFuture<Boolean> future = new CompletableFuture<>();
         Task.runAsync(() -> {
             try {
                 MimeMessage message = (MimeMessage) criarMensagem(destinatarios, cc, bcc, assunto);
 
-                // Se houver anexos, usar Multipart
                 if (anexos != null && !anexos.isEmpty()) {
                     MimeMultipart multipart = new MimeMultipart();
 
-                    // Parte do corpo
                     MimeBodyPart bodyPart = new MimeBodyPart();
                     if (isHtml) {
                         bodyPart.setContent(corpo, "text/html; charset=utf-8");
@@ -314,7 +346,6 @@ public final class EmailAPI {
                     }
                     multipart.addBodyPart(bodyPart);
 
-                    // Anexos
                     for (File anexo : anexos) {
                         if (anexo != null && anexo.exists() && anexo.isFile()) {
                             MimeBodyPart attachmentPart = new MimeBodyPart();
@@ -327,7 +358,6 @@ public final class EmailAPI {
 
                     message.setContent(multipart);
                 } else {
-                    // Sem anexos, define conteúdo normalmente
                     if (isHtml) {
                         message.setContent(corpo, "text/html; charset=utf-8");
                     } else {
@@ -337,10 +367,16 @@ public final class EmailAPI {
 
                 Transport.send(message);
                 logger.info("E-mail com anexos enviado para: {}", destinatarios);
+                future.complete(true);
+            } catch (SendFailedException e) {
+                logger.error("E-mail inválido ou inexistente para {}: {}", destinatarios, e.getMessage());
+                future.complete(false);
             } catch (Exception e) {
                 logger.error("Falha ao enviar e-mail com anexos: {}", e.getMessage());
+                future.complete(false);
             }
         });
+        return future;
     }
 
     // ==================== MÉTODOS DE TEMPLATE ====================
