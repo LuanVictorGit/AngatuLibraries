@@ -106,16 +106,20 @@ public final class JavalinAPI {
     private static final Map<String, String> SECURITY_HEADERS = new HashMap<>();
 
     static {
-        SECURITY_HEADERS.put("X-Frame-Options", "DENY");
+        SECURITY_HEADERS.put("X-Frame-Options", "SAMEORIGIN");
         SECURITY_HEADERS.put("X-XSS-Protection", "1; mode=block");
         SECURITY_HEADERS.put("Referrer-Policy", "strict-origin-when-cross-origin");
+
         SECURITY_HEADERS.put("Content-Security-Policy",
-                "default-src 'self' data: blob:; " +
-                "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; " +
-                "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; " +
+                "default-src * data: blob: 'unsafe-inline' 'unsafe-eval'; " +
+                "script-src * data: blob: 'unsafe-inline' 'unsafe-eval'; " +
+                "style-src * data: blob: 'unsafe-inline'; " +
                 "img-src * data: blob:; " +
-                "font-src 'self' https://cdn.jsdelivr.net; " +
-                "connect-src *;"
+                "font-src * data: blob:; " +
+                "connect-src * data: blob:; " +
+                "frame-src * data: blob:; " +
+                "media-src * data: blob:; " +
+                "object-src * data: blob:;"
         );
     }
 
