@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://angatusistemas.com.br/img/iconangatu.png" alt="Angatu Sistemas" width="120"/>
+  <img src="https://angatusistemas.com.br/favicon.ico" alt="Angatu Sistemas" width="120"/>
 </p>
 
 <h1 align="center">AngatuLibraries</h1>
