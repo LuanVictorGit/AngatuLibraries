@@ -17,6 +17,7 @@ import javax.imageio.ImageIO;
 import org.jetbrains.annotations.NotNull;
 
 import br.com.angatusistemas.lib.console.Console;
+import br.com.angatusistemas.lib.dependencies.Dependencies;
 import br.com.angatusistemas.lib.env.Env;
 import net.dv8tion.jda.api.JDA;
 import net.dv8tion.jda.api.JDABuilder;
@@ -96,6 +97,11 @@ import net.dv8tion.jda.api.utils.messages.MessageCreateBuilder;
  */
 public final class Bot {
 
+    /** Coordenadas Maven da dependência JDA. */
+    private static final String JDA_COORDINATES = "net.dv8tion:JDA:6.4.1";
+    /** Nome da funcionalidade para mensagens de dependência ausente. */
+    private static final String DISCORD_FEATURE = "Discord Bot (JDA)";
+
     private static JDA jda;
     private static boolean initialized = false;
     private static final Map<String, Consumer<ButtonInteractionEvent>> buttonActions = new ConcurrentHashMap<>();
@@ -115,6 +121,7 @@ public final class Bot {
      *         [EN] true if initialized successfully, false otherwise
      */
     public static boolean setup() {
+        Dependencies.require("net.dv8tion.jda.api.JDA", JDA_COORDINATES, DISCORD_FEATURE);
         String token = Env.get().get("DISCORD_BOT_TOKEN");
         if (token == null || token.trim().isEmpty()) {
             Console.error("Token do Discord não configurado. Adicione DISCORD_BOT_TOKEN no .env");
@@ -134,6 +141,7 @@ public final class Bot {
      *         [EN] true if initialized successfully
      */
     public static synchronized boolean setup(String token) {
+        Dependencies.require("net.dv8tion.jda.api.JDA", JDA_COORDINATES, DISCORD_FEATURE);
         if (initialized) {
             Console.warn("DiscordBot já foi inicializado.");
             return true;
@@ -153,10 +161,10 @@ public final class Bot {
             return true;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            Console.error("Inicialização do DiscordBot interrompida: {}", e);
+            Console.error("Inicialização do DiscordBot interrompida", e);
             return false;
         } catch (Exception e) {
-            Console.error("Falha ao inicializar DiscordBot: {}", e);
+            Console.error("Falha ao inicializar DiscordBot", e);
             return false;
         }
     }
@@ -209,7 +217,7 @@ public final class Bot {
             }
             return channel.sendMessage(message).complete();
         } catch (Exception e) {
-            Console.error("Erro ao enviar mensagem: {}", e);
+            Console.error("Erro ao enviar mensagem", e);
             return null;
         }
     }
@@ -246,7 +254,7 @@ public final class Bot {
                     .addComponents(ActionRow.of(button))
                     .complete();
         } catch (Exception e) {
-            Console.error("Erro ao enviar mensagem com botão: {}", e);
+            Console.error("Erro ao enviar mensagem com botão", e);
             return null;
         }
     }
@@ -278,7 +286,7 @@ public final class Bot {
                     .addComponents(ActionRow.of(buttonList))
                     .complete();
         } catch (Exception e) {
-            Console.error("Erro ao enviar mensagem com múltiplos botões: {}", e);
+            Console.error("Erro ao enviar mensagem com múltiplos botões", e);
             return null;
         }
     }
@@ -312,7 +320,7 @@ public final class Bot {
             builder.setFiles(fileUpload);
             return channel.sendMessage(builder.build()).complete();
         } catch (Exception e) {
-            Console.error("Erro ao enviar imagem por URL: {}", e);
+            Console.error("Erro ao enviar imagem por URL", e);
             return null;
         }
     }
@@ -352,7 +360,7 @@ public final class Bot {
             if (channel == null) return null;
             return channel.sendMessage(builder.build()).complete();
         } catch (Exception e) {
-            Console.error("Erro ao enviar imagem por Base64: {}", e);
+            Console.error("Erro ao enviar imagem por Base64", e);
             return null;
         }
     }
@@ -387,7 +395,7 @@ public final class Bot {
             builder.setFiles(fileUpload);
             return channel.sendMessage(builder.build()).complete();
         } catch (Exception e) {
-            Console.error("Erro ao enviar imagem por arquivo: {}", e);
+            Console.error("Erro ao enviar imagem por arquivo", e);
             return null;
         }
     }
@@ -422,7 +430,7 @@ public final class Bot {
             if (channel == null) return null;
             return channel.sendMessage(builder.build()).complete();
         } catch (Exception e) {
-            Console.error("Erro ao enviar BufferedImage: {}", e);
+            Console.error("Erro ao enviar BufferedImage", e);
             return null;
         }
     }
@@ -470,7 +478,7 @@ public final class Bot {
                 try {
                     buttonActions.get(componentId).accept(event);
                 } catch (Exception e) {
-                    Console.error("Erro ao processar clique do botão {}: {}", componentId, e);
+                    Console.error("Erro ao processar clique do botão %s", componentId, e);
                     if (!event.isAcknowledged()) {
                         event.reply("Ocorreu um erro ao processar sua ação.").setEphemeral(true).queue();
                     }

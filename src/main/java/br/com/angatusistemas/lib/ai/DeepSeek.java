@@ -17,6 +17,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 
 import br.com.angatusistemas.lib.console.Console;
+import br.com.angatusistemas.lib.dependencies.Dependencies;
 import br.com.angatusistemas.lib.env.Env;
 
 /**
@@ -74,12 +75,21 @@ public final class DeepSeek {
 	private static final int TIMEOUT_SECONDS = 300;
 	private static final double DEFAULT_TEMPERATURE = 1.0;
 
+	/** Coordenadas Maven da dependência Gson. */
+	private static final String GSON_COORDINATES = "com.google.code.gson:gson:2.13.2";
+	/** Nome da funcionalidade para mensagens de dependência ausente. */
+	private static final String AI_FEATURE = "IA (DeepSeek)";
+
 	private static String apiKey;
 	private static String model = "deepseek-chat";
 	private static boolean initialized = false;
 
 	private static final HttpClient httpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
-	private static final Gson gson = new GsonBuilder().create();
+
+	/** Holder lazy: evita resolver o Gson no classload da classe. */
+	private static final class GsonHolder {
+		static final Gson INSTANCE = new GsonBuilder().create();
+	}
 
 	private DeepSeek() {
 		throw new UnsupportedOperationException("Utility class cannot be instantiated");
@@ -157,6 +167,7 @@ public final class DeepSeek {
 	 *         response or null on error
 	 */
 	public static String ask(String systemInstruction, String userMessage) {
+		Dependencies.require("com.google.gson.Gson", GSON_COORDINATES, AI_FEATURE);
 		if (!initialized && !initialize())
 			return null;
 
@@ -169,12 +180,12 @@ public final class DeepSeek {
 
 			HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
 			if (response.statusCode() != 200) {
-				Console.error("Erro na API DeepSeek: HTTP {} - {}", response.statusCode(), response.body());
+				Console.error("Erro na API DeepSeek: HTTP %d - %s", response.statusCode(), response.body());
 				return null;
 			}
 			return parseResponse(response.body());
 		} catch (Exception e) {
-			Console.error("Erro ao chamar DeepSeek API: {}", e);
+			Console.error("Erro ao chamar DeepSeek API", e);
 			return null;
 		}
 	}
@@ -194,6 +205,7 @@ public final class DeepSeek {
 	 *                          (chunk) [EN] callback that receives each text chunk
 	 */
 	public static void askStream(String systemInstruction, String userMessage, Consumer<String> onChunk) {
+		Dependencies.require("com.google.gson.Gson", GSON_COORDINATES, AI_FEATURE);
 		if (!initialized && !initialize())
 			return;
 
@@ -206,7 +218,7 @@ public final class DeepSeek {
 
 			HttpResponse<InputStream> response = httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
 			if (response.statusCode() != 200) {
-				Console.error("Erro na API DeepSeek (stream): HTTP {}", response.statusCode());
+				Console.error("Erro na API DeepSeek (stream): HTTP %d", response.statusCode());
 				return;
 			}
 
@@ -226,7 +238,7 @@ public final class DeepSeek {
 				}
 			}
 		} catch (Exception e) {
-			Console.error("Erro no streaming da DeepSeek: {}", e);
+			Console.error("Erro no streaming da DeepSeek", e);
 		}
 	}
 
@@ -255,12 +267,12 @@ public final class DeepSeek {
 		messages.add(user);
 
 		body.add("messages", messages);
-		return gson.toJson(body);
+		return GsonHolder.INSTANCE.toJson(body);
 	}
 
 	private static String parseResponse(String json) {
 		try {
-			JsonObject obj = gson.fromJson(json, JsonObject.class);
+			JsonObject obj = GsonHolder.INSTANCE.fromJson(json, JsonObject.class);
 			JsonArray choices = obj.getAsJsonArray("choices");
 			if (choices != null && choices.size() > 0) {
 				JsonObject message = choices.get(0).getAsJsonObject().getAsJsonObject("message");
@@ -269,7 +281,7 @@ public final class DeepSeek {
 				}
 			}
 		} catch (Exception e) {
-			Console.error("Erro ao parsear resposta DeepSeek: {}", e);
+			Console.error("Erro ao parsear resposta DeepSeek", e);
 		}
 		return null;
 	}
@@ -278,7 +290,7 @@ public final class DeepSeek {
 		try {
 			if (chunkJson == null || chunkJson.isEmpty())
 				return null;
-			JsonObject obj = gson.fromJson(chunkJson, JsonObject.class);
+			JsonObject obj = GsonHolder.INSTANCE.fromJson(chunkJson, JsonObject.class);
 			JsonArray choices = obj.getAsJsonArray("choices");
 			if (choices != null && choices.size() > 0) {
 				JsonObject delta = choices.get(0).getAsJsonObject().getAsJsonObject("delta");

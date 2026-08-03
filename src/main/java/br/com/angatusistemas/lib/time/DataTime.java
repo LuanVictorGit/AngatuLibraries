@@ -11,7 +11,8 @@ import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
 import java.time.temporal.TemporalAdjusters;
 import java.util.Date;
-import java.util.TimeZone;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * [PT] Classe utilitária para operações comuns com datas, horas e fusos horários.
@@ -45,6 +46,9 @@ public final class DataTime {
     public static final DateTimeFormatter ISO_DATETIME_FORMATTER = DateTimeFormatter.ISO_LOCAL_DATE_TIME;
     public static final DateTimeFormatter ISO_DATE_FORMATTER = DateTimeFormatter.ISO_LOCAL_DATE;
 
+    /** Cache de formatadores para padrões personalizados (thread-safe). */
+    private static final Map<String, DateTimeFormatter> CUSTOM_FORMATTER_CACHE = new ConcurrentHashMap<>();
+
     private DataTime() {
         throw new UnsupportedOperationException("Utility class cannot be instantiated");
     }
@@ -55,25 +59,23 @@ public final class DataTime {
     /**
      * [PT] Retorna a data e hora atual no formato "dd/MM/yyyy - HH:mm" com fuso de São Paulo.
      * <p>
-     * Este método usa {@link java.util.Calendar} e {@link java.text.SimpleDateFormat}
-     * (não thread-safe). Prefira {@link #getCurrentDateTime()} para código moderno.
+     * Método legado mantido para compatibilidade. A implementação atual usa
+     * {@link DateTimeFormatter} (thread-safe e sem alocação por chamada).
+     * Prefira {@link #getCurrentDateTime()} para código novo.
      * </p>
-     * 
+     *
      * [EN] Returns current date and time in "dd/MM/yyyy - HH:mm" format with Sao Paulo timezone.
      * <p>
-     * This method uses {@link java.util.Calendar} and {@link java.text.SimpleDateFormat}
-     * (not thread-safe). Prefer {@link #getCurrentDateTime()} for modern code.
+     * Legacy method kept for compatibility. The current implementation uses
+     * {@link DateTimeFormatter} (thread-safe, no per-call allocation).
+     * Prefer {@link #getCurrentDateTime()} for new code.
      * </p>
      *
      * @return [PT] string formatada com data e hora atuais
      *         [EN] formatted string with current date and time
      */
     public static String getData() {
-        // Mantido original para compatibilidade, mas não otimizado.
-        // Legacy method kept for compatibility, but not optimized.
-        java.text.SimpleDateFormat sdf = new java.text.SimpleDateFormat("dd/MM/yyyy - HH:mm");
-        sdf.setTimeZone(TimeZone.getTimeZone(DEFAULT_ZONE));
-        return sdf.format(java.util.Calendar.getInstance().getTime());
+        return LocalDateTime.now(DEFAULT_ZONE).format(DATETIME_BR_FORMATTER);
     }
 
     // ==================== OBTENÇÃO DE DATA/HORA ATUAL ====================
@@ -177,8 +179,7 @@ public final class DataTime {
      *         [EN] formatted string
      */
     public static String formatCustom(LocalDateTime dateTime, String pattern) {
-        DateTimeFormatter formatter = DateTimeFormatter.ofPattern(pattern);
-        return dateTime.format(formatter);
+        return dateTime.format(formatterFor(pattern));
     }
 
     // ==================== PARSING (CONVERSÃO DE STRING PARA DATA) ====================
@@ -223,8 +224,7 @@ public final class DataTime {
      *         [EN] corresponding LocalDateTime
      */
     public static LocalDateTime parseCustom(String dateTimeStr, String pattern) {
-        DateTimeFormatter formatter = DateTimeFormatter.ofPattern(pattern);
-        return LocalDateTime.parse(dateTimeStr, formatter);
+        return LocalDateTime.parse(dateTimeStr, formatterFor(pattern));
     }
 
     // ==================== OPERAÇÕES ARITMÉTICAS COM DATAS ====================
@@ -646,7 +646,7 @@ public final class DataTime {
         try {
             parseDate(dateStr);
             return true;
-        } catch (Exception e) {
+        } catch (java.time.format.DateTimeParseException e) {
             return false;
         }
     }
@@ -659,8 +659,30 @@ public final class DataTime {
         try {
             parseDateTime(dateTimeStr);
             return true;
-        } catch (Exception e) {
+        } catch (java.time.format.DateTimeParseException e) {
             return false;
         }
+    }
+
+    /**
+     * [PT] Obtém (ou cria e cacheia) um {@link DateTimeFormatter} para o padrão informado.
+     * <p>
+     * {@code DateTimeFormatter} é imutável e thread-safe; o cache evita a
+     * recompilação do padrão a cada chamada.
+     * </p>
+     *
+     * [EN] Returns (creating and caching if needed) a {@link DateTimeFormatter} for the given pattern.
+     * <p>
+     * {@code DateTimeFormatter} is immutable and thread-safe; the cache avoids
+     * re-parsing the pattern on every call.
+     * </p>
+     *
+     * @param pattern [PT] padrão de formatação (ex: "yyyy/MM/dd HH:mm")
+     *                [EN] formatting pattern (e.g., "yyyy/MM/dd HH:mm")
+     * @return [PT] formatador reutilizável para o padrão
+     *         [EN] reusable formatter for the pattern
+     */
+    private static DateTimeFormatter formatterFor(String pattern) {
+        return CUSTOM_FORMATTER_CACHE.computeIfAbsent(pattern, DateTimeFormatter::ofPattern);
     }
 }

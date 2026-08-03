@@ -3,9 +3,9 @@ package br.com.angatusistemas.lib;
 import java.io.File;
 import java.io.PrintStream;
 
-import br.com.angatusistemas.lib.browser.BrowserAPI;
 import br.com.angatusistemas.lib.console.Console;
 import br.com.angatusistemas.lib.console.InterceptorOutputStream;
+import br.com.angatusistemas.lib.dependencies.Dependencies;
 import br.com.angatusistemas.lib.javalin.JavalinAPI;
 import br.com.angatusistemas.lib.javalin.html.HtmlRouteAPI;
 import io.javalin.Javalin;
@@ -15,7 +15,7 @@ import lombok.Setter;
 @Getter
 @Setter
 public class AngatuLib {
-	
+
 	private final String PATH_FOLDER_CERTS;
 	@Getter private static AngatuLib instance;
 	private final boolean bloqByMaxRequisitions;
@@ -28,6 +28,9 @@ public class AngatuLib {
 	private String originHost;
 
 	public AngatuLib(String addressCertificate, int port, boolean bloqByMaxRequisitions) {
+		// Guard de dependência: verifica o Javalin ANTES de qualquer referência
+		// ao servidor, exibindo instruções de instalação se ausente
+		Dependencies.require("io.javalin.Javalin", "io.javalin:javalin:7.2.2", "Web Server (Javalin)");
 		instance = this;
 		this.bloqByMaxRequisitions = bloqByMaxRequisitions;
 		this.port = port;
@@ -42,8 +45,6 @@ public class AngatuLib {
 		} else {
 			System.out.println("pasta dos certificados configurados com sucesso.");
 		}
-		
-		BrowserAPI.initPool();
 		
 		javalin = JavalinAPI.setup(folderCerts, port, localhost, bloqByMaxRequisitions);
 		if (javalin != null) {

@@ -1,26 +1,18 @@
 package br.com.angatusistemas.lib.connection;
 
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
+
 /**
- * [PT] Enumeração dos códigos de status HTTP conforme as especificações RFC 7231 e extensões.
- * <p>
- * Inclui códigos informativos (1xx), sucesso (2xx), redirecionamento (3xx),
- * erro do cliente (4xx) e erro do servidor (5xx). O método {@link #fromCode(int)} permite
- * obter a constante a partir do valor numérico.
- * </p>
- * <p>
- * Esta enumeração é utilizada pela classe {@link Request} para representar o status
- * das respostas HTTP.
- * </p>
+ * Enumeração dos códigos de status HTTP conforme as especificações RFC 7231 e extensões.
  *
- * [EN] Enumeration of HTTP status codes as per RFC 7231 and extensions.
- * <p>
- * Includes informational (1xx), success (2xx), redirection (3xx),
- * client error (4xx) and server error (5xx) codes. The {@link #fromCode(int)} method
- * allows retrieving the constant from the numeric value.
- * </p>
- * <p>
- * This enumeration is used by the {@link Request} class to represent HTTP response status.
- * </p>
+ * <p>Inclui códigos informativos (1xx), sucesso (2xx), redirecionamento (3xx),
+ * erro do cliente (4xx) e erro do servidor (5xx). O método {@link #fromCode(int)}
+ * permite obter a constante a partir do valor numérico.</p>
+ *
+ * <p>Esta enumeração é utilizada pela classe {@link Request} para representar o
+ * status das respostas HTTP.</p>
  *
  * @author Angatu Sistemas
  * @see <a href="https://tools.ietf.org/html/rfc7231">RFC 7231</a>
@@ -81,6 +73,9 @@ public enum StatusCode {
     GATEWAY_TIMEOUT(504),
     HTTP_VERSION_NOT_SUPPORTED(505);
 
+    /** Lookup O(1) de código numérico → constante, construído uma única vez. */
+    private static final Map<Integer, StatusCode> BY_CODE = buildLookup();
+
     private final int code;
 
     StatusCode(int code) {
@@ -88,40 +83,29 @@ public enum StatusCode {
     }
 
     /**
-     * [PT] Retorna o código numérico do status HTTP.
-     * [EN] Returns the numeric HTTP status code.
+     * Retorna o código numérico do status HTTP.
      *
-     * @return [PT] valor inteiro do código (ex: 200, 404)
-     *         [EN] integer value of the code (e.g., 200, 404)
+     * @return Valor inteiro do código (ex: 200, 404)
      */
     public int code() {
         return code;
     }
 
     /**
-     * [PT] Obtém a constante {@code StatusCode} correspondente ao código numérico.
-     * <p>
-     * Percorre todos os valores definidos e retorna a primeira correspondência.
-     * Se nenhum for encontrado, retorna {@code null}.
-     * </p>
+     * Obtém a constante {@code StatusCode} correspondente ao código numérico.
      *
-     * [EN] Returns the {@code StatusCode} constant corresponding to the numeric code.
-     * <p>
-     * Iterates over all defined values and returns the first match.
-     * If none is found, returns {@code null}.
-     * </p>
-     *
-     * @param code [PT] código HTTP (ex: 200, 404)
-     *             [EN] HTTP code (e.g., 200, 404)
-     * @return [PT] constante do enum ou {@code null} se não existir
-     *         [EN] enum constant or {@code null} if it does not exist
+     * @param code Código HTTP (ex: 200, 404)
+     * @return Constante do enum, ou {@code null} se o código não existir
      */
     public static StatusCode fromCode(int code) {
+        return BY_CODE.get(code);
+    }
+
+    private static Map<Integer, StatusCode> buildLookup() {
+        Map<Integer, StatusCode> map = new HashMap<>();
         for (StatusCode status : values()) {
-            if (status.code == code) {
-                return status;
-            }
+            map.put(status.code, status);
         }
-        return null;
+        return Collections.unmodifiableMap(map);
     }
 }

@@ -14,13 +14,13 @@ import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Predicate;
-import java.util.stream.Collectors;
 
 import com.google.gson.Gson;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 
 import br.com.angatusistemas.lib.console.Console;
+import br.com.angatusistemas.lib.dependencies.Dependencies;
 import br.com.angatusistemas.lib.gson.GsonAPI;
 
 /**
@@ -142,7 +142,7 @@ import br.com.angatusistemas.lib.gson.GsonAPI;
  * Call {@link #shutdown()} when your application terminates to close all connections and clear the cache.
  * </p>
  *
- * @author Equipe Anguti Sistemas
+ * @author Equipe Angatu Sistemas
  * @see GsonAPI
  * @see <a href="https://www.sqlite.org/wal.html">SQLite WAL mode</a>
  */
@@ -156,13 +156,10 @@ public abstract class Saveable {
     // Carregado completamente na primeira vez que a classe é acessada
     private static final Map<Class<?>, Map<String, Object>> CACHE = new ConcurrentHashMap<>();
 
-    static {
-        try {
-            Class.forName("org.sqlite.JDBC");
-        } catch (ClassNotFoundException e) {
-            throw new RuntimeException("Driver SQLite não encontrado. Adicione a dependência: org.xerial:sqlite-jdbc", e);
-        }
-    }
+    /** Coordenadas Maven das dependências do módulo de persistência. */
+    private static final String SQLITE_COORDINATES = "org.xerial:sqlite-jdbc:3.51.3.0";
+    private static final String HIKARI_COORDINATES = "com.zaxxer.hikari:HikariCP:7.0.2";
+    private static final String PERSISTENCE_FEATURE = "Persistência (Saveable)";
 
     // ==================== MÉTODOS ABSTRATOS ====================
 
@@ -357,9 +354,11 @@ public abstract class Saveable {
         ensureCacheLoaded(clazz);
         Map<String, Object> classCache = CACHE.get(clazz);
         if (classCache == null) return new ArrayList<>();
-        return new ArrayList<>(classCache.values()).stream()
-                .map(clazz::cast)
-                .collect(Collectors.toList());
+        List<T> result = new ArrayList<>(classCache.size());
+        for (Object value : classCache.values()) {
+            result.add(clazz.cast(value));
+        }
+        return result;
     }
 
     /**
@@ -383,7 +382,14 @@ public abstract class Saveable {
      *         [EN] filtered list (never null)
      */
     public static <T> List<T> findByPredicate(Class<T> clazz, Predicate<T> predicate) {
-        return findAll(clazz).stream().filter(predicate).collect(Collectors.toList());
+        List<T> all = findAll(clazz);
+        List<T> result = new ArrayList<>();
+        for (T obj : all) {
+            if (predicate.test(obj)) {
+                result.add(obj);
+            }
+        }
+        return result;
     }
 
     /**
@@ -635,6 +641,10 @@ public abstract class Saveable {
     // ==================== MÉTODOS INTERNOS PRIVADOS ====================
 
     private static HikariDataSource getDataSource(Class<?> clazz) {
+        // Verificação lazy (sem quebrar o classload): só dispara quando a
+        // persistência for realmente utilizada
+        Dependencies.require("org.sqlite.JDBC", SQLITE_COORDINATES, PERSISTENCE_FEATURE);
+        Dependencies.require("com.zaxxer.hikari.HikariDataSource", HIKARI_COORDINATES, PERSISTENCE_FEATURE);
         synchronized (DATA_SOURCE_LOCK) {
             if (!DATA_SOURCES.containsKey(clazz)) {
                 HikariConfig config = new HikariConfig();

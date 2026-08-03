@@ -28,6 +28,7 @@ import com.google.zxing.qrcode.QRCodeWriter;
 import com.google.zxing.qrcode.decoder.ErrorCorrectionLevel;
 
 import br.com.angatusistemas.lib.console.Console;
+import br.com.angatusistemas.lib.dependencies.Dependencies;
 
 /**
  * [PT] Classe utilitária para geração e leitura de QR Codes utilizando a biblioteca ZXing.
@@ -51,6 +52,12 @@ public final class QRCodeAPI {
     private static final int DEFAULT_HEIGHT = 300;
     private static final String DEFAULT_IMAGE_FORMAT = "png";
     private static final ErrorCorrectionLevel DEFAULT_ERROR_CORRECTION = ErrorCorrectionLevel.M;
+
+    /** Coordenadas Maven das dependências ZXing. */
+    private static final String ZXING_CORE_COORDINATES = "com.google.zxing:core:3.5.3";
+    private static final String ZXING_JAVASE_COORDINATES = "com.google.zxing:javase:3.5.3";
+    /** Nome da funcionalidade para mensagens de dependência ausente. */
+    private static final String QRCODE_FEATURE = "QR Code (ZXing)";
 
     private QRCodeAPI() {
         throw new UnsupportedOperationException("Utility class cannot be instantiated");
@@ -123,6 +130,7 @@ public final class QRCodeAPI {
     public static BufferedImage generateQRCode(String text, int width, int height,
                                                ErrorCorrectionLevel errorCorrectionLevel,
                                                int quietZonePixels) throws WriterException {
+        Dependencies.require("com.google.zxing.QRCodeWriter", ZXING_CORE_COORDINATES, QRCODE_FEATURE);
         if (text == null || text.trim().isEmpty()) {
             throw new IllegalArgumentException("QR Code text cannot be null or empty");
         }
@@ -134,12 +142,19 @@ public final class QRCodeAPI {
         QRCodeWriter writer = new QRCodeWriter();
         BitMatrix bitMatrix = writer.encode(text, BarcodeFormat.QR_CODE, width, height, hints);
 
+        // Preenche os pixels em um único array (uma chamada nativa ao setRGB)
+        // em vez de width*height chamadas individuais
         BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
-        for (int x = 0; x < width; x++) {
-            for (int y = 0; y < height; y++) {
-                image.setRGB(x, y, bitMatrix.get(x, y) ? Color.BLACK.getRGB() : Color.WHITE.getRGB());
+        int black = Color.BLACK.getRGB();
+        int white = Color.WHITE.getRGB();
+        int[] pixels = new int[width * height];
+        for (int y = 0; y < height; y++) {
+            int rowOffset = y * width;
+            for (int x = 0; x < width; x++) {
+                pixels[rowOffset + x] = bitMatrix.get(x, y) ? black : white;
             }
         }
+        image.setRGB(0, 0, width, height, pixels, 0, width);
         return image;
     }
 
@@ -271,6 +286,8 @@ public final class QRCodeAPI {
      *                           [EN] if no QR Code is found
      */
     public static String decodeQRCode(BufferedImage image) throws NotFoundException {
+        Dependencies.require("com.google.zxing.MultiFormatReader", ZXING_CORE_COORDINATES, QRCODE_FEATURE);
+        Dependencies.require("com.google.zxing.client.j2se.BufferedImageLuminanceSource", ZXING_JAVASE_COORDINATES, QRCODE_FEATURE);
         LuminanceSource source = new BufferedImageLuminanceSource(image);
         BinaryBitmap bitmap = new BinaryBitmap(new HybridBinarizer(source));
         Result result = new MultiFormatReader().decode(bitmap);

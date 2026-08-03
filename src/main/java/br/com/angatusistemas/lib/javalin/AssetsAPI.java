@@ -186,7 +186,7 @@ public final class AssetsAPI {
             }
             return is.readAllBytes();
         } catch (IOException e) {
-            Console.error("Erro ao ler asset: %s", e, classpathPath);
+            Console.error("Erro ao ler asset: %s", classpathPath, e);
             return null;
         }
     }
@@ -280,7 +280,7 @@ public final class AssetsAPI {
             }
             return assets;
         } catch (IOException | URISyntaxException e) {
-            Console.error("Erro ao listar assets: %s", e, relativeDir);
+            Console.error("Erro ao listar assets: %s", relativeDir, e);
             return Collections.emptyList();
         }
     }
@@ -321,7 +321,7 @@ public final class AssetsAPI {
         List<String> files = new ArrayList<>();
 
         try {
-            // 🔥 Usa o ClassLoader correto (do contexto da thread)
+            // Usa o ClassLoader correto (do contexto da thread)
             ClassLoader classLoader = Thread.currentThread().getContextClassLoader();
 
             Enumeration<URL> resources = classLoader.getResources(classpathFolder);
@@ -340,34 +340,42 @@ public final class AssetsAPI {
 
                 } else if ("jar".equals(url.getProtocol())) {
 
-                    String raw = url.toString(); 
                     // exemplo: jar:file:/app.jar!/public
-
+                    String raw = url.toString();
                     String jarPath = raw.substring(0, raw.indexOf("!"));
                     URI jarUri = URI.create(jarPath);
 
+                    // Usa o filesystem já aberto (se existir) e fecha apenas o que foi criado aqui
+                    boolean openedHere = false;
                     FileSystem fs;
-
                     try {
                         fs = FileSystems.getFileSystem(jarUri);
                     } catch (Exception e) {
                         fs = FileSystems.newFileSystem(jarUri, Collections.emptyMap());
+                        openedHere = true;
                     }
 
-                    Path jarDir = fs.getPath(classpathFolder);
+                    try {
+                        Path jarDir = fs.getPath(classpathFolder);
 
-                    if (Files.exists(jarDir)) {
-                        try (Stream<Path> walk = Files.walk(jarDir)) {
-                            walk.filter(Files::isRegularFile)
-                                .map(path -> classpathFolder + "/" + jarDir.relativize(path).toString().replace("\\", "/"))
-                                .forEach(files::add);
+                        if (Files.exists(jarDir)) {
+                            try (Stream<Path> walk = Files.walk(jarDir)) {
+                                walk.filter(Files::isRegularFile)
+                                    .map(path -> classpathFolder + "/" + jarDir.relativize(path).toString().replace("\\", "/"))
+                                    .forEach(files::add);
+                            }
+                        }
+                    } finally {
+                        // Evita vazamento de recursos: fecha o filesystem que abrimos
+                        if (openedHere) {
+                            fs.close();
                         }
                     }
                 }
             }
 
         } catch (Exception e) {
-            Console.error("Erro ao listar recursos do classpath: %s", e, classpathFolder);
+            Console.error("Erro ao listar recursos do classpath: %s", classpathFolder, e);
         }
 
         return files;
@@ -404,8 +412,20 @@ public final class AssetsAPI {
      *         [EN] size in bytes or -1 if not exists
      */
     public static long getAssetSize(String relativePath) {
-        byte[] data = readAssetAsBytes(relativePath);
-        return data != null ? data.length : -1;
+        String classpathPath = toClasspathPath(relativePath);
+        if (classpathPath == null) return -1;
+        // Evita ler o asset inteiro: usa o Content-Length da conexão quando disponível
+        try {
+            URL url = AssetsAPI.class.getClassLoader().getResource(classpathPath);
+            if (url == null) return -1;
+            if ("file".equals(url.getProtocol())) {
+                return Files.size(Paths.get(url.toURI()));
+            }
+            long length = url.openConnection().getContentLengthLong();
+            return length >= 0 ? length : -1;
+        } catch (Exception e) {
+            return -1;
+        }
     }
 
     /**

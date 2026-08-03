@@ -22,6 +22,7 @@ import br.com.angatusistemas.lib.AngatuLib;
 import br.com.angatusistemas.lib.connection.StatusCode;
 import br.com.angatusistemas.lib.console.Console;
 import br.com.angatusistemas.lib.database.Saveable;
+import br.com.angatusistemas.lib.dependencies.Dependencies;
 import br.com.angatusistemas.lib.javalin.classes.BlockInfo;
 import br.com.angatusistemas.lib.javalin.classes.PermanentBlock;
 import br.com.angatusistemas.lib.javalin.classes.RateLimitConfig;
@@ -123,7 +124,15 @@ public final class JavalinAPI {
         );
     }
 
+    /** Coordenadas Maven do Javalin (versão alvo da biblioteca). */
+    private static final String JAVALIN_COORDINATES = "io.javalin:javalin:7.2.2";
+    /** Coordenadas Maven da Reflections (scan de rotas). */
+    private static final String REFLECTIONS_COORDINATES = "org.reflections:reflections:0.10.2";
+
     // ==================== PADRÕES MALICIOSOS ====================
+
+    /** Métodos HTTP que podem carregar corpo malicioso no request. */
+    private static final Set<HandlerType> BODY_METHODS = Set.of(HandlerType.POST, HandlerType.PUT, HandlerType.PATCH);
 
     /** Padrões compilados de SQL Injection e XSS para detecção */
     private static final Pattern[] MALICIOUS_PATTERNS = {
@@ -164,6 +173,7 @@ public final class JavalinAPI {
      * @return Instância configurada do Javalin, ou {@code null} em caso de falha
      */
     public static Javalin setup(File folderCerts, int port, boolean localhost, boolean enableRateLimit) {
+        Dependencies.require("io.javalin.Javalin", JAVALIN_COORDINATES, "Web Server (Javalin)");
         if (initialized) return javalinInstance;
 
         rateLimitingEnabled = enableRateLimit;
@@ -352,6 +362,7 @@ public final class JavalinAPI {
      * @return Instância do {@link Javalin}, ou {@code null} se não inicializado
      */
     public static Javalin get() {
+        Dependencies.require("io.javalin.Javalin", JAVALIN_COORDINATES, "Web Server (Javalin)");
         return javalinInstance;
     }
 
@@ -510,12 +521,18 @@ public final class JavalinAPI {
      * @param ip Endereço IP original
      * @return Hash hexadecimal SHA-256, ou IP sanitizado em caso de erro
      */
+    /** Tabela hexadecimal para conversão de bytes sem alocação de formatadores. */
+    private static final char[] HEX_DIGITS = "0123456789abcdef".toCharArray();
+
     private static String hashIp(String ip) {
         try {
             MessageDigest md = MessageDigest.getInstance("SHA-256");
             byte[] hash = md.digest(ip.getBytes());
             StringBuilder hex = new StringBuilder(64);
-            for (byte b : hash) hex.append(String.format("%02x", b));
+            for (byte b : hash) {
+                hex.append(HEX_DIGITS[(b >>> 4) & 0xF]);
+                hex.append(HEX_DIGITS[b & 0xF]);
+            }
             return hex.toString();
         } catch (Exception e) {
             return ip.replaceAll("[^a-zA-Z0-9]", "");
@@ -534,7 +551,7 @@ public final class JavalinAPI {
             for (String p : params)
                 if (containsMaliciousPattern(p)) return true;
 
-        if (Set.of(HandlerType.POST, HandlerType.PUT, HandlerType.PATCH).contains(ctx.method()))
+        if (BODY_METHODS.contains(ctx.method()))
             if (containsMaliciousPattern(ctx.body())) return true;
 
         for (String h : ctx.headerMap().values())
@@ -619,11 +636,15 @@ public final class JavalinAPI {
      * @param pattern Padrão de configuração
      * @return {@code true} se o path corresponde ao padrão
      */
+    /** Cache de regex compiladas para padrões de path com parâmetros ({@code {id}}). */
+    private static final Map<String, Pattern> PATTERN_REGEX_CACHE = new ConcurrentHashMap<>();
+
     private static boolean matchesPathPattern(String path, String pattern) {
         if (pattern.endsWith("/*"))
             return path.startsWith(pattern.substring(0, pattern.length() - 2));
-        String regex = pattern.replaceAll("\\{[^}]+}", "[^/]+");
-        return Pattern.matches(regex, path);
+        Pattern regex = PATTERN_REGEX_CACHE.computeIfAbsent(pattern, p ->
+                Pattern.compile(p.replaceAll("\\{[^}]+}", "[^/]+")));
+        return regex.matcher(path).matches();
     }
 
     /**
@@ -769,6 +790,7 @@ public final class JavalinAPI {
      * no classpath usando reflection, ignorando classes abstratas e interfaces.
      */
     private static void registerAllRoutes() {
+        Dependencies.require("org.reflections.Reflections", REFLECTIONS_COORDINATES, "Descoberta automática de rotas");
         Reflections reflections = new Reflections(
                 new org.reflections.util.ConfigurationBuilder()
                         .setUrls(org.reflections.util.ClasspathHelper.forJavaClassPath())
@@ -779,7 +801,7 @@ public final class JavalinAPI {
                 if (!java.lang.reflect.Modifier.isAbstract(routeClass.getModifiers()) && !routeClass.isInterface())
                     routeClass.getDeclaredConstructor().newInstance().register();
             } catch (Exception e) {
-                Console.error("Erro ao registrar rota: %s", e, routeClass.getName());
+                Console.error("Erro ao registrar rota: %s", routeClass.getName(), e);
             }
         }
     }

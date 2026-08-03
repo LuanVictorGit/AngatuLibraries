@@ -73,7 +73,8 @@ public final class InterceptorOutputStream extends OutputStream {
     public void write(int b) {
         if (b == '\n') {
             flushBuffer();
-        } else {
+        } else if (b != '\r') {
+            // '\r' (carriage return) é ignorado: evita lixo em logs de saídas Windows (\r\n)
             buffer.write(b);
         }
     }
@@ -98,20 +99,22 @@ public final class InterceptorOutputStream extends OutputStream {
      * [PT] Envia o conteúdo atual do buffer para o logger do console e limpa o buffer.
      * <p>
      * Se o buffer estiver vazio, nenhuma ação é executada.
-     * A mensagem é convertida usando o charset UTF-8 e uma quebra de linha é adicionada.
+     * A mensagem é convertida usando o charset UTF-8. O {@link Console#log(Object)}
+     * já adiciona a quebra de linha final — não duplicamos aqui.
      * </p>
-     * 
+     *
      * [EN] Sends the current buffer content to the console logger and clears the buffer.
      * <p>
      * If the buffer is empty, no action is taken.
-     * The message is converted using the UTF-8 charset and a newline is added.
+     * The message is converted using the UTF-8 charset. {@link Console#log(Object)}
+     * already adds the trailing newline — we don't duplicate it here.
      * </p>
      */
     private void flushBuffer() {
         if (buffer.size() > 0) {
             String message = buffer.toString(StandardCharsets.UTF_8);
             buffer.reset();
-            Console.log(message + "\n");
+            Console.log(message);
         }
     }
 }

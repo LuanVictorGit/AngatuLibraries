@@ -50,6 +50,11 @@ public final class HtmlRouteAPI {
 
         Console.log("HTMLs encontrados: " + htmlFiles.size());
 
+        // Pré-computa os nomes das páginas uma única vez (evita recomputar por requisição)
+        List<String> pageNames = htmlFiles.stream()
+                .map(f -> extractPageName(normalizePath(f)))
+                .collect(Collectors.toList());
+
         for (String rawPath : htmlFiles) {
 
             String filePath = normalizePath(rawPath);
@@ -93,8 +98,7 @@ public final class HtmlRouteAPI {
                                 .replace("{page}", StringAPI.capitalize(pageName))
                                 .replace("{content}", pageContent);
 
-                        for (String other : htmlFiles) {
-                            String otherName = extractPageName(normalizePath(other));
+                        for (String otherName : pageNames) {
                             renderedHtml = renderedHtml.replace(
                                     "{%" + otherName + "_active}",
                                     pageName.equals(otherName) ? "bg-blue-600 text-white" : ""

@@ -6,6 +6,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -58,11 +59,13 @@ public final class Task {
 
 	// Pool para tarefas assíncronas com agendamento (delay, repetição)
 	// Pool for asynchronous scheduled tasks (delay, repetition)
-	private static final ScheduledExecutorService ASYNC_EXECUTOR = Executors.newScheduledThreadPool(4);
+	private static final ScheduledExecutorService ASYNC_EXECUTOR =
+			Executors.newScheduledThreadPool(4, namedThreadFactory("Angatu-Async-%d"));
 
 	// Pool para tarefas síncronas (única thread, ordem FIFO)
 	// Pool for synchronous tasks (single thread, FIFO order)
-	private static final ExecutorService SYNC_EXECUTOR = Executors.newSingleThreadExecutor();
+	private static final ExecutorService SYNC_EXECUTOR =
+			Executors.newSingleThreadExecutor(namedThreadFactory("Angatu-Sync-%d"));
 
 	// Gerador de IDs únicos para cada tarefa
 	// Unique ID generator for each task
@@ -104,7 +107,7 @@ public final class Task {
 			try {
 				runnable.run();
 			} catch (Exception e) {
-				Console.error("Erro na tarefa assíncrona ID=%d", e, taskId);
+				Console.error("Erro na tarefa assíncrona ID=%d", taskId, e);
 			} finally {
 				TASKS.remove(taskId);
 			}
@@ -141,7 +144,7 @@ public final class Task {
 			try {
 				runnable.run();
 			} catch (Exception e) {
-				Console.error("Erro na tarefa síncrona ID=%d", e, taskId);
+				Console.error("Erro na tarefa síncrona ID=%d", taskId, e);
 			} finally {
 				TASKS.remove(taskId);
 			}
@@ -174,7 +177,7 @@ public final class Task {
 			try {
 				runnable.run();
 			} catch (Exception e) {
-				Console.error("Erro na tarefa com delay ID=%d", e, taskId);
+				Console.error("Erro na tarefa com delay ID=%d", taskId, e);
 			} finally {
 				TASKS.remove(taskId);
 			}
@@ -224,7 +227,7 @@ public final class Task {
 			try {
 				runnable.run();
 			} catch (Exception e) {
-				Console.error("Erro na tarefa periódica (fixed rate) ID=%d", e, taskId);
+				Console.error("Erro na tarefa periódica (fixed rate) ID=%d", taskId, e);
 			}
 		}, delayMillis, periodMillis, TimeUnit.MILLISECONDS);
 
@@ -263,7 +266,7 @@ public final class Task {
 			try {
 				runnable.run();
 			} catch (Exception e) {
-				Console.error("Erro na tarefa periódica (fixed delay) ID=%d", e, taskId);
+				Console.error("Erro na tarefa periódica (fixed delay) ID=%d", taskId, e);
 			}
 		}, initialDelayMs, delayBetweenMs, TimeUnit.MILLISECONDS);
 
@@ -363,5 +366,23 @@ public final class Task {
 	 */
 	public static int activeTaskCount() {
 		return TASKS.size();
+	}
+
+	/**
+	 * [PT] Cria uma {@link ThreadFactory} com nomes descritivos para as threads dos pools.
+	 * [EN] Creates a {@link ThreadFactory} with descriptive names for pool threads.
+	 *
+	 * @param pattern [PT] padrão de nome com um placeholder %d (ex: "Angatu-Async-%d")
+	 *                [EN] name pattern with a %d placeholder (e.g., "Angatu-Async-%d")
+	 * @return [PT] factory que gera threads nomeadas e não-daemon
+	 *         [EN] factory that produces named non-daemon threads
+	 */
+	private static ThreadFactory namedThreadFactory(String pattern) {
+		AtomicInteger counter = new AtomicInteger(1);
+		return runnable -> {
+			Thread thread = new Thread(runnable, String.format(pattern, counter.getAndIncrement()));
+			thread.setDaemon(false);
+			return thread;
+		};
 	}
 }

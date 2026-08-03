@@ -715,12 +715,12 @@ public final class ImageAPI {
     // ==================== MÉTODOS PRIVADOS ====================
 
     private static String detectBestFormat(BufferedImage image) {
-        // Verifica se a imagem tem canal alpha (transparência)
+        // Imagens com canal alpha (transparência) exigem PNG
         boolean hasAlpha = image.getColorModel().hasAlpha();
         if (hasAlpha) {
             return "png";
         }
-        // Prioriza PNG por ser sem perdas, mas JPG é mais compacto para fotos
+        // Sem transparência, JPG é mais compacto para fotos e tem boa qualidade
         return "jpg";
     }
 

@@ -11,6 +11,7 @@ import java.util.Optional;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
+import br.com.angatusistemas.lib.console.Console;
 import com.mercadopago.MercadoPagoConfig;
 import com.mercadopago.client.payment.PaymentClient;
 import com.mercadopago.client.payment.PaymentCreateRequest;
@@ -562,8 +563,8 @@ public final class MercadoPagoAPI {
 				throw e;
 			}
 		} catch (Exception e) {
-			e.printStackTrace();
-			return null;
+			Console.error("[MercadoPagoAPI] Erro ao consultar pagamento por ID", e);
+			return Optional.empty();
 		}
 	}
 
@@ -630,7 +631,7 @@ public final class MercadoPagoAPI {
 			}
 			return dtos;
 		} catch (Exception e) {
-			e.printStackTrace();
+			Console.error("[MercadoPagoAPI] Erro na busca de pagamentos", e);
 			return null;
 		}
 
@@ -761,7 +762,7 @@ public final class MercadoPagoAPI {
 			return new PreferenceDTO(preference.getId(), preference.getInitPoint(), preference.getSandboxInitPoint(),
 					preference.getExternalReference());
 		} catch (Exception e) {
-			e.printStackTrace();
+			Console.error("[MercadoPagoAPI] Erro ao criar preferência de checkout", e);
 			return null;
 		}
 	}
@@ -998,7 +999,7 @@ public final class MercadoPagoAPI {
 			LOGGER.info("[MercadoPagoAPI] Pagamento criado — ID: " + dto.getId() + " | Status: " + dto.getStatus());
 			return dto;
 		} catch (Exception e) {
-			e.printStackTrace();
+			Console.error("[MercadoPagoAPI] Erro ao criar pagamento", e);
 			return null;
 		}
 	}

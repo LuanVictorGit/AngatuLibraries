@@ -3,76 +3,75 @@ package br.com.angatusistemas.lib.gson;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 
+import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 
+import br.com.angatusistemas.lib.dependencies.Dependencies;
+
 /**
- * [PT] Classe utilitária que fornece uma instância pré-configurada do {@link com.google.gson.Gson}
- * com suporte nativo para os tipos {@link OffsetDateTime} e {@link LocalDate}.
- * <p>
- * Utiliza {@link OffsetDateTimeTypeAdapter} e {@link LocalDateTypeAdapter} para serialização/desserialização
- * correta desses tipos, evitando problemas com formatos padrão do Gson.
+ * Classe utilitária que fornece uma instância única do {@link Gson} pré-configurada
+ * com suporte nativo aos tipos {@link OffsetDateTime} e {@link LocalDate}.
+ *
+ * <p>Sem os adapters, o Gson serializaria os tipos temporais em formatos internos
+ * ({@code {"year":2025,...}}), quebrando a compatibilidade com outras linguagens.
+ * Esta instância utiliza {@link OffsetDateTimeTypeAdapter} e {@link LocalDateTypeAdapter}
+ * para produzir formatos ISO padrão.</p>
+ *
+ * <p>É utilizada internamente pelo {@code Saveable} para persistência JSON e pode
+ * ser usada por qualquer consumidor que queira o mesmo comportamento.</p>
+ *
+ * <p>Exemplo de uso:
+ * <pre>
+ * MeuObjeto obj = GsonAPI.get().fromJson(jsonString, MeuObjeto.class);
+ * String json = GsonAPI.get().toJson(obj);
+ * </pre>
  * </p>
- * 
- * [EN] Utility class that provides a pre-configured {@link com.google.gson.Gson} instance
- * with native support for {@link OffsetDateTime} and {@link LocalDate} types.
- * <p>
- * Uses {@link OffsetDateTimeTypeAdapter} and {@link LocalDateTypeAdapter} for proper
- * serialization/deserialization of these types, avoiding issues with default Gson formats.
- * </p>
- * 
- * @author [Sua equipe]
- * @see com.google.gson.Gson
+ *
+ * <p><strong>Dependência:</strong> este módulo requer {@code com.google.code.gson:gson:2.13.2}
+ * no classpath. Se ausente, {@link #get()} exibe instruções de instalação e lança
+ * {@link br.com.angatusistemas.lib.dependencies.MissingDependencyException}.</p>
+ *
+ * @author Angatu Sistemas
  * @see OffsetDateTimeTypeAdapter
  * @see LocalDateTypeAdapter
+ * @see br.com.angatusistemas.lib.dependencies.Dependencies
  */
 public final class GsonAPI {
 
-    // Instância única do Gson com adapters registrados (padrão Singleton)
-    // Single Gson instance with registered adapters (Singleton pattern)
-    private static final com.google.gson.Gson PRECONFIGURED_GSON = new GsonBuilder()
-            .registerTypeAdapter(OffsetDateTime.class, new OffsetDateTimeTypeAdapter())
-            .registerTypeAdapter(LocalDate.class, new LocalDateTypeAdapter())
-            .create();
+    /** Coordenadas Maven da dependência Gson. */
+    private static final String GSON_COORDINATES = "com.google.code.gson:gson:2.13.2";
+    /** Nome da funcionalidade para mensagens de dependência ausente. */
+    private static final String GSON_FEATURE = "JSON (Gson)";
 
-    /**
-     * [PT] Construtor privado para evitar instanciação da classe utilitária.
-     * [EN] Private constructor to prevent instantiation of this utility class.
-     */
     private GsonAPI() {
-        throw new UnsupportedOperationException("This is a utility class and cannot be instantiated");
+        throw new UnsupportedOperationException("Utility class cannot be instantiated");
     }
 
     /**
-     * [PT] Retorna a instância pré-configurada do Gson, pronta para uso.
-     * <p>
-     * A instância já possui adapters registrados para {@link OffsetDateTime} e {@link LocalDate},
-     * permitindo serializar e desserializar esses tipos sem configuração adicional.
-     * </p>
-     * <p>
-     * Exemplo de uso:
-     * <pre>
-     * MeuObjeto obj = Gson.get().fromJson(jsonString, MeuObjeto.class);
-     * String json = Gson.get().toJson(obj);
-     * </pre>
-     * </p>
-     * 
-     * [EN] Returns the pre-configured Gson instance, ready to use.
-     * <p>
-     * The instance already has registered adapters for {@link OffsetDateTime} and {@link LocalDate},
-     * allowing serialization and deserialization of these types without additional configuration.
-     * </p>
-     * <p>
-     * Usage example:
-     * <pre>
-     * MyObject obj = Gson.get().fromJson(jsonString, MyObject.class);
-     * String json = Gson.get().toJson(obj);
-     * </pre>
-     * </p>
+     * Retorna a instância única do Gson com os adapters configurados.
      *
-     * @return [PT] a instância única do Gson com os adapters configurados
-     *         [EN] the single Gson instance with the configured adapters
+     * <p>A instância já possui adapters registrados para {@link OffsetDateTime} e
+     * {@link LocalDate}, permitindo serializar/desserializar esses tipos sem
+     * configuração adicional.</p>
+     *
+     * @return Instância pré-configurada do Gson
+     * @throws br.com.angatusistemas.lib.dependencies.MissingDependencyException
+     *         se a dependência Gson não estiver no classpath
      */
-    public static com.google.gson.Gson get() {
-        return PRECONFIGURED_GSON;
+    public static Gson get() {
+        Dependencies.require("com.google.gson.Gson", GSON_COORDINATES, GSON_FEATURE);
+        return Holder.INSTANCE;
+    }
+
+    /**
+     * Holder lazy (inicialização preguiçosa): o Gson só é construído no primeiro
+     * acesso, evitando custo de inicialização e falhas de carregamento quando a
+     * dependência está ausente.
+     */
+    private static final class Holder {
+        static final Gson INSTANCE = new GsonBuilder()
+                .registerTypeAdapter(OffsetDateTime.class, new OffsetDateTimeTypeAdapter())
+                .registerTypeAdapter(LocalDate.class, new LocalDateTypeAdapter())
+                .create();
     }
 }

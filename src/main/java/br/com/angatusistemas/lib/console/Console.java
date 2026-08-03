@@ -1,5 +1,7 @@
 package br.com.angatusistemas.lib.console;
 
+import java.io.PrintStream;
+
 import br.com.angatusistemas.lib.AngatuLib;
 import br.com.angatusistemas.lib.time.DataTime;
 
@@ -35,11 +37,21 @@ public final class Console {
     // Formato base do log: [data/hora] mensagem
     private static final String LOG_PATTERN = "&6[%s] &7%s";
 
-    // Instância do AngatuLib para acesso ao output original
-    private static final AngatuLib ANGATU_LIB = AngatuLib.getInstance();
-
     private Console() {
         throw new UnsupportedOperationException("Utility class cannot be instantiated");
+    }
+
+    /**
+     * Resolve o PrintStream de saída de forma preguiçosa.
+     *
+     * <p>Se o {@link AngatuLib} já foi inicializado, usa o output original
+     * (preservado antes da intercepção do System.out). Caso contrário — por
+     * exemplo, quando {@link Console} é usado antes da inicialização da
+     * biblioteca — cai em {@link System#out} para não lançar NPE.</p>
+     */
+    private static PrintStream output() {
+        AngatuLib lib = AngatuLib.getInstance();
+        return lib != null ? lib.getOriginalOut() : System.out;
     }
 
     // ==================== MÉTODOS PRINCIPAIS ====================
@@ -54,7 +66,7 @@ public final class Console {
      */
     public static void log(Object obj) {
         String formatted = formatLogMessage(obj);
-        ANGATU_LIB.getOriginalOut().println(AnsiColor.parse(formatted));
+        output().println(AnsiColor.parse(formatted));
     }
 
     /**
@@ -154,11 +166,11 @@ public final class Console {
         
         // Log da mensagem principal
         String coloredPattern = String.format("&c[%s] &7%s", timestamp, message);
-        ANGATU_LIB.getOriginalOut().println(AnsiColor.parse(coloredPattern));
-        
+        output().println(AnsiColor.parse(coloredPattern));
+
         // Log da stack trace se houver exceção
         if (t != null) {
-            t.printStackTrace(ANGATU_LIB.getOriginalOut());
+            t.printStackTrace(output());
         }
     }
 
@@ -365,6 +377,6 @@ public final class Console {
         String timestamp = DataTime.getData().replace(" ", "");
         String message = String.valueOf(obj);
         String coloredPattern = String.format("%s[%s] &7%s", color, timestamp, message);
-        ANGATU_LIB.getOriginalOut().println(AnsiColor.parse(coloredPattern));
+        output().println(AnsiColor.parse(coloredPattern));
     }
 }

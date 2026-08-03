@@ -1,8 +1,7 @@
 package br.com.angatusistemas.lib.strings;
 
-import java.util.ArrayList;
-import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.regex.Pattern;
 
 /**
  * [PT] Classe utilitária para operações comuns com strings.
@@ -13,20 +12,13 @@ import java.util.concurrent.ThreadLocalRandom;
  */
 public final class StringAPI {
 
-    // Conjunto pré-calculado de caracteres permitidos para geração de código aleatório
-    // Precomputed set of allowed characters for random code generation
-    private static final char[] ALLOWED_CHARS;
+    // Caracteres permitidos para geração de código aleatório (a-z, A-Z, 0-9)
+    // Allowed characters for random code generation (a-z, A-Z, 0-9)
+    private static final char[] ALLOWED_CHARS =
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".toCharArray();
 
-    static {
-        List<Character> chars = new ArrayList<>();
-        for (char c = 'a'; c <= 'z'; c++) chars.add(c);
-        for (char c = 'A'; c <= 'Z'; c++) chars.add(c);
-        for (char c = '0'; c <= '9'; c++) chars.add(c);
-        ALLOWED_CHARS = new char[chars.size()];
-        for (int i = 0; i < chars.size(); i++) {
-            ALLOWED_CHARS[i] = chars.get(i);
-        }
-    }
+    /** Regex pré-compilada para separar palavras (usada em toCamelCase). */
+    private static final Pattern WORD_SEPARATOR_PATTERN = Pattern.compile("\\s+");
 
     private StringAPI() {
         // Impede instanciação / Prevents instantiation
@@ -116,7 +108,7 @@ public final class StringAPI {
      *         [EN] true if null, empty, or whitespace-only, false otherwise
      */
     public static boolean isNullOrBlank(String input) {
-        return input == null || input.trim().isEmpty();
+        return input == null || input.isBlank();
     }
 
     /**
@@ -195,7 +187,7 @@ public final class StringAPI {
         if (isNullOrBlank(input)) {
             return input;
         }
-        String[] words = input.trim().split("\\s+");
+        String[] words = WORD_SEPARATOR_PATTERN.split(input.trim());
         StringBuilder result = new StringBuilder();
         for (int i = 0; i < words.length; i++) {
             String word = words[i].toLowerCase();
@@ -226,7 +218,7 @@ public final class StringAPI {
         if (isNullOrBlank(input)) {
             return input;
         }
-        return input.trim().toLowerCase().replaceAll("\\s+", "_");
+        return WORD_SEPARATOR_PATTERN.matcher(input.trim().toLowerCase()).replaceAll("_");
     }
 
     /**
