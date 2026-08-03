@@ -26,6 +26,44 @@ import br.com.angatusistemas.lib.gson.GsonAPI;
 /**
  * [PT] Classe abstrata que fornece persistência automática em SQLite para objetos Java,
  * com cache total em memória (identity map) que garante a mesma instância para cada ID.
+ *
+ * <p><strong>Quando usar:</strong> para persistir entidades simples (dezenas de
+ * milhares de registros) sem SQL manual — estenda esta classe, implemente
+ * {@link #getId()} e use os métodos estáticos de busca/salvamento. O fluxo
+ * típico: <em>estender → criar com construtor vazio → preencher campos →
+ * {@code save()} → buscar com {@link #findById(Class, String)}</em>.</p>
+ *
+ * <p><strong>Quando NÃO usar:</strong> para tabelas com milhões de registros
+ * (o cache total carrega tudo em memória), para relacionamentos complexos ou
+ * consultas analíticas (use SQL direto com o driver) e para dados binários
+ * grandes (ex: imagens — considere armazenar em disco e persistir o caminho).
+ * <strong>Não instancie esta classe diretamente</strong> — é abstrata e o
+ * construtor é {@code protected}: o uso é exclusivamente via {@code extends}.</p>
+ *
+ * <p><strong>Restrição de inicialização:</strong> esta classe funciona apenas
+ * por herança. Subclasses precisam de um construtor vazio (para o Gson
+ * desserializar) e de campos serializáveis. Instanciação direta é bloqueada
+ * pelo compilador (classe abstrata).</p>
+ *
+ * <p><strong>Integração:</strong> entidades internas como {@code PermanentBlock},
+ * {@code SuspectIp}, {@code RouteRateLimitConfig}, {@code Key} (Web Push) e
+ * {@code Image} estendem esta classe; a serialização usa {@link GsonAPI} e as
+ * dependências (sqlite-jdbc, HikariCP, gson) são verificadas no primeiro uso
+ * com instruções de instalação se ausentes.</p>
+ *
+ * <p><strong>Boas práticas:</strong> crie índices via
+ * {@code json_extract(data, '$.campo')} para consultas frequentes; use
+ * {@link #query(Class, String, Object...)} com parâmetros posicionais (nunca
+ * concatene SQL); chame {@link #shutdown()} ao encerrar a aplicação.</p>
+ *
+ * <p><strong>Limitações:</strong> cache total em memória (ideal para até
+ * centenas de milhares de registros); banco fixo {@code database.db} na raiz do
+ * projeto; escrita usa {@code INSERT OR REPLACE} (substituição por ID).</p>
+ *
+ * <p><strong>Extensões futuras:</strong> o método privado
+ * {@code loadAllIntoCache} pode ser substituído por cache lazy em subclasses;
+ * a classe não é {@code sealed} propositalmente — consumidores precisam
+ * estendê-la para criar entidades.</p>
  * <p>
  * Cada subclasse concreta (ex: {@code Usuario}, {@code Produto}) é mapeada para uma tabela própria
  * no banco de dados {@code database.db}. O nome da tabela é o nome da classe em minúsculas,
@@ -160,6 +198,38 @@ public abstract class Saveable {
     private static final String SQLITE_COORDINATES = "org.xerial:sqlite-jdbc:3.51.3.0";
     private static final String HIKARI_COORDINATES = "com.zaxxer.hikari:HikariCP:7.0.2";
     private static final String PERSISTENCE_FEATURE = "Persistência (Saveable)";
+
+    // ==================== CONSTRUTOR ====================
+
+    /**
+     * Construtor {@code protected}: o {@code Saveable} funciona exclusivamente
+     * por herança ({@code extends}).
+     *
+     * <p><strong>Forma correta de uso:</strong> crie uma entidade concreta que
+     * estenda {@code Saveable} e implemente {@link #getId()}:
+     * <pre>
+     * public class Usuario extends Saveable {
+     *     private String id;
+     *     private String nome;
+     *     public Usuario() {} // obrigatório para desserialização Gson
+     *     &#64;Override public String getId() { return id; }
+     * }
+     * </pre>
+     * </p>
+     *
+     * <p><strong>Uso incorreto:</strong> instanciar {@code Saveable} diretamente
+     * é impossível — a classe é abstrata e o construtor é {@code protected}.
+     * Subclasses anônimas também são desencorajadas: uma entidade deve ter
+     * campos persistidos e um construtor vazio para o Gson.</p>
+     *
+     * <p>A manipulação dos dados usa os métodos estáticos da classe
+     * ({@link #findById(Class, String)}, {@link #findAll(Class)},
+     * {@link #query(Class, String, Object...)} etc.), nunca a instanciação
+     * manual do {@code Saveable}.</p>
+     */
+    protected Saveable() {
+        // Construtor protegido: garante que a classe só seja utilizada via herança
+    }
 
     // ==================== MÉTODOS ABSTRATOS ====================
 

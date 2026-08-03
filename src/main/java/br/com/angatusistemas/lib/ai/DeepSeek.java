@@ -86,11 +86,6 @@ public final class DeepSeek {
 
 	private static final HttpClient httpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
 
-	/** Holder lazy: evita resolver o Gson no classload da classe. */
-	private static final class GsonHolder {
-		static final Gson INSTANCE = new GsonBuilder().create();
-	}
-
 	private DeepSeek() {
 		throw new UnsupportedOperationException("Utility class cannot be instantiated");
 	}
@@ -172,7 +167,7 @@ public final class DeepSeek {
 			return null;
 
 		try {
-			String jsonBody = buildRequestBody(systemInstruction, userMessage, false);
+			String jsonBody = JsonSupport.buildRequestBody(systemInstruction, userMessage, false, model);
 			HttpRequest request = HttpRequest.newBuilder().uri(URI.create(API_URL))
 					.timeout(Duration.ofSeconds(TIMEOUT_SECONDS)).header("Content-Type", "application/json")
 					.header("Authorization", "Bearer " + apiKey).POST(HttpRequest.BodyPublishers.ofString(jsonBody))
@@ -183,7 +178,7 @@ public final class DeepSeek {
 				Console.error("Erro na API DeepSeek: HTTP %d - %s", response.statusCode(), response.body());
 				return null;
 			}
-			return parseResponse(response.body());
+			return JsonSupport.parseResponse(response.body());
 		} catch (Exception e) {
 			Console.error("Erro ao chamar DeepSeek API", e);
 			return null;
@@ -210,7 +205,7 @@ public final class DeepSeek {
 			return;
 
 		try {
-			String jsonBody = buildRequestBody(systemInstruction, userMessage, true);
+			String jsonBody = JsonSupport.buildRequestBody(systemInstruction, userMessage, true, model);
 			HttpRequest request = HttpRequest.newBuilder().uri(URI.create(API_URL))
 					.timeout(Duration.ofSeconds(TIMEOUT_SECONDS)).header("Content-Type", "application/json")
 					.header("Authorization", "Bearer " + apiKey).POST(HttpRequest.BodyPublishers.ofString(jsonBody))
@@ -230,7 +225,7 @@ public final class DeepSeek {
 						String data = line.substring(6).trim();
 						if ("[DONE]".equals(data))
 							break;
-						String chunk = parseStreamChunk(data);
+						String chunk = JsonSupport.parseStreamChunk(data);
 						if (chunk != null && !chunk.isEmpty()) {
 							onChunk.accept(chunk);
 						}
@@ -244,63 +239,80 @@ public final class DeepSeek {
 
 	// ==================== MÉTODOS INTERNOS ====================
 
-	private static String buildRequestBody(String systemInstruction, String userMessage, boolean stream) {
-		JsonObject body = new JsonObject();
-		body.addProperty("model", model);
-		body.addProperty("temperature", DEFAULT_TEMPERATURE);
-		body.addProperty("stream", stream);
+	// ==================== IMPLEMENTAÇÃO JSON (GSON — LAZY) ====================
 
-		JsonArray messages = new JsonArray();
+	/**
+	 * Implementação de serialização/parsing com Gson. Classe separada para
+	 * manter as referências ao Gson fora do bytecode da {@link DeepSeek} — a
+	 * classe pública pode ser vinculada sem o gson e o guard exibe a mensagem
+	 * de instalação antes de qualquer uso.
+	 */
+	private static final class JsonSupport {
 
-		// Instrução de sistema (se fornecida)
-		if (systemInstruction != null && !systemInstruction.trim().isEmpty()) {
-			JsonObject system = new JsonObject();
-			system.addProperty("role", "system");
-			system.addProperty("content", systemInstruction);
-			messages.add(system);
+		/** Holder lazy: evita resolver o Gson no classload. */
+		private static final Gson INSTANCE = new GsonBuilder().create();
+
+		private JsonSupport() {
 		}
 
-		// Mensagem do usuário
-		JsonObject user = new JsonObject();
-		user.addProperty("role", "user");
-		user.addProperty("content", userMessage);
-		messages.add(user);
+		static String buildRequestBody(String systemInstruction, String userMessage, boolean stream, String model) {
+			JsonObject body = new JsonObject();
+			body.addProperty("model", model);
+			body.addProperty("temperature", DEFAULT_TEMPERATURE);
+			body.addProperty("stream", stream);
 
-		body.add("messages", messages);
-		return GsonHolder.INSTANCE.toJson(body);
-	}
+			JsonArray messages = new JsonArray();
 
-	private static String parseResponse(String json) {
-		try {
-			JsonObject obj = GsonHolder.INSTANCE.fromJson(json, JsonObject.class);
-			JsonArray choices = obj.getAsJsonArray("choices");
-			if (choices != null && choices.size() > 0) {
-				JsonObject message = choices.get(0).getAsJsonObject().getAsJsonObject("message");
-				if (message != null && message.has("content")) {
-					return message.get("content").getAsString();
-				}
+			// Instrução de sistema (se fornecida)
+			if (systemInstruction != null && !systemInstruction.trim().isEmpty()) {
+				JsonObject system = new JsonObject();
+				system.addProperty("role", "system");
+				system.addProperty("content", systemInstruction);
+				messages.add(system);
 			}
-		} catch (Exception e) {
-			Console.error("Erro ao parsear resposta DeepSeek", e);
-		}
-		return null;
-	}
 
-	private static String parseStreamChunk(String chunkJson) {
-		try {
-			if (chunkJson == null || chunkJson.isEmpty())
-				return null;
-			JsonObject obj = GsonHolder.INSTANCE.fromJson(chunkJson, JsonObject.class);
-			JsonArray choices = obj.getAsJsonArray("choices");
-			if (choices != null && choices.size() > 0) {
-				JsonObject delta = choices.get(0).getAsJsonObject().getAsJsonObject("delta");
-				if (delta != null && delta.has("content")) {
-					return delta.get("content").getAsString();
-				}
-			}
-		} catch (Exception e) {
-			// Ignorar erros de parse em chunks parciais
+			// Mensagem do usuário
+			JsonObject user = new JsonObject();
+			user.addProperty("role", "user");
+			user.addProperty("content", userMessage);
+			messages.add(user);
+
+			body.add("messages", messages);
+			return INSTANCE.toJson(body);
 		}
-		return null;
+
+		static String parseResponse(String json) {
+			try {
+				JsonObject obj = INSTANCE.fromJson(json, JsonObject.class);
+				JsonArray choices = obj.getAsJsonArray("choices");
+				if (choices != null && choices.size() > 0) {
+					JsonObject message = choices.get(0).getAsJsonObject().getAsJsonObject("message");
+					if (message != null && message.has("content")) {
+						return message.get("content").getAsString();
+					}
+				}
+			} catch (Exception e) {
+				Console.error("Erro ao parsear resposta DeepSeek", e);
+			}
+			return null;
+		}
+
+		static String parseStreamChunk(String chunkJson) {
+			try {
+				if (chunkJson == null || chunkJson.isEmpty())
+					return null;
+				JsonObject obj = INSTANCE.fromJson(chunkJson, JsonObject.class);
+				JsonArray choices = obj.getAsJsonArray("choices");
+				if (choices != null && choices.size() > 0) {
+					JsonObject delta = choices.get(0).getAsJsonObject().getAsJsonObject("delta");
+					if (delta != null && delta.has("content")) {
+						return delta.get("content").getAsString();
+					}
+				}
+			} catch (Exception e) {
+				// Ignorar erros de parse em chunks parciais
+			}
+			return null;
+		}
 	}
 }

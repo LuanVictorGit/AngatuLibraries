@@ -9,6 +9,32 @@
   Web · Persistência · E-mail · Web Push · Discord · IA · Imagens · QR Code · Pagamentos
 </p>
 
+> 📖 **Nota para agentes de IA:** este README é a documentação principal da
+> biblioteca. Consulte o [índice](#-índice) para navegar; cada seção é
+> autocontida e as [seções de arquitetura](#-arquitetura) descrevem os padrões
+> de uso esperados. Para detalhes de API, consulte os JavaDocs das classes
+> citadas (visíveis na IDE ou gerados com `mvn javadoc:javadoc`).
+
+---
+
+## 📑 Índice
+
+1. [Introdução](#-introdução)
+2. [Filosofia e objetivos](#-filosofia-e-objetivos)
+3. [Arquitetura](#-arquitetura)
+4. [Recursos disponíveis](#-recursos-disponíveis)
+5. [Instalação](#-instalação)
+6. [Dependências por módulo](#-dependências-por-módulo)
+7. [Configuração](#-configuração)
+8. [Primeiros passos](#-primeiros-passos)
+9. [Estrutura recomendada para projetos](#-estrutura-recomendada-para-projetos)
+10. [Guias por funcionalidade](#-guias-por-funcionalidade)
+11. [Boas práticas](#-boas-práticas)
+12. [Solução de problemas comuns](#-solução-de-problemas-comuns)
+13. [FAQ](#-faq)
+14. [Migração entre versões](#-migração-entre-versões)
+15. [Changelog resumido](#-changelog-resumido)
+
 ---
 
 ## 📌 Introdução
@@ -21,6 +47,96 @@ A biblioteca foi projetada para ser **leve, modular e segura**:
 * 🛡️ **Segura** — rate limiting com janela deslizante, detecção de SQL Injection/XSS, bloqueios permanentes persistidos e headers de segurança automáticos.
 * 🧩 **Modular** — cada funcionalidade é opcional e detecta dependências ausentes com instruções claras de instalação.
 * 📖 **Documentada** — todas as APIs públicas possuem JavaDocs completos (visíveis nas IDEs).
+
+---
+
+## 🧭 Filosofia e objetivos
+
+* **Leveza por design** — o JAR contém apenas o código da biblioteca. Nada de dependências embutidas: o consumidor declara somente o que usa, e a biblioteca orienta a instalação quando algo falta.
+* **Segurança por padrão** — servidor web nasce com rate limiting, proteção contra SQL Injection/XSS, headers de segurança e bloqueios persistidos. Segurança não é configuração opcional: é o estado inicial.
+* **Produtividade com convenções** — rotas por descoberta automática, persistência por herança (`extends Saveable`), logging centralizado. Menos boilerplate, menos erro humano.
+* **Compatibilidade como contrato** — a API pública é estável; melhorias entram por sobrecarga, novas classes ou novas interfaces, nunca por quebra de assinatura.
+* **Segurança arquitetural** — classes-base (`Saveable`, `Route`) só funcionam por herança; utilitários são `final` com construtor privado. Uso incorreto falha cedo, com mensagens que explicam o caminho certo.
+
+---
+
+## 🏗️ Arquitetura
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│                         SUA APLICAÇÃO                                 │
+│  Main → new AngatuLib(dominio, porta, rateLimit)                     │
+└──────────────────────────────┬───────────────────────────────────────┘
+                               │ bootstrap
+┌──────────────────────────────▼───────────────────────────────────────┐
+│                        AngatuLibraries (JAR ~185 KB)                  │
+│                                                                       │
+│  ┌─────────────┐  ┌──────────────┐  ┌─────────────────────────────┐  │
+│  │  Console    │  │  Dependencies│  │  Task (pools de threads)     │  │
+│  │  (log ANSI) │  │  (detecção)  │  └──────────────┬──────────────┘  │
+│  └──────┬──────┘  └──────┬───────┘                 │ async           │
+│         │                │                         ▼                  │
+│  ┌──────▼────────────────▼───────────────────────────────────────┐   │
+│  │                  JavalinAPI (Web Server)                     │   │
+│  │  SSL · Rate limiting · SQLi/XSS · Headers · Estáticos        │   │
+│  │  ┌──────────────┐  ┌──────────────┐  ┌────────────────────┐  │   │
+│  │  │ Route (abstr.)│  │ HtmlRouteAPI │  │ AssetsAPI         │  │   │
+│  │  │ rotas auto    │  │ páginas /public│ │ cache + MIME      │  │   │
+│  │  └──────┬───────┘  └──────────────┘  └────────────────────┘  │   │
+│  └─────────┼────────────────────────────────────────────────────┘   │
+│            │ persistência (bloqueios, configurações)                 │
+│  ┌─────────▼────────────────────────────────────────────────────┐   │
+│  │  Saveable (ORM JSON → SQLite + HikariCP + WAL)                │   │
+│  │  entidades: PermanentBlock · SuspectIp · RouteRateLimitConfig │   │
+│  │            Key (VAPID) · Image · suas entidades (extends)      │   │
+│  └───────────────────────────────────────────────────────────────┘   │
+│                                                                       │
+│  Módulos opcionais (cada um com guard de dependência):                │
+│  EmailAPI → jakarta.mail        WebPushAPI → web-push + BC + jose4j  │
+│  Bot → JDA                      DeepSeek → gson + java.net.http      │
+│  BrowserAPI → Playwright        MercadoPagoAPI → sdk-java            │
+│  ImageAPI/QRCodeAPI → thumbnailator/zxing/twelvemonkeys              │
+│  GsonAPI/Env/Password/StringAPI/DataTime/Request → utilitários       │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+**Camadas:**
+
+| Camada | Papel |
+|---|---|
+| **Bootstrap** | `AngatuLib` — inicialização única, detecção de dependências, redirecionamento do log |
+| **Núcleo** | `Console`, `Dependencies`, `Task`, `GsonAPI`, `Env`, `StringAPI`, `DataTime`, `Password`, `Request` — sem dependências externas ou com as mínimas |
+| **Web** | `JavalinAPI`, `HtmlRouteAPI`, `AssetsAPI`, `Route`/`RouteType`, `IP` — servidor e segurança |
+| **Persistência** | `Saveable` (abstrato, por herança) + entidades internas |
+| **Integrações** | `EmailAPI`, `WebPushAPI`, `Bot`, `DeepSeek`, `BrowserAPI`, `ImageAPI`, `QRCodeAPI`, `MercadoPagoAPI` — cada um com dependência opcional própria |
+
+### Conceitos principais
+
+| Conceito | Descrição |
+|---|---|
+| **Guard de dependência** | Verificação via reflection no primeiro uso de um módulo; se a biblioteca externa faltar, imprime coordenadas + snippets Maven/Gradle e lança `MissingDependencyException` com a mesma mensagem |
+| **Cache total (identity map)** | O `Saveable` carrega a tabela inteira na memória no primeiro acesso; o mesmo ID retorna sempre a mesma instância Java |
+| **Janela deslizante** | Algoritmo de rate limiting por timestamps dentro de uma janela (segundo/minuto) — `SlidingWindowCounter` com fila O(1) |
+| **Descoberta de rotas** | Subclasses de `Route` com construtor vazio são encontradas via Reflections e registradas no startup |
+| **Bloqueios persistidos** | IPs suspeitos, bloqueios temporários e permanentes sobrevivem a reinicializações (tabelas `suspectips`, `permanentblocks`, `routeratelimitconfigs`) |
+| **Log interceptado** | `System.out` é redirecionado para o `Console` (log colorido com timestamp); o stream original fica preservado |
+
+### Fluxo de funcionamento
+
+```
+main()
+ └─ new AngatuLib(dominio, porta, rateLimit)
+     ├─ 1. Dependencies.require("io.javalin.Javalin", ...)   → mensagem clara se faltar
+     ├─ 2. System.setOut(InterceptorOutputStream → Console)  → log colorido
+     ├─ 3. Detecta localhost (sem /etc/letsencrypt/live/<dominio>)
+     ├─ 4. JavalinAPI.setup(...)
+     │      ├─ loadPersistedConfigs()   → bloqueios/configs do banco
+     │      ├─ SSL (HTTPS) ou HTTP local
+     │      ├─ before-handler: headers + SQLi/XSS + rate limiting
+     │      └─ Task.runTimerWithFixedDelay(cleanupOldData, 24h)
+     ├─ 5. HtmlRouteAPI.registerAllRoutes()  → páginas /public/*.html
+     └─ 6. Banner de inicialização
+```
 
 ---
 
@@ -93,6 +209,8 @@ dependencies {
 ## 🧩 Dependências por módulo
 
 A biblioteca **não** empacota nem propaga dependências de terceiros. Cada módulo verifica a presença da sua dependência em tempo de execução: se faltar, exibe uma mensagem padronizada com as instruções exatas de instalação (Maven e Gradle) — sem travar a inicialização da aplicação.
+
+> **Como funciona a verificação:** 39 das 43 classes públicas são **linkáveis sem nenhuma dependência** — os guards rodam no primeiro uso e exibem a mensagem de instalação. Quatro classes expõem tipos de terceiros na própria assinatura pública e, por contrato de API, exigem a dependência já no classload: `JavalinAPI` (tipos do Javalin), `QRCodeAPI` (parâmetro `ErrorCorrectionLevel` do ZXing) e os TypeAdapters de datas (estendem `TypeAdapter` do Gson). Para essas, a ausência gera `NoClassDefFoundError` nomeando a classe faltante — a dependência é obrigatória para usar a API.
 
 > **Exemplo da mensagem exibida:**
 > ```
@@ -188,6 +306,39 @@ Ao iniciar, a biblioteca:
 3. Configura o Javalin com headers de segurança, rate limiting e SSL (se houver certificados);
 4. Descobre e registra automaticamente todas as rotas (`Route`) e páginas HTML em `/public`;
 5. Agenda a limpeza diária de bloqueios expirados.
+
+---
+
+## 📁 Estrutura recomendada para projetos
+
+```
+seu-projeto/
+├── src/main/java/
+│   └── com/suaempresa/
+│       ├── Main.java                  ← new AngatuLib(...) no main
+│       ├── rotas/                     ← classes que estendem Route (descoberta automática)
+│       │   ├── HomeRoute.java
+│       │   └── ApiRoute.java
+│       ├── entidades/                 ← classes que estendem Saveable
+│       │   ├── Usuario.java
+│       │   └── Produto.java
+│       ├── servicos/                  ← lógica de negócio (EmailAPI, WebPush, etc.)
+│       └── config/                    ← rate limits, paths, credenciais
+├── src/main/resources/
+│   ├── public/                        ← HTML servidos automaticamente
+│   │   ├── index.html
+│   │   ├── sobre.html
+│   │   ├── css/ · js/ · img/
+│   └── emails/                        ← templates (loadHtmlTemplate)
+├── .env                               ← EMAIL_KEY, DISCORD_BOT_TOKEN, ...
+└── pom.xml / build.gradle
+```
+
+**Regras da estrutura:**
+- Uma rota por classe (construtor vazio + `super(path, type, handler)`) — a descoberta automática as registra no startup;
+- Uma entidade por classe (extends `Saveable` + construtor vazio + `getId()`) — tabela criada automaticamente;
+- Toda configuração de segurança (`configureRateLimit`, `addIgnoredPath`) em um único lugar (classe `config`), chamada logo após o `new AngatuLib(...)`;
+- `.env` na raiz (nunca versionar segredos).
 
 ---
 
@@ -444,6 +595,23 @@ if (resp2.isSuccess()) {
 
 ---
 
+## 🔧 Solução de problemas comuns
+
+| Sintoma | Causa provável | Solução |
+|---|---|---|
+| `[AngatuLibraries] Dependência ausente: ...` | Módulo usado sem a dependência no classpath | Siga o snippet Maven/Gradle exibido na mensagem |
+| `NoClassDefFoundError` citando `io/javalin/...`, `com/google/zxing/...` ou `com/google/gson/TypeAdapter` | Classe com tipos de terceiros na assinatura pública (`JavalinAPI`, `QRCodeAPI`, TypeAdapters) usada sem a dependência | Adicione a dependência correspondente — ela é obrigatória por contrato de API (ver nota acima) |
+| `Não é possível criar uma rota antes de inicializar o servidor` | `Route` construída antes de `new AngatuLib(...)` | Construa o `AngatuLib` primeiro; rotas são descobertas automaticamente |
+| `Javalin não foi inicializado` / retorno `null` do `JavalinAPI.setup` | Pasta `resources/public/index.html` ausente | Crie `src/main/resources/public/index.html` |
+| `Credenciais de e-mail não configuradas` | `.env` sem `EMAIL_KEY`/`EMAIL_PASSWORD` | Configure as variáveis e reinicie |
+| `Chaves VAPID não configuradas` | Web Push sem chaves | Chame `PushBootstrap.setup()` (gera e persiste automaticamente) |
+| `Playwright` não abre navegador | Browser não instalado | `mvn exec:java -e -Dexec.mainClass=com.microsoft.playwright.CLI -Dexec.args="install chromium"` |
+| `OutOfMemoryError` no `Saveable` | Tabela com milhões de registros (cache total) | Consulte o JavaDoc de `Saveable` — implemente cache lazy ou use SQL direto |
+| `Não foi possível registrar a rota` | Registro manual antes do servidor ativo | Registre após o `setup` ou deixe a descoberta automática fazer o trabalho |
+| Logs sem cor no terminal | Terminal sem suporte ANSI ou stream redirecionado | Use um terminal compatível (Windows Terminal, VS Code) |
+
+---
+
 ## ❓ FAQ
 
 **A biblioteca é pesada?**
@@ -481,12 +649,19 @@ Instale o browser uma vez: `mvn exec:java -e -Dexec.mainClass=com.microsoft.play
 | Classes `Request.Response` e `Response` unificadas | `Response` agora tem `getStatusCode()`, `getCode()` e `isSuccess()` além de `getStatus()`/`ok()` — o código antigo continua compilando |
 | Opções duplicadas do `BrowserAPI` removidas | Use as inner classes `BrowserAPI.ScreenshotOptions` / `BrowserAPI.ScrapeOptions` / `BrowserAPI.BaseBrowserOptions` (as classes standalone foram removidas) |
 | Logging do `EmailAPI` padronizado | Mensagens agora usam `Console` (mesma formatação do restante da biblioteca) |
+| **Construtores de `Route` agora `protected`** | Não quebra subclasses existentes (construtor vazio + `super(...)` continua válido); apenas instanciação direta (já impossível — classe abstrata) fica formalmente bloqueada |
+| **Construtor de `Saveable` agora `protected`** | Mesma política — uso exclusivo via `extends`, sem quebra de subclasses existentes |
+| **Data holders agora `final`** | `Response`, `BlockInfo`, `RateLimitConfig`, `SlidingWindowCounter`, `CachedHtml`, TypeAdapters e opções do `BrowserAPI` não podem mais ser estendidos (nenhum caso de uso legítimo para herança) |
 
 ---
 
 ## 📝 Changelog resumido
 
 ### Versão atual
+* 🔒 **Restrições de inicialização**: construtores de `Saveable` e `Route` agora `protected` (uso exclusivo via `extends`, com mensagens claras de uso incorreto); `Route` valida servidor ativo e argumentos no construtor; data holders (`Response`, `BlockInfo`, `RateLimitConfig`, `SlidingWindowCounter`, `CachedHtml`, TypeAdapters, opções do `BrowserAPI`) e `Core` agora `final`
+* 🔌 **Carregamento lazy de dependências**: todos os usos de bibliotecas de terceiros movidos para classes helper aninhadas — 39/43 classes públicas passam a ser linkáveis sem dependências e os guards de instalação disparam de fato no primeiro uso (validado por testes de runtime)
+* 📖 JavaDocs estruturados para humanos e IAs (propósito, quando usar/não usar, integração, fluxo, pré/pós-condições, efeitos colaterais, limitações, extensões)
+* 📚 README como documentação principal: arquitetura com diagrama, filosofia, conceitos, fluxo de funcionamento, estrutura recomendada de projeto, índice navegável, troubleshooting e notas para agentes de IA
 * 🪶 JAR leve: dependências de terceiros removidas do empacotamento (scope `optional`/`provided`)
 * 🔍 Detecção automática de dependências ausentes com instruções Maven/Gradle padronizadas
 * ⬆️ Javalin atualizado para **7.2.2** (e javalin-ssl 7.2.2)

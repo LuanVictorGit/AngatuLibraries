@@ -41,7 +41,10 @@ import io.javalin.http.staticfiles.Location;
  * API principal para configuração do servidor Javalin com rate limiting
  * avançado, proteção contra ataques e persistência de bloqueios.
  *
- * <p>Funcionalidades:</p>
+ * <p><strong>Propósito:</strong> encapsular toda a configuração do servidor web
+ * (SSL, estáticos, segurança, rate limiting) em chamadas estáticas simples.</p>
+ *
+ * <p><strong>Funcionalidades:</strong></p>
  * <ul>
  *   <li>Proteção contra DDoS, SQL Injection e XSS</li>
  *   <li>Rate limiting por IP e por rota com janela deslizante</li>
@@ -51,8 +54,48 @@ import io.javalin.http.staticfiles.Location;
  *   <li>Servir arquivos estáticos corretamente tanto em HTTP quanto HTTPS</li>
  * </ul>
  *
+ * <p><strong>Quando usar:</strong> em toda aplicação web da biblioteca — a
+ * inicialização é feita automaticamente pelo {@link AngatuLib} (não é preciso
+ * chamar {@link #setup} manualmente, exceto para cenários avançados). Use os
+ * métodos de configuração (rate limit, paths) logo após a inicialização.</p>
+ *
+ * <p><strong>Quando NÃO usar:</strong> em aplicações sem servidor web; não
+ * chame {@link #setup} mais de uma vez por processo (retorna a instância já
+ * criada). Os métodos de configuração devem ser chamados ANTES do servidor
+ * receber tráfego para evitar janelas sem proteção.</p>
+ *
+ * <p><strong>Integração:</strong> {@link AngatuLib} chama {@link #setup} no
+ * bootstrap; {@link Route} usa {@link #get()} para registro de rotas;
+ * {@link Saveable} persiste bloqueios e configurações (permanentes e suspeitos).</p>
+ *
+ * <p><strong>Fluxo de utilização:</strong></p>
+ * <ol>
+ *   <li>Construa {@code new AngatuLib(...)} (ou chame {@link #setup} diretamente);</li>
+ *   <li>Configure rate limits ({@link #configureRateLimit},
+ *       {@link #configureApiRateLimit}, {@link #configureLoginRateLimit}) e
+ *       paths especiais ({@link #addUnlimitedPath}, {@link #addIgnoredPath});</li>
+ *   <li>Use {@link #get()} para acessar o Javalin em cenários avançados.</li>
+ * </ol>
+ *
+ * <p><strong>Boas práticas:</strong> proteja rotas sensíveis (login/API) com
+ * presets de rate limit; use {@code addIgnoredPath} apenas para endpoints
+ * realmente públicos (health check); monitore {@link #getActivePermanentBlocks()}.</p>
+ *
+ * <p><strong>Limitações:</strong> exige as dependências
+ * {@code io.javalin:javalin:7.2.2} (web), {@code io.javalin.community.ssl:javalin-ssl:7.2.2}
+ * (HTTPS), {@code org.reflections:reflections:0.10.2} (rotas automáticas) e os
+ * requisitos do {@link Saveable} (persistência de bloqueios). Dependências
+ * ausentes são detectadas com mensagens de instalação claras.</p>
+ *
+ * <p><strong>Extensões futuras:</strong> novos padrões de segurança podem ser
+ * adicionados como métodos estáticos sem quebrar a API; a detecção de padrões
+ * maliciosos é extensível via lista de {@code Pattern} pré-compilados.</p>
+ *
  * @author Angatu Sistemas
  * @version 3.0
+ * @see AngatuLib
+ * @see Route
+ * @see br.com.angatusistemas.lib.database.Saveable
  */
 public final class JavalinAPI {
 
@@ -126,6 +169,8 @@ public final class JavalinAPI {
 
     /** Coordenadas Maven do Javalin (versão alvo da biblioteca). */
     private static final String JAVALIN_COORDINATES = "io.javalin:javalin:7.2.2";
+    /** Coordenadas Maven do plugin SSL (modo HTTPS). */
+    private static final String JAVALIN_SSL_COORDINATES = "io.javalin.community.ssl:javalin-ssl:7.2.2";
     /** Coordenadas Maven da Reflections (scan de rotas). */
     private static final String REFLECTIONS_COORDINATES = "org.reflections:reflections:0.10.2";
 
@@ -201,15 +246,9 @@ public final class JavalinAPI {
                 // Configuração SSL para produção
                 if (!localhost) {
                     Console.log("Javalin iniciado em modo HTTPS (porta %d)", port);
-                    SslPlugin sslPlugin = new SslPlugin(ssl -> {
-                        ssl.pemFromPath(folderCerts + "/fullchain.pem", folderCerts + "/privkey.pem");
-                        ssl.secure = true;
-                        ssl.insecure = false;
-                        ssl.redirect = true;
-                        ssl.securePort = port;
-                        ssl.insecurePort = port + 1;
-                    });
-                    config.registerPlugin(sslPlugin);
+                    Dependencies.require("io.javalin.community.ssl.SslPlugin", JAVALIN_SSL_COORDINATES,
+                            "Web Server (Javalin)");
+                    SslSetup.configure(config, folderCerts, port);
                 } else {
                     Console.log("Javalin iniciado em modo HTTP local (porta 80)");
                 }
@@ -791,17 +830,60 @@ public final class JavalinAPI {
      */
     private static void registerAllRoutes() {
         Dependencies.require("org.reflections.Reflections", REFLECTIONS_COORDINATES, "Descoberta automática de rotas");
-        Reflections reflections = new Reflections(
-                new org.reflections.util.ConfigurationBuilder()
-                        .setUrls(org.reflections.util.ClasspathHelper.forJavaClassPath())
-                        .setScanners(Scanners.SubTypes)
-        );
-        for (Class<? extends Route> routeClass : reflections.getSubTypesOf(Route.class)) {
-            try {
-                if (!java.lang.reflect.Modifier.isAbstract(routeClass.getModifiers()) && !routeClass.isInterface())
-                    routeClass.getDeclaredConstructor().newInstance().register();
-            } catch (Exception e) {
-                Console.error("Erro ao registrar rota: %s", routeClass.getName(), e);
+        // Delegado a uma classe helper: mantém o bytecode desta classe livre de
+        // referências à Reflections, permitindo o link sem a dependência e o
+        // guard acima imprimir a mensagem antes de qualquer falha
+        RouteDiscovery.scanAndRegister();
+    }
+
+    // ==================== HELPERS (CARREGAMENTO LAZY) ====================
+
+    /**
+     * Configura o plugin SSL/TLS do Javalin (javalin-ssl). Classe separada para
+     * que a {@link JavalinAPI} possa ser vinculada sem a dependência do plugin —
+     * o guard de dependência roda antes deste helper ser tocado.
+     */
+    private static final class SslSetup {
+
+        private SslSetup() {
+        }
+
+        static void configure(io.javalin.config.JavalinConfig config, File folderCerts, int port) {
+            SslPlugin sslPlugin = new SslPlugin(ssl -> {
+                ssl.pemFromPath(folderCerts + "/fullchain.pem", folderCerts + "/privkey.pem");
+                ssl.secure = true;
+                ssl.insecure = false;
+                ssl.redirect = true;
+                ssl.securePort = port;
+                ssl.insecurePort = port + 1;
+            });
+            config.registerPlugin(sslPlugin);
+        }
+    }
+
+    /**
+     * Descobre e registra todas as implementações de {@link Route} no classpath.
+     * Classe separada para manter as referências à Reflections fora do bytecode
+     * da {@link JavalinAPI} (link sem a dependência + guard com mensagem clara).
+     */
+    private static final class RouteDiscovery {
+
+        private RouteDiscovery() {
+        }
+
+        static void scanAndRegister() {
+            Reflections reflections = new Reflections(
+                    new org.reflections.util.ConfigurationBuilder()
+                            .setUrls(org.reflections.util.ClasspathHelper.forJavaClassPath())
+                            .setScanners(Scanners.SubTypes)
+            );
+            for (Class<? extends Route> routeClass : reflections.getSubTypesOf(Route.class)) {
+                try {
+                    if (!java.lang.reflect.Modifier.isAbstract(routeClass.getModifiers()) && !routeClass.isInterface())
+                        routeClass.getDeclaredConstructor().newInstance().register();
+                } catch (Exception e) {
+                    Console.error("Erro ao registrar rota: %s", routeClass.getName(), e);
+                }
             }
         }
     }

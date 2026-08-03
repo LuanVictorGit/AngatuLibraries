@@ -867,7 +867,7 @@ public final class BrowserAPI {
      * Opções de captura de screenshot: estende {@link BaseBrowserOptions} com
      * controle de página inteira, qualidade (JPEG) e área de recorte.
      */
-    public static class ScreenshotOptions extends BaseBrowserOptions {
+    public static final class ScreenshotOptions extends BaseBrowserOptions {
         public boolean fullPage = DEFAULT_FULL_PAGE;
         public Integer quality = null;
         public Integer clipX = null, clipY = null, clipWidth = null, clipHeight = null;
@@ -876,7 +876,7 @@ public final class BrowserAPI {
     /**
      * Opções de scraping: estende {@link BaseBrowserOptions} sem campos adicionais.
      */
-    public static class ScrapeOptions extends BaseBrowserOptions {}
+    public static final class ScrapeOptions extends BaseBrowserOptions {}
 
     // ==================== SHUTDOWN ====================
 

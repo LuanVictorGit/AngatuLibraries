@@ -17,7 +17,7 @@ package br.com.angatusistemas.lib.javalin.classes;
  * @author Angatu Sistemas
  * @see RouteRateLimitConfig
  */
-public class RateLimitConfig {
+public final class RateLimitConfig {
 
     /** Máximo de requisições por segundo dentro da janela deslizante. */
     public final int requestsPerSecond;

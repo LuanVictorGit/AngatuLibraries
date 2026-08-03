@@ -8,12 +8,29 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 
 /**
- * Classe utilitária para realizar requisições HTTP (GET, POST, PUT, DELETE, PATCH)
- * com suporte a token Bearer e corpo JSON.
+ * Classe utilitária para requisições HTTP (GET, POST, PUT, DELETE, PATCH) com
+ * token Bearer e corpo JSON — sem dependências externas.
  *
- * <p>Timeouts padrão: 15 segundos para conexão e leitura.</p>
+ * <p><strong>Propósito:</strong> cliente HTTP simples baseado em
+ * {@link java.net.HttpURLConnection} (JDK puro) para chamadas a APIs REST.</p>
  *
- * <p>Exemplo de uso:
+ * <p><strong>Quando usar:</strong> chamadas HTTP pontuais sem necessidade de
+ * configuração avançada. Timeouts padrão: 15 segundos (conexão e leitura).</p>
+ *
+ * <p><strong>Quando NÃO usar:</strong> para chamadas frequentes, streaming,
+ * HTTP/2, retry automático ou controle fino de conexão — use
+ * {@code java.net.http.HttpClient} (JDK) ou uma biblioteca dedicada (OkHttp,
+ * etc.); para scraping com renderização, use {@link BrowserAPI}.</p>
+ *
+ * <p><strong>Integração:</strong> retorna {@link Response} (corpo + status
+ * {@link StatusCode}); usada como base para integrações simples sem custo de
+ * dependência.</p>
+ *
+ * <p><strong>Fluxo de utilização:</strong> escolha a sobrecarga de
+ * {@link #query(String, String)} conforme precise de corpo e/ou token;
+ * verifique {@code Response.isSuccess()} e leia {@code Response.getBody()}.</p>
+ *
+ * <p><strong>Exemplo:</strong>
  * <pre>
  * // GET simples
  * Response resp = Request.query("GET", "https://api.exemplo.com/users");
@@ -27,6 +44,18 @@ import java.nio.charset.StandardCharsets;
  * }
  * </pre>
  * </p>
+ *
+ * <p><strong>Boas práticas:</strong> sempre valide {@code isSuccess()} antes de
+ * usar o corpo; trate {@code getBody() == null} (erros sem corpo); o
+ * {@code Content-Type: application/json} é enviado apenas quando há corpo.</p>
+ *
+ * <p><strong>Limitações:</strong> sem suporte a headers customizados, cookies,
+ * multipart e HTTPS com certificados privados; em erro de rede, retorna
+ * {@code Response} com {@link StatusCode#INTERNAL_SERVER_ERROR} e mensagem no
+ * corpo (não lança exceção).</p>
+ *
+ * <p><strong>Extensões futuras:</strong> sobrecargas com headers customizados e
+ * timeouts configuráveis são evoluções naturais sem quebrar a API atual.</p>
  *
  * @author Angatu Sistemas
  * @see Response

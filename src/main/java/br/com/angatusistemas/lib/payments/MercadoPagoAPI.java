@@ -12,6 +12,7 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import br.com.angatusistemas.lib.console.Console;
+import br.com.angatusistemas.lib.dependencies.Dependencies;
 import com.mercadopago.MercadoPagoConfig;
 import com.mercadopago.client.payment.PaymentClient;
 import com.mercadopago.client.payment.PaymentCreateRequest;
@@ -29,39 +30,78 @@ import com.mercadopago.resources.payment.Payment;
 import com.mercadopago.resources.preference.Preference;
 
 /**
- * Classe utilitária completa para integração com o SDK oficial do Mercado Pago
+ * Classe utilitária para integração com o SDK oficial do Mercado Pago
  * (Java SDK 2.9.2).
  *
- * <p>
- * Oferece métodos estáticos para:
- * <ul>
- * <li>Inicialização e configuração do Access Token</li>
- * <li>Criação e gerenciamento de pagamentos (PIX, cartão, boleto)</li>
- * <li>Consulta e filtragem de pagamentos</li>
- * <li>Criação de preferências de checkout</li>
- * <li>Processamento de webhooks</li>
- * <li>Conversão de respostas para DTOs internos</li>
- * </ul>
+ * <p><strong>Propósito:</strong> abstrair o SDK do Mercado Pago em chamadas
+ * simples: criação de pagamentos (PIX, boleto, cartão), consultas, preferências
+ * de checkout e processamento de webhooks, com DTOs próprios
+ * ({@link PaymentDTO}, {@link PreferenceDTO}).</p>
  *
- * <p>
- * <b>Uso básico:</b>
- * 
- * <pre>{@code
- * MercadoPagoAPI.init(System.getenv("MP_ACCESS_TOKEN"));
- * PaymentDTO pix = MercadoPagoAPI.createPixPayment(100.00, "pagador@email.com", "Pedido #123", "order-001");
+ * <p><strong>Quando usar:</strong> em aplicações que precisam receber
+ * pagamentos via Mercado Pago (PIX, boleto, cartão) ou redirecionar para o
+ * checkout.</p>
+ *
+ * <p><strong>Quando NÃO usar:</strong> sem um Access Token válido do painel do
+ * Mercado Pago nada funciona; para fluxos muito customizados use o SDK
+ * diretamente; os métodos de consulta retornam {@code null} em falhas de rede —
+ * trate esse caso.</p>
+ *
+ * <p><strong>Integração:</strong> usa {@link Console} para logs e
+ * {@link Dependencies} para verificar a presença do SDK; o Access Token pode
+ * vir da variável de ambiente {@code MP_ACCESS_TOKEN} via
+ * {@link #initFromEnv()}.</p>
+ *
+ * <p><strong>Fluxo de utilização:</strong></p>
+ * <ol>
+ *   <li>{@code MercadoPagoAPI.init(accessToken)} (ou {@code initFromEnv()});</li>
+ *   <li>Crie o pagamento ({@link #createPixPayment}, {@link #createBoletoPayment},
+ *       {@link #createCreditCardPayment}) — PIX/boleto ficam {@code pending}
+ *       até o pagador quitar;</li>
+ *   <li>Verifique o status ({@link #isApproved}, {@link #checkPaymentStatus})
+ *       ou processe o webhook ({@link #processWebhook} +
+ *       {@link #validateWebhookSignature});</li>
+ *   <li>Para checkout hospedado, use {@link #createPreference}.</li>
+ * </ol>
+ *
+ * <p><strong>Exemplo:</strong>
+ * <pre>
+ * MercadoPagoAPI.initFromEnv();
+ * PaymentDTO pix = MercadoPagoAPI.createPixPayment(
+ *         150.00, "cliente@email.com", "Pedido #1234", "order-1234");
  * System.out.println(pix.getPixCopiaECola());
- * }</pre>
+ * </pre>
+ * </p>
  *
- * @author Gerado por Claude (Anthropic)
+ * <p><strong>Boas práticas:</strong> guarde o token em variável de ambiente
+ * (nunca no código); valide a assinatura do webhook antes de processar;
+ * monitore {@code payment.getStatus()} em fluxos PIX/boleto (aprovação é
+ * assíncrona).</p>
+ *
+ * <p><strong>Limitações:</strong> requer {@code com.mercadopago:sdk-java:2.9.2} —
+ * a classe é detectável (linkável) sem ela e o guard exibe instruções de
+ * instalação; os métodos de busca podem retornar {@code null} (não lançam) em
+ * caso de erro de rede.</p>
+ *
+ * <p><strong>Extensões futuras:</strong> cancelamento/reembolso
+ * ({@code cancelPayment}, {@code refundPayment}) são adições naturais, sem
+ * quebrar a API atual.</p>
+ *
+ * @author Angatu Sistemas
  * @version 1.0
+ * @see PaymentDTO
+ * @see PreferenceDTO
  */
 public final class MercadoPagoAPI {
 
-	// ─────────────────────────────────────────────────────────────────────────
-	// Constantes e Logger
-	// ─────────────────────────────────────────────────────────────────────────
+	/** Coordenadas Maven da dependência do SDK. */
+	private static final String SDK_COORDINATES = "com.mercadopago:sdk-java:2.9.2";
+	/** Nome da funcionalidade para mensagens de dependência ausente. */
+	private static final String PAYMENTS_FEATURE = "Pagamentos (Mercado Pago)";
 
-	private static final Logger LOGGER = Logger.getLogger(MercadoPagoAPI.class.getName());
+	// ─────────────────────────────────────────────────────────────────────────
+	// Constantes
+	// ─────────────────────────────────────────────────────────────────────────
 
 	/** Tempo padrão de conexão em milissegundos (10 segundos). */
 	private static final int DEFAULT_CONNECTION_TIMEOUT_MS = 10_000;
@@ -69,12 +109,7 @@ public final class MercadoPagoAPI {
 	/** Tempo padrão de leitura em milissegundos (30 segundos). */
 	private static final int DEFAULT_READ_TIMEOUT_MS = 30_000;
 
-	// ─────────────────────────────────────────────────────────────────────────
-	// Estado da classe
-	// ─────────────────────────────────────────────────────────────────────────
-
-	private static boolean initialized = false;
-	private static MPRequestOptions defaultRequestOptions;
+	private static final Logger LOGGER = Logger.getLogger(MercadoPagoAPI.class.getName());
 
 	/** Construtor privado — classe utilitária, não deve ser instanciada. */
 	private MercadoPagoAPI() {
@@ -87,6 +122,12 @@ public final class MercadoPagoAPI {
 
 	/**
 	 * Inicializa o SDK com o Access Token fornecido, usando timeouts padrão.
+	 *
+	 * <p><strong>Pré-condições:</strong> dependência sdk-java no classpath
+	 * (verificada com mensagem de instalação se ausente).</p>
+	 *
+	 * <p><strong>Pós-condições:</strong> SDK configurado; os métodos de
+	 * pagamento passam a funcionar.</p>
 	 *
 	 * @param accessToken Access Token do Mercado Pago (obrigatório, não nulo/vazio)
 	 * @throws IllegalArgumentException se o token for nulo ou vazio
@@ -104,16 +145,9 @@ public final class MercadoPagoAPI {
 	 * @throws IllegalArgumentException se o token for nulo ou vazio
 	 */
 	public static void init(String accessToken, int connectionTimeoutMs, int readTimeoutMs) {
+		checkDependencies();
 		validateToken(accessToken);
-
-		MercadoPagoConfig.setAccessToken(accessToken);
-		MercadoPagoConfig.setConnectionTimeout(connectionTimeoutMs);
-		MercadoPagoConfig.setSocketTimeout(readTimeoutMs);
-
-		defaultRequestOptions = MPRequestOptions.builder().connectionTimeout(connectionTimeoutMs)
-				.connectionRequestTimeout(readTimeoutMs).build();
-
-		initialized = true;
+		MpSupport.init(accessToken, connectionTimeoutMs, readTimeoutMs);
 		LOGGER.info("[MercadoPagoAPI] SDK inicializado com sucesso.");
 	}
 
@@ -419,8 +453,7 @@ public final class MercadoPagoAPI {
 	/**
 	 * Cria um pagamento PIX e retorna o QR Code (copia e cola e base64).
 	 *
-	 * <p>
-	 * O pagamento fica com status {@code pending} até o pagador efetuar o PIX.
+	 * <p>O pagamento fica com status {@code pending} até o pagador efetuar o PIX.</p>
 	 *
 	 * @param amount            Valor do pagamento (não pode ser nulo ou negativo)
 	 * @param payerEmail        E-mail do pagador
@@ -434,14 +467,9 @@ public final class MercadoPagoAPI {
 	public static PaymentDTO createPixPayment(double amount, String payerEmail, String description,
 			String externalReference) throws MPException {
 
-		ensureInitialized();
+		checkDependencies();
 		LOGGER.fine("[MercadoPagoAPI] Criando pagamento PIX para: " + payerEmail);
-
-		PaymentCreateRequest request = PaymentCreateRequest.builder().transactionAmount(BigDecimal.valueOf(amount))
-				.description(description).paymentMethodId("pix").externalReference(externalReference)
-				.payer(buildPayer(payerEmail)).build();
-
-		return executePaymentCreation(request);
+		return MpSupport.createPixPayment(amount, payerEmail, description, externalReference);
 	}
 
 	/**
@@ -460,19 +488,10 @@ public final class MercadoPagoAPI {
 	public static PaymentDTO createBoletoPayment(double amount, String payerEmail, String payerFirstName,
 			String payerLastName, String payerCpf, String description, String externalReference) throws MPException {
 
-		ensureInitialized();
+		checkDependencies();
 		LOGGER.fine("[MercadoPagoAPI] Criando boleto para: " + payerEmail);
-
-		PaymentPayerRequest payer = PaymentPayerRequest.builder().email(payerEmail).firstName(payerFirstName)
-				.lastName(payerLastName).identification(com.mercadopago.client.common.IdentificationRequest.builder()
-						.type("CPF").number(payerCpf).build())
-				.build();
-
-		PaymentCreateRequest request = PaymentCreateRequest.builder().transactionAmount(BigDecimal.valueOf(amount))
-				.description(description).paymentMethodId("bolbradesco").externalReference(externalReference)
-				.payer(payer).build();
-
-		return executePaymentCreation(request);
+		return MpSupport.createBoletoPayment(amount, payerEmail, payerFirstName, payerLastName, payerCpf,
+				description, externalReference);
 	}
 
 	/**
@@ -494,22 +513,17 @@ public final class MercadoPagoAPI {
 			String paymentMethodId, String payerEmail, String description, String externalReference)
 			throws MPException {
 
-		ensureInitialized();
+		checkDependencies();
 		LOGGER.fine("[MercadoPagoAPI] Criando pagamento com cartão " + paymentMethodId + " para: " + payerEmail);
-
-		PaymentCreateRequest request = PaymentCreateRequest.builder().transactionAmount(BigDecimal.valueOf(amount))
-				.installments(installments).token(cardToken).paymentMethodId(paymentMethodId).description(description)
-				.externalReference(externalReference).payer(buildPayer(payerEmail)).build();
-
-		return executePaymentCreation(request);
+		return MpSupport.createCreditCardPayment(amount, installments, cardToken, paymentMethodId, payerEmail,
+				description, externalReference);
 	}
 
 	/**
 	 * Cria um pagamento genérico com metadados customizados (chave-valor).
 	 *
-	 * <p>
-	 * Use {@code metadata} para armazenar informações adicionais do seu sistema sem
-	 * interferir nos campos oficiais da API.
+	 * <p>Use {@code metadata} para armazenar informações adicionais do seu sistema sem
+	 * interferir nos campos oficiais da API.</p>
 	 *
 	 * @param amount            Valor do pagamento
 	 * @param payerEmail        E-mail do pagador
@@ -524,14 +538,10 @@ public final class MercadoPagoAPI {
 	public static PaymentDTO createPaymentWithMetadata(double amount, String payerEmail, String paymentMethodId,
 			String description, String externalReference, Map<String, Object> metadata) throws MPException {
 
-		ensureInitialized();
+		checkDependencies();
 		LOGGER.fine("[MercadoPagoAPI] Criando pagamento com metadata: " + metadata);
-
-		PaymentCreateRequest request = PaymentCreateRequest.builder().transactionAmount(BigDecimal.valueOf(amount))
-				.description(description).paymentMethodId(paymentMethodId).externalReference(externalReference)
-				.metadata(metadata != null ? metadata : Collections.emptyMap()).payer(buildPayer(payerEmail)).build();
-
-		return executePaymentCreation(request);
+		return MpSupport.createPaymentWithMetadata(amount, payerEmail, paymentMethodId, description,
+				externalReference, metadata);
 	}
 
 	// ─────────────────────────────────────────────────────────────────────────
@@ -544,42 +554,25 @@ public final class MercadoPagoAPI {
 	 * @param paymentId ID do pagamento
 	 * @return {@link Optional} com o {@link PaymentDTO} se encontrado, ou vazio se
 	 *         não existir
-	 * @throws MPException    em caso de erro no SDK
-	 * @throws MPApiException
 	 */
 	public static Optional<PaymentDTO> findById(Long paymentId) {
-		try {
-			ensureInitialized();
-			LOGGER.fine("[MercadoPagoAPI] Buscando pagamento ID: " + paymentId);
-
-			try {
-				PaymentClient client = new PaymentClient();
-				Payment payment = client.get(paymentId, defaultRequestOptions);
-				return Optional.ofNullable(payment).map(MercadoPagoAPI::toDTO);
-			} catch (MPApiException e) {
-				if (e.getStatusCode() == 404) {
-					return Optional.empty();
-				}
-				throw e;
-			}
-		} catch (Exception e) {
-			Console.error("[MercadoPagoAPI] Erro ao consultar pagamento por ID", e);
-			return Optional.empty();
-		}
+		checkDependencies();
+		LOGGER.fine("[MercadoPagoAPI] Buscando pagamento ID: " + paymentId);
+		return MpSupport.findById(paymentId);
 	}
 
 	/**
 	 * Busca todos os pagamentos associados a uma {@code external_reference}.
 	 *
-	 * <p>
-	 * Útil para rastrear pagamentos por ID de pedido interno do sistema.
+	 * <p>Útil para rastrear pagamentos por ID de pedido interno do sistema.</p>
 	 *
 	 * @param externalReference Referência externa definida na criação do pagamento
 	 * @return Lista (possivelmente vazia) de {@link PaymentDTO}
 	 * @throws MPException em caso de erro no SDK
 	 */
 	public static List<PaymentDTO> findByExternalReference(String externalReference) throws MPException {
-		ensureInitialized();
+		checkDependencies();
+		MpSupport.ensureInitialized();
 		LOGGER.fine("[MercadoPagoAPI] Buscando pagamentos por external_reference: " + externalReference);
 
 		Map<String, Object> filters = new HashMap<>();
@@ -591,8 +584,7 @@ public final class MercadoPagoAPI {
 	/**
 	 * Lista pagamentos com filtros dinâmicos.
 	 *
-	 * <p>
-	 * Filtros aceitos pela API (chaves como String):
+	 * <p>Filtros aceitos pela API (chaves como String):</p>
 	 * <ul>
 	 * <li>{@code status} — ex: {@code approved}, {@code pending},
 	 * {@code rejected}</li>
@@ -612,29 +604,9 @@ public final class MercadoPagoAPI {
 	public static List<PaymentDTO> searchPayments(Map<String, Object> filters, int offset, int limit)
 			throws MPException {
 
-		try {
-			ensureInitialized();
-			LOGGER.fine("[MercadoPagoAPI] Buscando pagamentos com filtros: " + filters);
-
-			MPSearchRequest searchRequest = MPSearchRequest.builder()
-					.filters(filters != null ? filters : Collections.emptyMap()).offset(offset)
-					.limit(Math.min(limit, 50)).build();
-
-			PaymentClient client = new PaymentClient();
-			MPResultsResourcesPage<Payment> result = client.search(searchRequest, defaultRequestOptions);
-
-			List<PaymentDTO> dtos = new ArrayList<>();
-			if (result != null && result.getResults() != null) {
-				for (Payment p : result.getResults()) {
-					dtos.add(toDTO(p));
-				}
-			}
-			return dtos;
-		} catch (Exception e) {
-			Console.error("[MercadoPagoAPI] Erro na busca de pagamentos", e);
-			return null;
-		}
-
+		checkDependencies();
+		LOGGER.fine("[MercadoPagoAPI] Buscando pagamentos com filtros: " + filters);
+		return MpSupport.searchPayments(filters, offset, limit);
 	}
 
 	/**
@@ -744,27 +716,10 @@ public final class MercadoPagoAPI {
 	public static PreferenceDTO createPreferenceWithItems(List<PreferenceItemRequest> items, String payerEmail,
 			String externalReference, String successUrl, String failureUrl, String pendingUrl) throws MPException {
 
-		try {
-			ensureInitialized();
-			LOGGER.fine("[MercadoPagoAPI] Criando preferência para: " + payerEmail);
-
-			PreferenceBackUrlsRequest backUrls = PreferenceBackUrlsRequest.builder().success(successUrl)
-					.failure(failureUrl).pending(pendingUrl).build();
-
-			PreferenceRequest request = PreferenceRequest.builder().items(items).backUrls(backUrls)
-					.autoReturn("approved").externalReference(externalReference)
-					.payer(com.mercadopago.client.preference.PreferencePayerRequest.builder().email(payerEmail).build())
-					.build();
-
-			PreferenceClient client = new PreferenceClient();
-			Preference preference = client.create(request, defaultRequestOptions);
-
-			return new PreferenceDTO(preference.getId(), preference.getInitPoint(), preference.getSandboxInitPoint(),
-					preference.getExternalReference());
-		} catch (Exception e) {
-			Console.error("[MercadoPagoAPI] Erro ao criar preferência de checkout", e);
-			return null;
-		}
+		checkDependencies();
+		LOGGER.fine("[MercadoPagoAPI] Criando preferência para: " + payerEmail);
+		return MpSupport.createPreferenceWithItems(items, payerEmail, externalReference, successUrl, failureUrl,
+				pendingUrl);
 	}
 
 	/**
@@ -781,15 +736,7 @@ public final class MercadoPagoAPI {
 	public static PreferenceItemRequest buildPreferenceItem(String title, int quantity, double unitPrice,
 			String description, String pictureUrl) {
 
-		PreferenceItemRequest.PreferenceItemRequestBuilder builder = PreferenceItemRequest.builder().title(title)
-				.quantity(quantity).unitPrice(BigDecimal.valueOf(unitPrice)).currencyId("BRL");
-
-		if (description != null)
-			builder.description(description);
-		if (pictureUrl != null)
-			builder.pictureUrl(pictureUrl);
-
-		return builder.build();
+		return MpSupport.buildPreferenceItem(title, quantity, unitPrice, description, pictureUrl);
 	}
 
 	// ─────────────────────────────────────────────────────────────────────────
@@ -800,9 +747,8 @@ public final class MercadoPagoAPI {
 	 * Extrai o ID do pagamento a partir de uma notificação de webhook do Mercado
 	 * Pago.
 	 *
-	 * <p>
-	 * O Mercado Pago envia webhooks com a seguinte estrutura JSON:
-	 * 
+	 * <p>O Mercado Pago envia webhooks com a seguinte estrutura JSON:</p>
+	 *
 	 * <pre>{@code
 	 * {
 	 *   "type": "payment",
@@ -810,10 +756,8 @@ public final class MercadoPagoAPI {
 	 * }
 	 * }</pre>
 	 *
-	 * <p>
-	 * <b>Importante:</b> valide o cabeçalho {@code x-signature} antes de processar.
-	 * Consulte: <a href=
-	 * "https://www.mercadopago.com.br/developers/pt/docs/your-integrations/notifications/webhooks">Documentação</a>
+	 * <p><b>Importante:</b> valide o cabeçalho {@code x-signature} antes de processar
+	 * (consulte {@link #validateWebhookSignature}).</p>
 	 *
 	 * @param webhookPayload Corpo JSON do webhook como {@link Map} (parseado
 	 *                       previamente)
@@ -851,9 +795,8 @@ public final class MercadoPagoAPI {
 	/**
 	 * Processa um webhook e busca o pagamento correspondente na API.
 	 *
-	 * <p>
-	 * Combina {@link #extractPaymentIdFromWebhook} com {@link #findById} para
-	 * facilitar o fluxo completo de processamento.
+	 * <p>Combina {@link #extractPaymentIdFromWebhook} com {@link #findById} para
+	 * facilitar o fluxo completo de processamento.</p>
 	 *
 	 * @param webhookPayload Corpo JSON do webhook como {@link Map}
 	 * @return {@link Optional} com o {@link PaymentDTO} se o pagamento for
@@ -872,9 +815,8 @@ public final class MercadoPagoAPI {
 	/**
 	 * Valida a assinatura de um webhook do Mercado Pago.
 	 *
-	 * <p>
-	 * Usa HMAC-SHA256 para verificar a autenticidade da notificação. Requer o
-	 * {@code secret} configurado no painel do Mercado Pago (Webhooks).
+	 * <p>Usa HMAC-SHA256 para verificar a autenticidade da notificação. Requer o
+	 * {@code secret} configurado no painel do Mercado Pago (Webhooks).</p>
 	 *
 	 * @param xSignatureHeader Valor do cabeçalho {@code x-signature}
 	 * @param xRequestId       Valor do cabeçalho {@code x-request-id}
@@ -944,41 +886,18 @@ public final class MercadoPagoAPI {
 	 * @return {@link PaymentDTO} preenchido com os dados relevantes
 	 */
 	public static PaymentDTO toDTO(Payment payment) {
-		if (payment == null) {
-			throw new IllegalArgumentException("Payment não pode ser nulo.");
-		}
-
-		PaymentDTO.Builder builder = new PaymentDTO.Builder().id(payment.getId()).status(payment.getStatus())
-				.statusDetail(payment.getStatusDetail()).paymentMethodId(payment.getPaymentMethodId())
-				.transactionAmount(payment.getTransactionAmount()).externalReference(payment.getExternalReference())
-				.description(payment.getDescription()).dateCreated(payment.getDateCreated())
-				.dateApproved(payment.getDateApproved());
-
-		// Extrai dados PIX (QR Code e copia e cola)
-		if (payment.getPointOfInteraction() != null && payment.getPointOfInteraction().getTransactionData() != null) {
-
-			var txData = payment.getPointOfInteraction().getTransactionData();
-			builder.pixCopiaECola(txData.getQrCode());
-			builder.pixQrCodeBase64(txData.getQrCodeBase64());
-		}
-
-		// Extrai URL do boleto
-		if (payment.getTransactionDetails() != null) {
-			builder.boletoUrl(payment.getTransactionDetails().getExternalResourceUrl());
-		}
-
-		return builder.build();
+		return MpSupport.toDTO(payment);
 	}
 
 	// ─────────────────────────────────────────────────────────────────────────
 	// Helpers privados
 	// ─────────────────────────────────────────────────────────────────────────
 
-	private static void ensureInitialized() {
-		if (!initialized) {
-			throw new IllegalStateException(
-					"[MercadoPagoAPI] SDK não inicializado. Chame MercadoPagoAPI.init(accessToken) primeiro.");
-		}
+	/**
+	 * Verifica a presença da dependência do SDK (mensagem de instalação se ausente).
+	 */
+	private static void checkDependencies() {
+		Dependencies.require("com.mercadopago.MercadoPagoConfig", SDK_COORDINATES, PAYMENTS_FEATURE);
 	}
 
 	private static void validateToken(String token) {
@@ -987,172 +906,205 @@ public final class MercadoPagoAPI {
 		}
 	}
 
-	private static PaymentPayerRequest buildPayer(String email) {
-		return PaymentPayerRequest.builder().email(email).build();
-	}
+	// ─────────────────────────────────────────────────────────────────────────
+	// Implementação (SDK — LAZY)
+	// ─────────────────────────────────────────────────────────────────────────
 
-	private static PaymentDTO executePaymentCreation(PaymentCreateRequest request) {
-		try {
-			PaymentClient client = new PaymentClient();
-			Payment payment = client.create(request, defaultRequestOptions);
-			PaymentDTO dto = toDTO(payment);
-			LOGGER.info("[MercadoPagoAPI] Pagamento criado — ID: " + dto.getId() + " | Status: " + dto.getStatus());
-			return dto;
-		} catch (Exception e) {
-			Console.error("[MercadoPagoAPI] Erro ao criar pagamento", e);
-			return null;
+	/**
+	 * Estado e lógica que dependem do SDK do Mercado Pago. Classe separada para
+	 * manter as referências ao SDK fora do bytecode da {@link MercadoPagoAPI} —
+	 * a classe pública pode ser vinculada sem o sdk-java e o guard exibe a
+	 * mensagem de instalação antes de qualquer uso.
+	 */
+	private static final class MpSupport {
+
+		private static boolean initialized = false;
+		private static MPRequestOptions defaultRequestOptions;
+
+		private MpSupport() {
+		}
+
+		static void init(String accessToken, int connectionTimeoutMs, int readTimeoutMs) {
+			MercadoPagoConfig.setAccessToken(accessToken);
+			MercadoPagoConfig.setConnectionTimeout(connectionTimeoutMs);
+			MercadoPagoConfig.setSocketTimeout(readTimeoutMs);
+
+			defaultRequestOptions = MPRequestOptions.builder().connectionTimeout(connectionTimeoutMs)
+					.connectionRequestTimeout(readTimeoutMs).build();
+
+			initialized = true;
+		}
+
+		static void ensureInitialized() {
+			if (!initialized) {
+				throw new IllegalStateException(
+						"[MercadoPagoAPI] SDK não inicializado. Chame MercadoPagoAPI.init(accessToken) primeiro.");
+			}
+		}
+
+		static PaymentPayerRequest buildPayer(String email) {
+			return PaymentPayerRequest.builder().email(email).build();
+		}
+
+		static PaymentDTO createPixPayment(double amount, String payerEmail, String description,
+				String externalReference) throws MPException {
+			ensureInitialized();
+			PaymentCreateRequest request = PaymentCreateRequest.builder().transactionAmount(BigDecimal.valueOf(amount))
+					.description(description).paymentMethodId("pix").externalReference(externalReference)
+					.payer(buildPayer(payerEmail)).build();
+			return executePaymentCreation(request);
+		}
+
+		static PaymentDTO createBoletoPayment(double amount, String payerEmail, String payerFirstName,
+				String payerLastName, String payerCpf, String description, String externalReference)
+				throws MPException {
+			ensureInitialized();
+			PaymentPayerRequest payer = PaymentPayerRequest.builder().email(payerEmail).firstName(payerFirstName)
+					.lastName(payerLastName).identification(com.mercadopago.client.common.IdentificationRequest.builder()
+							.type("CPF").number(payerCpf).build())
+					.build();
+
+			PaymentCreateRequest request = PaymentCreateRequest.builder().transactionAmount(BigDecimal.valueOf(amount))
+					.description(description).paymentMethodId("bolbradesco").externalReference(externalReference)
+					.payer(payer).build();
+			return executePaymentCreation(request);
+		}
+
+		static PaymentDTO createCreditCardPayment(double amount, int installments, String cardToken,
+				String paymentMethodId, String payerEmail, String description, String externalReference)
+				throws MPException {
+			ensureInitialized();
+			PaymentCreateRequest request = PaymentCreateRequest.builder().transactionAmount(BigDecimal.valueOf(amount))
+					.installments(installments).token(cardToken).paymentMethodId(paymentMethodId).description(description)
+					.externalReference(externalReference).payer(buildPayer(payerEmail)).build();
+			return executePaymentCreation(request);
+		}
+
+		static PaymentDTO createPaymentWithMetadata(double amount, String payerEmail, String paymentMethodId,
+				String description, String externalReference, Map<String, Object> metadata) throws MPException {
+			ensureInitialized();
+			PaymentCreateRequest request = PaymentCreateRequest.builder().transactionAmount(BigDecimal.valueOf(amount))
+					.description(description).paymentMethodId(paymentMethodId).externalReference(externalReference)
+					.metadata(metadata != null ? metadata : Collections.emptyMap()).payer(buildPayer(payerEmail)).build();
+			return executePaymentCreation(request);
+		}
+
+		static Optional<PaymentDTO> findById(Long paymentId) {
+			try {
+				ensureInitialized();
+				try {
+					PaymentClient client = new PaymentClient();
+					Payment payment = client.get(paymentId, defaultRequestOptions);
+					return Optional.ofNullable(payment).map(MpSupport::toDTO);
+				} catch (MPApiException e) {
+					if (e.getStatusCode() == 404) {
+						return Optional.empty();
+					}
+					throw e;
+				}
+			} catch (Exception e) {
+				Console.error("[MercadoPagoAPI] Erro ao consultar pagamento por ID", e);
+				return Optional.empty();
+			}
+		}
+
+		static List<PaymentDTO> searchPayments(Map<String, Object> filters, int offset, int limit) {
+			try {
+				ensureInitialized();
+				MPSearchRequest searchRequest = MPSearchRequest.builder()
+						.filters(filters != null ? filters : Collections.emptyMap()).offset(offset)
+						.limit(Math.min(limit, 50)).build();
+
+				PaymentClient client = new PaymentClient();
+				MPResultsResourcesPage<Payment> result = client.search(searchRequest, defaultRequestOptions);
+
+				List<PaymentDTO> dtos = new ArrayList<>();
+				if (result != null && result.getResults() != null) {
+					for (Payment p : result.getResults()) {
+						dtos.add(toDTO(p));
+					}
+				}
+				return dtos;
+			} catch (Exception e) {
+				Console.error("[MercadoPagoAPI] Erro na busca de pagamentos", e);
+				return null;
+			}
+		}
+
+		static PreferenceDTO createPreferenceWithItems(List<PreferenceItemRequest> items, String payerEmail,
+				String externalReference, String successUrl, String failureUrl, String pendingUrl) {
+			try {
+				ensureInitialized();
+				PreferenceBackUrlsRequest backUrls = PreferenceBackUrlsRequest.builder().success(successUrl)
+						.failure(failureUrl).pending(pendingUrl).build();
+
+				PreferenceRequest request = PreferenceRequest.builder().items(items).backUrls(backUrls)
+						.autoReturn("approved").externalReference(externalReference)
+						.payer(com.mercadopago.client.preference.PreferencePayerRequest.builder().email(payerEmail).build())
+						.build();
+
+				PreferenceClient client = new PreferenceClient();
+				Preference preference = client.create(request, defaultRequestOptions);
+
+				return new PreferenceDTO(preference.getId(), preference.getInitPoint(), preference.getSandboxInitPoint(),
+						preference.getExternalReference());
+			} catch (Exception e) {
+				Console.error("[MercadoPagoAPI] Erro ao criar preferência de checkout", e);
+				return null;
+			}
+		}
+
+		static PreferenceItemRequest buildPreferenceItem(String title, int quantity, double unitPrice,
+				String description, String pictureUrl) {
+			PreferenceItemRequest.PreferenceItemRequestBuilder builder = PreferenceItemRequest.builder().title(title)
+					.quantity(quantity).unitPrice(BigDecimal.valueOf(unitPrice)).currencyId("BRL");
+
+			if (description != null)
+				builder.description(description);
+			if (pictureUrl != null)
+				builder.pictureUrl(pictureUrl);
+
+			return builder.build();
+		}
+
+		static PaymentDTO executePaymentCreation(PaymentCreateRequest request) {
+			try {
+				PaymentClient client = new PaymentClient();
+				Payment payment = client.create(request, defaultRequestOptions);
+				PaymentDTO dto = toDTO(payment);
+				LOGGER.info("[MercadoPagoAPI] Pagamento criado — ID: " + dto.getId() + " | Status: " + dto.getStatus());
+				return dto;
+			} catch (Exception e) {
+				Console.error("[MercadoPagoAPI] Erro ao criar pagamento", e);
+				return null;
+			}
+		}
+
+		static PaymentDTO toDTO(Payment payment) {
+			if (payment == null) {
+				throw new IllegalArgumentException("Payment não pode ser nulo.");
+			}
+
+			PaymentDTO.Builder builder = new PaymentDTO.Builder().id(payment.getId()).status(payment.getStatus())
+					.statusDetail(payment.getStatusDetail()).paymentMethodId(payment.getPaymentMethodId())
+					.transactionAmount(payment.getTransactionAmount()).externalReference(payment.getExternalReference())
+					.description(payment.getDescription()).dateCreated(payment.getDateCreated())
+					.dateApproved(payment.getDateApproved());
+
+			// Extrai dados PIX (QR Code e copia e cola)
+			if (payment.getPointOfInteraction() != null && payment.getPointOfInteraction().getTransactionData() != null) {
+
+				var txData = payment.getPointOfInteraction().getTransactionData();
+				builder.pixCopiaECola(txData.getQrCode());
+				builder.pixQrCodeBase64(txData.getQrCodeBase64());
+			}
+
+			// Extrai URL do boleto
+			if (payment.getTransactionDetails() != null) {
+				builder.boletoUrl(payment.getTransactionDetails().getExternalResourceUrl());
+			}
+
+			return builder.build();
 		}
 	}
 }
-
-// =============================================================================
-//  EXEMPLOS DE USO  (remover em produção ou mover para testes)
-// =============================================================================
-//
-// ── 1. Inicialização ──────────────────────────────────────────────────────────
-//
-//   // Via variável de ambiente MP_ACCESS_TOKEN (recomendado)
-//   MercadoPagoAPI.initFromEnv();
-//
-//   // Ou passando o token diretamente
-//   MercadoPagoAPI.init(System.getenv("MP_ACCESS_TOKEN"));
-//
-//   // Com timeouts personalizados (ms)
-//   MercadoPagoAPI.init("APP_USR-...", 5_000, 15_000);
-//
-//
-// ── 2. Criando pagamento PIX ──────────────────────────────────────────────────
-//
-//   MercadoPagoAPI.initFromEnv();
-//
-//   PaymentDTO pix = MercadoPagoAPI.createPixPayment(
-//           150.00,
-//           "cliente@email.com",
-//           "Pedido #1234 - Loja XYZ",
-//           "order-1234");
-//
-//   System.out.println("ID:           " + pix.getId());
-//   System.out.println("Status:       " + pix.getStatus());
-//   System.out.println("Copia e Cola: " + pix.getPixCopiaECola());
-//   System.out.println("QR Base64:    " + pix.getPixQrCodeBase64());
-//
-//
-// ── 3. Criando boleto ─────────────────────────────────────────────────────────
-//
-//   PaymentDTO boleto = MercadoPagoAPI.createBoletoPayment(
-//           200.00,
-//           "cliente@email.com",
-//           "João", "Silva", "12345678909",
-//           "Assinatura mensal",
-//           "sub-2024-09");
-//
-//   System.out.println("URL Boleto: " + boleto.getBoletoUrl());
-//
-//
-// ── 4. Criando pagamento com metadata ─────────────────────────────────────────
-//
-//   Map<String, Object> meta = new HashMap<>();
-//   meta.put("userId", "usr_42");
-//   meta.put("planId", "premium");
-//   meta.put("origin", "app-mobile");
-//
-//   PaymentDTO payment = MercadoPagoAPI.createPaymentWithMetadata(
-//           99.90,
-//           "user@empresa.com",
-//           "pix",
-//           "Assinatura Premium",
-//           "invoice-0099",
-//           meta);
-//
-//
-// ── 5. Consultando pagamento por ID ──────────────────────────────────────────
-//
-//   Optional<PaymentDTO> found = MercadoPagoAPI.findById(123456789L);
-//   found.ifPresent(p -> System.out.println("Status: " + p.getStatus()));
-//
-//
-// ── 6. Buscando por external_reference ───────────────────────────────────────
-//
-//   List<PaymentDTO> payments = MercadoPagoAPI.findByExternalReference("order-1234");
-//   payments.forEach(p -> System.out.println(p.getId() + " -> " + p.getStatus()));
-//
-//
-// ── 7. Verificando status ─────────────────────────────────────────────────────
-//
-//   PaymentStatus status = MercadoPagoAPI.checkPaymentStatus(123456789L);
-//   System.out.println("Status: " + status);              // APPROVED, PENDING, etc.
-//
-//   if (MercadoPagoAPI.isApproved(123456789L)) {
-//       System.out.println("Pagamento aprovado! Liberar produto.");
-//   }
-//
-//
-// ── 8. Cancelando e reembolsando ─────────────────────────────────────────────
-//
-//   PaymentDTO cancelled = MercadoPagoAPI.cancelPayment(123456789L);
-//   System.out.println("Status após cancelamento: " + cancelled.getStatus());
-//
-//   PaymentDTO refunded = MercadoPagoAPI.refundPayment(123456789L);
-//   System.out.println("Status após reembolso: " + refunded.getStatus());
-//
-//   // Reembolso parcial de R$ 50,00
-//   PaymentDTO partial = MercadoPagoAPI.refundPartial(123456789L, 50.00);
-//
-//
-// ── 9. Criando preferência de checkout ───────────────────────────────────────
-//
-//   PreferenceDTO pref = MercadoPagoAPI.createPreference(
-//           "Camiseta Geek XL",
-//           2,
-//           79.90,
-//           "comprador@email.com",
-//           "cart-555",
-//           "https://loja.com/sucesso",
-//           "https://loja.com/erro",
-//           "https://loja.com/pendente");
-//
-//   System.out.println("Link checkout: " + pref.getInitPoint());
-//   System.out.println("Link sandbox:  " + pref.getSandboxInitPoint());
-//
-//
-// ── 10. Preferência com múltiplos itens ───────────────────────────────────────
-//
-//   List<PreferenceItemRequest> items = new ArrayList<>();
-//   items.add(MercadoPagoAPI.buildPreferenceItem("Produto A", 1, 50.00, "Desc A", null));
-//   items.add(MercadoPagoAPI.buildPreferenceItem("Produto B", 3, 25.00, "Desc B", "https://img.url/b.png"));
-//
-//   PreferenceDTO multiPref = MercadoPagoAPI.createPreferenceWithItems(
-//           items,
-//           "comprador@email.com",
-//           "cart-multi-123",
-//           "https://loja.com/ok",
-//           "https://loja.com/fail",
-//           "https://loja.com/wait");
-//
-//
-// ── 11. Processando webhook ───────────────────────────────────────────────────
-//
-//   // Em um Controller Spring Boot, por exemplo:
-//   @PostMapping("/webhook/mercadopago")
-//   public ResponseEntity<Void> handleWebhook(
-//           @RequestHeader("x-signature") String sig,
-//           @RequestHeader("x-request-id") String reqId,
-//           @RequestParam("data.id") String dataId,
-//           @RequestBody Map<String, Object> payload) {
-//
-//       String secret = System.getenv("MP_WEBHOOK_SECRET");
-//
-//       if (!MercadoPagoAPI.validateWebhookSignature(sig, reqId, dataId, secret)) {
-//           return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
-//       }
-//
-//       MercadoPagoAPI.processWebhook(payload).ifPresent(payment -> {
-//           if (MercadoPagoAPI.PaymentStatus.APPROVED == PaymentStatus.fromString(payment.getStatus())) {
-//               // Liberar acesso, enviar e-mail, etc.
-//           }
-//       });
-//
-//       return ResponseEntity.ok().build();
-//   }
-//
-// =============================================================================

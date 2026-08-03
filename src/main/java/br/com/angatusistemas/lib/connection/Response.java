@@ -20,7 +20,7 @@ import lombok.Getter;
  */
 @Getter
 @AllArgsConstructor
-public class Response {
+public final class Response {
 
 	/** Corpo da resposta (pode ser {@code null} se não houver conteúdo). */
 	private final String body;

@@ -12,7 +12,7 @@ import lombok.Getter;
  * @author Angatu Sistemas
  */
 @Getter
-public class CachedHtml {
+public final class CachedHtml {
 
     /** Conteúdo HTML cacheado. */
     final String content;

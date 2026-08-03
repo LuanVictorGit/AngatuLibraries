@@ -8,7 +8,7 @@ package br.com.angatusistemas.lib.javalin.classes;
  *
  * @author Angatu Sistemas
  */
-public class BlockInfo {
+public final class BlockInfo {
 
     /** Timestamp (epoch, segundos) a partir do qual o bloqueio termina. */
     private final long unblockTime;

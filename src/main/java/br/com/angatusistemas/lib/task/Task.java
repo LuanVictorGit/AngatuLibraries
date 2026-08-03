@@ -13,45 +13,68 @@ import java.util.concurrent.atomic.AtomicInteger;
 import br.com.angatusistemas.lib.console.Console;
 
 /**
- * [PT] Classe utilitária para execução de tarefas assíncronas, síncronas, com
+ * Classe utilitária para execução de tarefas assíncronas, sequenciais, com
  * delay e repetição.
- * <p>
- * A classe mantém dois pools de threads:
+ *
+ * <p><strong>Propósito:</strong> gerenciar execução concorrente sem que o
+ * consumidor crie threads manualmente. Mantém dois pools:</p>
  * <ul>
- * <li><b>ASYNC_EXECUTOR</b> – {@link ScheduledExecutorService} com 4 threads
- * para tarefas assíncronas, atrasadas ou repetitivas.</li>
- * <li><b>SYNC_EXECUTOR</b> – {@link ExecutorService} com uma única thread
- * (FIFO) para simular execução síncrona/sequencial sem bloquear a thread
- * chamadora.</li>
+ * <li><b>ASYNC_EXECUTOR</b> — {@link ScheduledExecutorService} com 4 threads
+ * nomeadas ({@code Angatu-Async-N}) para tarefas assíncronas, atrasadas e
+ * periódicas.</li>
+ * <li><b>SYNC_EXECUTOR</b> — {@link ExecutorService} de thread única (FIFO)
+ * para operações serializadas (ex: escrita em arquivo) sem bloquear o chamador.</li>
  * </ul>
- * Cada tarefa registrada recebe um ID único, que pode ser usado para
- * cancelamento posterior.
- * </p>
- * <p>
- * <b>Importante:</b> Ao final da aplicação, invoque {@link #shutdown()} para
- * encerrar os pools e evitar vazamento de recursos.
+ * <p>Cada tarefa recebe um ID único para cancelamento posterior
+ * ({@link #cancelTask(int)}).</p>
+ *
+ * <p><strong>Quando usar:</strong> qualquer operação que não deva bloquear a
+ * thread atual (envios, persistência assíncrona, timers) e operações que
+ * precisam de serialização (fila FIFO via {@link #runSync}).</p>
+ *
+ * <p><strong>Quando NÃO usar:</strong> para tarefas críticas que exigem
+ * garantia de execução imediata (o pool tem 4 threads e o agendamento é
+ * best-effort); para tarefas de longa duração com paralelismo massivo
+ * (considere um executor próprio). {@code runSync} NÃO bloqueia o chamador —
+ * apenas serializa a execução em thread única.</p>
+ *
+ * <p><strong>Integração:</strong> usado internamente por toda a biblioteca
+ * (envio assíncrono de e-mail, Web Push, limpeza periódica do JavalinAPI).
+ * A maioria dos módulos assíncronos retorna {@code CompletableFuture} que
+ * completa quando a tarefa termina.</p>
+ *
+ * <p><strong>Fluxo de utilização:</strong></p>
+ * <ol>
+ *   <li>Chame o método adequado ({@link #runAsync}, {@link #runLater},
+ *       {@link #runTimer}, {@link #runTimerWithFixedDelay}, {@link #runSync});</li>
+ *   <li>Guarde o ID retornado se precisar cancelar;</li>
+ *   <li>Ao encerrar a aplicação, chame {@link #shutdown()}.</li>
+ * </ol>
+ *
+ * <p><strong>Exemplo:</strong>
+ * <pre>
+ * Task.runAsync(() -&gt; System.out.println("assíncrono"));
+ * int id = Task.runLater(() -&gt; System.out.println("daqui a 5s"), 5000);
+ * Task.runTimerWithFixedDelay(() -&gt; System.out.println("a cada hora"), 0, 3600_000);
+ * Task.cancelTask(id);
+ * Task.shutdown(); // ao encerrar a aplicação
+ * </pre>
  * </p>
  *
- * [EN] Utility class for executing asynchronous, synchronous, delayed and
- * recurring tasks.
- * <p>
- * The class maintains two thread pools:
- * <ul>
- * <li><b>ASYNC_EXECUTOR</b> – {@link ScheduledExecutorService} with 4 threads
- * for asynchronous, delayed or recurring tasks.</li>
- * <li><b>SYNC_EXECUTOR</b> – {@link ExecutorService} with a single thread
- * (FIFO) to simulate synchronous/sequential execution without blocking the
- * caller thread.</li>
- * </ul>
- * Each registered task receives a unique ID that can be used for later
- * cancellation.
- * </p>
- * <p>
- * <b>Important:</b> At application shutdown, call {@link #shutdown()} to
- * terminate the pools and avoid resource leaks.
- * </p>
+ * <p><strong>Boas práticas:</strong> sempre chame {@link #shutdown()} ao final
+ * da aplicação; exceções lançadas dentro das tarefas são capturadas e logadas
+ * (não propagam); tarefas periódicas ficam registradas até
+ * {@link #cancelTask(int)} ou {@link #cancelAll()}.</p>
  *
- * @author [Sua equipe]
+ * <p><strong>Limitações:</strong> o pool fixo de 4 threads pode enfileirar
+ * tarefas sob carga; após {@link #shutdown()} nenhuma nova tarefa pode ser
+ * submetida (exceção {@code RejectedExecutionException}).</p>
+ *
+ * <p><strong>Extensões futuras:</strong> a configuração do tamanho do pool e a
+ * criação de {@code CompletableFuture} retornáveis diretamente pelos métodos
+ * são evoluções naturais, sem quebra da API atual.</p>
+ *
+ * @author Angatu Sistemas
  * @see ScheduledExecutorService
  * @see ExecutorService
  */

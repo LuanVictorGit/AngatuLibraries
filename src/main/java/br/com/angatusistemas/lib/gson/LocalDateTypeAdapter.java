@@ -21,7 +21,7 @@ import com.google.gson.stream.JsonWriter;
  * @author Angatu Sistemas
  * @see GsonAPI
  */
-public class LocalDateTypeAdapter extends TypeAdapter<LocalDate> {
+public final class LocalDateTypeAdapter extends TypeAdapter<LocalDate> {
 
     /** Formato ISO de data (yyyy-MM-dd). */
     private final DateTimeFormatter formatter = DateTimeFormatter.ISO_LOCAL_DATE;

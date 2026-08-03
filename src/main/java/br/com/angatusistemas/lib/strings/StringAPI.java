@@ -4,11 +4,55 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.regex.Pattern;
 
 /**
- * [PT] Classe utilitária para operações comuns com strings.
- * [EN] Utility class providing common string operations.
- * 
- * <p>Todos os métodos são estáticos e otimizados para serem seguros contra nulos quando apropriado.
- * [EN] All methods are static and optimized to be null-safe where appropriate.</p>
+ * Classe utilitária para operações comuns com strings.
+ *
+ * <p><strong>Propósito:</strong> oferecer operações de string seguras contra
+ * nulos e sem dependências externas — capitalização, códigos aleatórios,
+ * validação, máscaras, conversão de casos (camelCase/snake_case) e extração.</p>
+ *
+ * <p><strong>Quando usar:</strong> qualquer manipulação simples de texto no
+ * projeto; métodos são estáticos e podem ser usados a qualquer momento, sem
+ * inicialização prévia da biblioteca.</p>
+ *
+ * <p><strong>Quando NÃO usar:</strong> para parsing/transformações complexas
+ * (regex avançadas, HTML, JSON) — use {@link BrowserAPI} (HTML) ou Gson
+ * (JSON); para geração de senhas/segredos, use {@link Password} e
+ * {@link java.security.SecureRandom} (o {@link #randomCode(int)} não é seguro
+ * criptograficamente).</p>
+ *
+ * <p><strong>Integração:</strong> usada por {@code EmailAPI} (código anti-spam
+ * no assunto), {@code HtmlRouteAPI} (capitalização de nomes de página) e outros
+ * módulos; não depende de nenhuma biblioteca externa.</p>
+ *
+ * <p><strong>Fluxo de utilização:</strong> chamadas estáticas diretas
+ * ({@code StringAPI.capitalize("joão")} → {@code "João"}). Métodos que recebem
+ * {@code null} retornam valores seguros (vazio ou {@code null}) — consulte o
+ * JavaDoc de cada método.</p>
+ *
+ * <p><strong>Exemplo:</strong>
+ * <pre>
+ * String nome = StringAPI.capitalize("joão");            // "João"
+ * String codigo = StringAPI.randomCode(6);               // "aZ3kP9"
+ * boolean numerico = StringAPI.containsOnlyDigits("123"); // true
+ * String mascarado = StringAPI.maskString("1234-5678", 0, 4, '*'); // "****-5678"
+ * </pre>
+ * </p>
+ *
+ * <p><strong>Boas práticas:</strong> use {@link #isNullOrBlank(String)} para
+ * validações de entrada; regex internas são pré-compiladas (sem custo por
+ * chamada).</p>
+ *
+ * <p><strong>Limitações:</strong> {@code randomCode} usa
+ * {@link java.util.concurrent.ThreadLocalRandom} — adequado para códigos de
+ * verificação, NÃO para tokens de segurança. {@code toCamelCase}/
+ * {@code toSnakeCase} tratam espaços como separadores (não convertem hífens).</p>
+ *
+ * <p><strong>Extensões futuras:</strong> novos utilitários (slugify, diffs,
+ * normalização Unicode) podem ser adicionados como métodos estáticos sem
+ * quebrar a API.</p>
+ *
+ * @author Angatu Sistemas
+ * @see Password
  */
 public final class StringAPI {
 

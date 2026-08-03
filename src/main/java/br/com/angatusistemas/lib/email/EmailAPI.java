@@ -31,10 +31,19 @@ import jakarta.mail.internet.MimeMultipart;
 /**
  * Classe utilitária para envio de e-mails via SMTP (Gmail).
  *
- * <p>Fornece envio assíncrono (via {@link Task}) de e-mails em texto simples ou
- * HTML, com suporte a múltiplos destinatários, cópia (CC/BCC), anexos e templates.
- * <strong>Todos os e-mails recebem um código aleatório de 3 caracteres no final do
- * assunto</strong> (ex: {@code "Bem-vindo #A7F"}) para evitar marcação como spam.</p>
+ * <p><strong>Propósito:</strong> envio assíncrono de e-mails em texto simples ou
+ * HTML, com suporte a múltiplos destinatários, cópia (CC/BCC), anexos e
+ * templates. <strong>Todos os e-mails recebem um código aleatório de 3
+ * caracteres no final do assunto</strong> (ex: {@code "Bem-vindo #A7F"}) para
+ * evitar marcação como spam.</p>
+ *
+ * <p><strong>Quando usar:</strong> em qualquer fluxo que precise notificar por
+ * e-mail (boas-vindas, recuperação de senha, relatórios).</p>
+ *
+ * <p><strong>Quando NÃO usar:</strong> sem as credenciais SMTP configuradas no
+ * {@code .env} (EMAIL_KEY/EMAIL_PASSWORD) os métodos completam com
+ * {@code false}; para e-mails transacionais de alto volume, use um provedor
+ * dedicado (SendGrid, SES).</p>
  *
  * <p><strong>Configuração necessária no arquivo {@code .env}:</strong>
  * <pre>
@@ -43,24 +52,41 @@ import jakarta.mail.internet.MimeMultipart;
  * </pre>
  * </p>
  *
- * <p><strong>Dependências:</strong> este módulo requer
- * {@code com.sun.mail:jakarta.mail:2.0.1} e {@code io.github.cdimascio:dotenv-java:3.2.0}
- * no classpath. Se ausentes, os métodos exibem instruções de instalação.</p>
+ * <p><strong>Integração:</strong> usa {@link Task} para envio assíncrono,
+ * {@link Env} para credenciais e {@link AssetsAPI} para templates do
+ * classpath; os métodos retornam {@code CompletableFuture<Boolean>}.</p>
  *
- * <p>Exemplo de uso:
+ * <p><strong>Fluxo de utilização:</strong> configure o {@code .env} → chame o
+ * método adequado → aguarde/consuma o future. Verifique
+ * {@link #isConfigured()} antes de enviar para evitar falhas previsíveis.</p>
+ *
+ * <p><strong>Exemplo:</strong>
  * <pre>
  * // E-mail simples (assunto final: "Bem-vindo #A7F")
  * boolean ok = EmailAPI.sendSimple("cliente@email.com", "Bem-vindo", "Olá, seja bem-vindo!").join();
  *
  * // E-mail HTML com template
  * String html = EmailAPI.loadHtmlTemplate("/emails/welcome.html", Map.of("nome", "João"));
- * boolean ok = EmailAPI.sendHtml("cliente@email.com", "Bem-vindo", html).join();
+ * boolean ok2 = EmailAPI.sendHtml("cliente@email.com", "Bem-vindo", html).join();
  * </pre>
  * </p>
  *
+ * <p><strong>Boas práticas:</strong> use {@code .join()} apenas em threads que
+ * podem bloquear; trate o resultado {@code false} como falha (destinatário
+ * inexistente ou erro SMTP — logado via {@link Console}).</p>
+ *
+ * <p><strong>Limitações:</strong> requer {@code com.sun.mail:jakarta.mail:2.0.1}
+ * e {@code io.github.cdimascio:dotenv-java:3.2.0}; a classe é detectável
+ * (linkável) sem elas — o guard exibe instruções de instalação no primeiro uso.
+ * SMTP configurado para Gmail (smtp.gmail.com:587/TLS).</p>
+ *
+ * <p><strong>Extensões futuras:</strong> hosts SMTP configuráveis, templates
+ * com lógica (loops/condicionais) e fila de reenvio são evoluções naturais sem
+ * quebrar a API.</p>
+ *
  * @author Angatu Sistemas
- * @see Task
  * @see Env
+ * @see Task
  * @see StringAPI
  */
 public final class EmailAPI {
@@ -70,13 +96,8 @@ public final class EmailAPI {
     /** Nome da funcionalidade para mensagens de dependência ausente. */
     private static final String MAIL_FEATURE = "Envio de E-mails (Jakarta Mail)";
 
-    // Configurações SMTP (Gmail)
-    private static final String SMTP_HOST = "smtp.gmail.com";
-    private static final String SMTP_PORT = "587";
-    private static final String PROTOCOL = "smtp";
-
     private EmailAPI() {
-        throw new UnsupportedOperationException("Utility class cannot be instantiated");
+        throw new UnsupportedOperationException("Classe utilitária não pode ser instanciada");
     }
 
     // ==================== CREDENCIAIS (LAZY) ====================
@@ -105,11 +126,13 @@ public final class EmailAPI {
     /**
      * Envia um e-mail em formato de texto simples (assíncrono).
      *
+     * <p><strong>Pós-condições:</strong> future completa com {@code true} se
+     * enviado; {@code false} se o endereço não existir ou houver falha SMTP.</p>
+     *
      * @param destinatario Endereço de e-mail do destinatário
      * @param assunto      Assunto do e-mail (código aleatório será adicionado)
      * @param corpo        Corpo do e-mail em texto puro
-     * @return {@code CompletableFuture<Boolean>} — {@code true} se enviado,
-     *         {@code false} se o endereço não existir ou houver falha
+     * @return {@code CompletableFuture<Boolean>} — {@code true} se enviado
      */
     public static CompletableFuture<Boolean> sendSimple(String destinatario, String assunto, String corpo) {
         return sendSimple(List.of(destinatario), null, null, assunto, corpo);
@@ -121,8 +144,7 @@ public final class EmailAPI {
      * @param destinatario Endereço de e-mail do destinatário
      * @param assunto      Assunto do e-mail (código aleatório será adicionado)
      * @param corpoHtml    Corpo do e-mail em HTML
-     * @return {@code CompletableFuture<Boolean>} — {@code true} se enviado,
-     *         {@code false} se o endereço não existir ou houver falha
+     * @return {@code CompletableFuture<Boolean>} — {@code true} se enviado
      */
     public static CompletableFuture<Boolean> sendHtml(String destinatario, String assunto, String corpoHtml) {
         return sendHtml(List.of(destinatario), null, null, assunto, corpoHtml);
@@ -166,23 +188,8 @@ public final class EmailAPI {
      */
     public static CompletableFuture<Boolean> sendSimple(List<String> destinatarios, List<String> cc, List<String> bcc,
                                                          String assunto, String corpo) {
-        CompletableFuture<Boolean> future = new CompletableFuture<>();
-        Task.runAsync(() -> {
-            try {
-                Message message = criarMensagem(destinatarios, cc, bcc, assunto);
-                message.setText(corpo);
-                Transport.send(message);
-                Console.debug("E-mail simples enviado para: %s", destinatarios);
-                future.complete(true);
-            } catch (SendFailedException e) {
-                Console.warn("E-mail inválido ou inexistente para %s: %s", destinatarios, e.getMessage());
-                future.complete(false);
-            } catch (Exception e) {
-                Console.error("Falha ao enviar e-mail simples para %s", destinatarios, e);
-                future.complete(false);
-            }
-        });
-        return future;
+        checkDependencies();
+        return MailSupport.send(destinatarios, cc, bcc, assunto, corpo, null, false);
     }
 
     /**
@@ -197,23 +204,8 @@ public final class EmailAPI {
      */
     public static CompletableFuture<Boolean> sendHtml(List<String> destinatarios, List<String> cc, List<String> bcc,
                                                        String assunto, String corpoHtml) {
-        CompletableFuture<Boolean> future = new CompletableFuture<>();
-        Task.runAsync(() -> {
-            try {
-                Message message = criarMensagem(destinatarios, cc, bcc, assunto);
-                message.setContent(corpoHtml, "text/html; charset=utf-8");
-                Transport.send(message);
-                Console.debug("E-mail HTML enviado para: %s", destinatarios);
-                future.complete(true);
-            } catch (SendFailedException e) {
-                Console.warn("E-mail inválido ou inexistente para %s: %s", destinatarios, e.getMessage());
-                future.complete(false);
-            } catch (Exception e) {
-                Console.error("Falha ao enviar e-mail HTML para %s", destinatarios, e);
-                future.complete(false);
-            }
-        });
-        return future;
+        checkDependencies();
+        return MailSupport.send(destinatarios, cc, bcc, assunto, corpoHtml, null, true);
     }
 
     /**
@@ -246,53 +238,8 @@ public final class EmailAPI {
     public static CompletableFuture<Boolean> sendWithAttachments(List<String> destinatarios, List<String> cc,
                                                                   List<String> bcc, String assunto, String corpo,
                                                                   List<File> anexos, boolean isHtml) {
-        CompletableFuture<Boolean> future = new CompletableFuture<>();
-        Task.runAsync(() -> {
-            try {
-                MimeMessage message = (MimeMessage) criarMensagem(destinatarios, cc, bcc, assunto);
-
-                if (anexos != null && !anexos.isEmpty()) {
-                    MimeMultipart multipart = new MimeMultipart();
-
-                    MimeBodyPart bodyPart = new MimeBodyPart();
-                    if (isHtml) {
-                        bodyPart.setContent(corpo, "text/html; charset=utf-8");
-                    } else {
-                        bodyPart.setText(corpo);
-                    }
-                    multipart.addBodyPart(bodyPart);
-
-                    for (File anexo : anexos) {
-                        if (anexo != null && anexo.exists() && anexo.isFile()) {
-                            MimeBodyPart attachmentPart = new MimeBodyPart();
-                            DataSource source = new FileDataSource(anexo);
-                            attachmentPart.setDataHandler(new DataHandler(source));
-                            attachmentPart.setFileName(anexo.getName());
-                            multipart.addBodyPart(attachmentPart);
-                        }
-                    }
-
-                    message.setContent(multipart);
-                } else {
-                    if (isHtml) {
-                        message.setContent(corpo, "text/html; charset=utf-8");
-                    } else {
-                        message.setText(corpo);
-                    }
-                }
-
-                Transport.send(message);
-                Console.debug("E-mail com anexos enviado para: %s", destinatarios);
-                future.complete(true);
-            } catch (SendFailedException e) {
-                Console.warn("E-mail inválido ou inexistente para %s: %s", destinatarios, e.getMessage());
-                future.complete(false);
-            } catch (Exception e) {
-                Console.error("Falha ao enviar e-mail com anexos", e);
-                future.complete(false);
-            }
-        });
-        return future;
+        checkDependencies();
+        return MailSupport.send(destinatarios, cc, bcc, assunto, corpo, anexos, isHtml);
     }
 
     // ==================== MÉTODOS DE TEMPLATE ====================
@@ -324,74 +271,10 @@ public final class EmailAPI {
     // ==================== MÉTODOS PRIVADOS ====================
 
     /**
-     * Cria uma mensagem de e-mail com o assunto contendo o código aleatório
-     * (formato {@code assunto #XXX}).
-     *
-     * @param destinatarios Lista de destinatários TO
-     * @param cc            Lista de destinatários CC
-     * @param bcc           Lista de destinatários BCC
-     * @param assunto       Assunto original (código será adicionado)
-     * @return Mensagem pronta para envio
-     * @throws MessagingException se ocorrer erro na criação
-     * @throws IllegalStateException se as credenciais não estiverem configuradas
+     * Verifica a presença das dependências do módulo (mensagem clara se ausentes).
      */
-    private static Message criarMensagem(List<String> destinatarios, List<String> cc, List<String> bcc,
-                                          String assunto) throws MessagingException {
-
-        if (!isConfigured()) {
-            throw new IllegalStateException("Credenciais de e-mail não configuradas. "
-                    + "Configure EMAIL_KEY e EMAIL_PASSWORD no arquivo .env");
-        }
-
-        Session session = createSession();
-        Message message = new MimeMessage(session);
-        message.setFrom(new InternetAddress(Credentials.REMETENTE));
-
-        // Destinatários principais (TO)
-        if (destinatarios != null && !destinatarios.isEmpty()) {
-            message.setRecipients(Message.RecipientType.TO, InternetAddress.parse(
-                    destinatarios.stream().collect(Collectors.joining(","))));
-        }
-
-        // Cópia (CC)
-        if (cc != null && !cc.isEmpty()) {
-            message.setRecipients(Message.RecipientType.CC, InternetAddress.parse(
-                    cc.stream().collect(Collectors.joining(","))));
-        }
-
-        // Cópia oculta (BCC)
-        if (bcc != null && !bcc.isEmpty()) {
-            message.setRecipients(Message.RecipientType.BCC, InternetAddress.parse(
-                    bcc.stream().collect(Collectors.joining(","))));
-        }
-
-        // Assunto com código aleatório (formato: assunto #XXX)
-        String codigoAleatorio = StringAPI.randomCode(3).toUpperCase();
-        String assuntoComCodigo = assunto + " #" + codigoAleatorio;
-        message.setSubject(assuntoComCodigo);
-
-        Console.debug("E-mail criado - Assunto: %s", assuntoComCodigo);
-
-        return message;
-    }
-
-    private static Session createSession() {
+    private static void checkDependencies() {
         Dependencies.require("jakarta.mail.Session", MAIL_COORDINATES, MAIL_FEATURE);
-        Properties props = new Properties();
-        props.put("mail.smtp.host", SMTP_HOST);
-        props.put("mail.smtp.port", SMTP_PORT);
-        props.put("mail.smtp.auth", "true");
-        props.put("mail.smtp.starttls.enable", "true");
-        props.put("mail.smtp.ssl.protocols", "TLSv1.2");
-        props.put("mail.smtp.ssl.trust", SMTP_HOST);
-        props.put("mail.transport.protocol", PROTOCOL);
-
-        return Session.getInstance(props, new Authenticator() {
-            @Override
-            protected PasswordAuthentication getPasswordAuthentication() {
-                return new PasswordAuthentication(Credentials.REMETENTE, Credentials.SENHA_APP);
-            }
-        });
     }
 
     /**
@@ -402,5 +285,130 @@ public final class EmailAPI {
     public static boolean isConfigured() {
         return Credentials.REMETENTE != null && Credentials.SENHA_APP != null
                 && !Credentials.REMETENTE.isEmpty() && !Credentials.SENHA_APP.isEmpty();
+    }
+
+    // ==================== IMPLEMENTAÇÃO (JAKARTA MAIL — LAZY) ====================
+
+    /**
+     * Implementação do envio com Jakarta Mail. Classe separada para manter as
+     * referências à biblioteca fora do bytecode da {@link EmailAPI} — a classe
+     * pública pode ser vinculada sem o jakarta.mail e o guard exibe a mensagem
+     * de instalação correta antes de qualquer uso.
+     */
+    private static final class MailSupport {
+
+        private static final String SMTP_HOST = "smtp.gmail.com";
+        private static final String SMTP_PORT = "587";
+        private static final String PROTOCOL = "smtp";
+
+        private MailSupport() {
+        }
+
+        static CompletableFuture<Boolean> send(List<String> destinatarios, List<String> cc, List<String> bcc,
+                String assunto, String corpo, List<File> anexos, boolean isHtml) {
+            CompletableFuture<Boolean> future = new CompletableFuture<>();
+            Task.runAsync(() -> {
+                try {
+                    MimeMessage message = criarMensagem(destinatarios, cc, bcc, assunto);
+
+                    if (anexos != null && !anexos.isEmpty()) {
+                        MimeMultipart multipart = new MimeMultipart();
+
+                        MimeBodyPart bodyPart = new MimeBodyPart();
+                        if (isHtml) {
+                            bodyPart.setContent(corpo, "text/html; charset=utf-8");
+                        } else {
+                            bodyPart.setText(corpo);
+                        }
+                        multipart.addBodyPart(bodyPart);
+
+                        for (File anexo : anexos) {
+                            if (anexo != null && anexo.exists() && anexo.isFile()) {
+                                MimeBodyPart attachmentPart = new MimeBodyPart();
+                                DataSource source = new FileDataSource(anexo);
+                                attachmentPart.setDataHandler(new DataHandler(source));
+                                attachmentPart.setFileName(anexo.getName());
+                                multipart.addBodyPart(attachmentPart);
+                            }
+                        }
+
+                        message.setContent(multipart);
+                    } else if (isHtml) {
+                        message.setContent(corpo, "text/html; charset=utf-8");
+                    } else {
+                        message.setText(corpo);
+                    }
+
+                    Transport.send(message);
+                    Console.debug("E-mail enviado para: %s", destinatarios);
+                    future.complete(true);
+                } catch (SendFailedException e) {
+                    Console.warn("E-mail inválido ou inexistente para %s: %s", destinatarios, e.getMessage());
+                    future.complete(false);
+                } catch (Exception e) {
+                    Console.error("Falha ao enviar e-mail para %s", destinatarios, e);
+                    future.complete(false);
+                }
+            });
+            return future;
+        }
+
+        private static MimeMessage criarMensagem(List<String> destinatarios, List<String> cc, List<String> bcc,
+                String assunto) throws MessagingException {
+
+            if (!isConfigured()) {
+                throw new IllegalStateException("Credenciais de e-mail não configuradas. "
+                        + "Configure EMAIL_KEY e EMAIL_PASSWORD no arquivo .env");
+            }
+
+            Session session = createSession();
+            MimeMessage message = new MimeMessage(session);
+            message.setFrom(new InternetAddress(Credentials.REMETENTE));
+
+            // Destinatários principais (TO)
+            if (destinatarios != null && !destinatarios.isEmpty()) {
+                message.setRecipients(Message.RecipientType.TO, InternetAddress.parse(
+                        destinatarios.stream().collect(Collectors.joining(","))));
+            }
+
+            // Cópia (CC)
+            if (cc != null && !cc.isEmpty()) {
+                message.setRecipients(Message.RecipientType.CC, InternetAddress.parse(
+                        cc.stream().collect(Collectors.joining(","))));
+            }
+
+            // Cópia oculta (BCC)
+            if (bcc != null && !bcc.isEmpty()) {
+                message.setRecipients(Message.RecipientType.BCC, InternetAddress.parse(
+                        bcc.stream().collect(Collectors.joining(","))));
+            }
+
+            // Assunto com código aleatório (formato: assunto #XXX)
+            String codigoAleatorio = StringAPI.randomCode(3).toUpperCase();
+            String assuntoComCodigo = assunto + " #" + codigoAleatorio;
+            message.setSubject(assuntoComCodigo);
+
+            Console.debug("E-mail criado - Assunto: %s", assuntoComCodigo);
+
+            return message;
+        }
+
+        private static Session createSession() {
+            Properties props = new Properties();
+            props.put("mail.smtp.host", SMTP_HOST);
+            props.put("mail.smtp.port", SMTP_PORT);
+            props.put("mail.smtp.auth", "true");
+            props.put("mail.smtp.starttls.enable", "true");
+            props.put("mail.smtp.ssl.protocols", "TLSv1.2");
+            props.put("mail.smtp.ssl.trust", SMTP_HOST);
+            props.put("mail.transport.protocol", PROTOCOL);
+
+            return Session.getInstance(props, new Authenticator() {
+                @Override
+                protected PasswordAuthentication getPasswordAuthentication() {
+                    return new PasswordAuthentication(Credentials.REMETENTE, Credentials.SENHA_APP);
+                }
+            });
+        }
     }
 }

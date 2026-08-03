@@ -6,31 +6,58 @@ import br.com.angatusistemas.lib.AngatuLib;
 import br.com.angatusistemas.lib.time.DataTime;
 
 /**
- * [PT] Classe utilitária para logging no console com suporte a cores ANSI e formatação de data/hora.
- * <p>
- * Encapsula a saída original do sistema (gerenciada pelo {@link AngatuLib}) e aplica estilos
- * visuais via {@link AnsiColor}. A data/hora é obtida do método {@link DataTime#getData()}.
- * </p>
- * <p>
- * Exemplos de uso:
+ * Classe utilitária de logging no console com cores ANSI e timestamp.
+ *
+ * <p><strong>Propósito:</strong> centralizar toda a saída de log da biblioteca e
+ * das aplicações consumidoras, com níveis (log/info/warn/error/debug), cores
+ * ({@link AnsiColor}) e timestamp ({@link DataTime#getData()}).</p>
+ *
+ * <p><strong>Quando usar:</strong> em qualquer ponto da aplicação — inclusive
+ * antes da inicialização do {@link AngatuLib} (o {@code Console} funciona com
+ * fallback para {@code System.out}). Os métodos aceitam formatação printf
+ * ({@code %s}, {@code %d}) e exceções como último argumento (imprime stack trace).</p>
+ *
+ * <p><strong>Quando NÃO usar:</strong> para dados sensíveis em produção
+ * (credenciais, tokens); para logs volumosos por requisição (use o nível
+ * {@code debug}, silencioso por padrão); não substitua a política de log da
+ * aplicação — este é um logger de console simples, sem arquivos nem rotação.</p>
+ *
+ * <p><strong>Integração:</strong> o {@link AngatuLib} redireciona
+ * {@code System.out} para um {@link InterceptorOutputStream}, que roteia toda
+ * saída padrão para o {@code Console}; o stream original fica preservado em
+ * {@code AngatuLib#getOriginalOut()}.</p>
+ *
+ * <p><strong>Fluxo de utilização:</strong> use o nível adequado — {@code log}
+ * (genérico), {@code info} (informação), {@code warn} (aviso), {@code error}
+ * (falha, com exceção opcional), {@code debug} (detalhes, ativo apenas com
+ * {@code -Dangatu.debug=true} ou {@link #setDebugEnabled(boolean)}).</p>
+ *
+ * <p><strong>Exemplo:</strong>
  * <pre>
  * Console.log("Servidor iniciado");
- * Console.log("Valor: %s", "teste");
- * Console.log("Mensagem: ", "texto1", "texto2", "texto3");
  * Console.info("Usuário logado: %s", username);
  * Console.warn("Disco quase cheio: %d%% usado", percent);
- * Console.error("Falha na conexão", exception);
- * Console.error("Erro: ", "asdada");
- * Console.error("Erro: %s | Código: %d", "mensagem", 500);
- * Console.debug("Valor recebido: %s", valor);
+ * Console.error("Falha na conexão", exception);   // imprime stack trace
+ * Console.debug("Valor recebido: %s", valor);     // só com debug ativo
  * </pre>
  * </p>
  *
- * [EN] Utility class for console logging with ANSI color support and date/time formatting.
+ * <p><strong>Boas práticas:</strong> exceções SEMPRE como último argumento do
+ * {@code error} (habilita a stack trace); use {@code %s} em vez de concatenação;
+ * ative debug apenas em desenvolvimento.</p>
  *
- * @author Sua equipe
+ * <p><strong>Limitações:</strong> loga apenas no console (sem persistência);
+ * cores ANSI requerem terminal compatível; o redirecionamento do
+ * {@code System.out} é global ao processo.</p>
+ *
+ * <p><strong>Extensões futuras:</strong> níveis configuráveis por propriedade e
+ * sinks de saída (arquivo, SLF4J) são evoluções naturais sem quebrar a API.</p>
+ *
+ * @author Angatu Sistemas
  * @see AnsiColor
  * @see DataTime
+ * @see InterceptorOutputStream
+ * @see AngatuLib
  */
 public final class Console {
 

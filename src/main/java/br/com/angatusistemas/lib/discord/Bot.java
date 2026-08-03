@@ -32,68 +32,63 @@ import net.dv8tion.jda.api.utils.FileUpload;
 import net.dv8tion.jda.api.utils.messages.MessageCreateBuilder;
 
 /**
- * [PT] Classe utilitária para integração com Discord utilizando JDA (Java Discord API).
- * <p>
- * Fornece métodos simplificados para enviar mensagens (texto, imagens, arquivos),
- * botões interativos (com callbacks), e gerenciamento do bot.
- * </p>
- * <p>
- * <b>Configuração necessária no arquivo .env:</b>
+ * Classe utilitária para integração com Discord utilizando JDA (Java Discord API).
+ *
+ * <p><strong>Propósito:</strong> abstrair o JDA em chamadas simples: envio de
+ * mensagens (texto, imagens, arquivos), botões interativos com callbacks e
+ * gerenciamento do bot.</p>
+ *
+ * <p><strong>Quando usar:</strong> em aplicações que precisam de um bot do
+ * Discord (notificações, comandos com botões, relatórios).</p>
+ *
+ * <p><strong>Quando NÃO usar:</strong> para bots com comandos slash complexos,
+ * moderação ou guilds — use o JDA diretamente (acessível via
+ * {@link #getJDA()}); sem o token configurado ({@code DISCORD_BOT_TOKEN} no
+ * {@code .env}) o {@link #setup()} falha com mensagem clara.</p>
+ *
+ * <p><strong>Configuração necessária no arquivo .env:</strong>
  * <pre>
  * DISCORD_BOT_TOKEN=seu_token_aqui
  * </pre>
  * </p>
- * <p>
- * <b>Exemplo de uso:</b>
+ *
+ * <p><strong>Integração:</strong> usa {@link Env} para o token e
+ * {@link Console} para logs; as ações de botão são registradas via
+ * {@link #onButtonClick} e executadas em listener interno.</p>
+ *
+ * <p><strong>Fluxo de utilização:</strong></p>
+ * <ol>
+ *   <li>{@code Bot.setup()} (token do .env) ou {@code Bot.setup(token)};</li>
+ *   <li>{@code Bot.sendMessage(canalId, texto)} — métodos são bloqueantes
+ *       (usam {@code .complete()}) até a resposta do Discord;</li>
+ *   <li>Botões: {@code sendMessageWithButton} + {@code onButtonClick}.</li>
+ * </ol>
+ *
+ * <p><strong>Exemplo:</strong>
  * <pre>
- * // Inicializar o bot
- * DiscordBot.setup();
- *
- * // Enviar mensagem simples
- * DiscordBot.sendMessage("123456789012345678", "Olá mundo!");
- *
- * // Enviar mensagem com botão
- * DiscordBot.sendMessageWithButton("channelId", "Clique aqui!", "meu_botao", "Texto do botão");
- *
- * // Registrar ação do botão
- * DiscordBot.onButtonClick("meu_botao", event -> {
- *     event.reply("Você clicou!").setEphemeral(true).queue();
- * });
+ * Bot.setup();
+ * Bot.sendMessage("123456789012345678", "Olá mundo!");
+ * Bot.sendMessageWithButton("123456789012345678", "Confirma?", "btn_ok", "Sim");
+ * Bot.onButtonClick("btn_ok", event -&gt; event.reply("Confirmado!").setEphemeral(true).queue());
  * </pre>
  * </p>
  *
- * [EN] Utility class for Discord integration using JDA (Java Discord API).
- * <p>
- * Provides simplified methods for sending messages (text, images, files),
- * interactive buttons (with callbacks), and bot management.
- * </p>
- * <p>
- * <b>Required configuration in .env file:</b>
- * <pre>
- * DISCORD_BOT_TOKEN=your_token_here
- * </pre>
- * </p>
- * <p>
- * <b>Usage example:</b>
- * <pre>
- * // Initialize the bot
- * DiscordBot.setup();
+ * <p><strong>Boas práticas:</strong> os métodos de envio são bloqueantes —
+ * chame-os fora da thread de UI; registre os botões antes de enviar a mensagem;
+ * trate {@code null} no retorno como falha (canal inexistente ou erro).</p>
  *
- * // Send simple message
- * DiscordBot.sendMessage("123456789012345678", "Hello world!");
+ * <p><strong>Limitações:</strong> requer {@code net.dv8tion:JDA:6.4.1} — a
+ * classe é detectável (linkável) sem ela e o guard exibe instruções de
+ * instalação; {@code setup()} usa {@code awaitReady()} (bloqueia até o bot
+ * conectar); máximos de 5 botões por {@code ActionRow}.</p>
  *
- * // Send message with button
- * DiscordBot.sendMessageWithButton("channelId", "Click here!", "my_button", "Button text");
- *
- * // Register button action
- * DiscordBot.onButtonClick("my_button", event -> {
- *     event.reply("You clicked!").setEphemeral(true).queue();
- * });
- * </pre>
- * </p>
+ * <p><strong>Extensões futuras:</strong> variantes assíncronas
+ * ({@code CompletableFuture<Message>}) e suporte a comandos slash são
+ * evoluções naturais sem quebrar a API.</p>
  *
  * @author Angatu Sistemas
  * @see <a href="https://github.com/discord-jda/JDA">JDA on GitHub</a>
+ * @see Env
  */
 public final class Bot {
 
@@ -102,23 +97,23 @@ public final class Bot {
     /** Nome da funcionalidade para mensagens de dependência ausente. */
     private static final String DISCORD_FEATURE = "Discord Bot (JDA)";
 
-    private static JDA jda;
-    private static boolean initialized = false;
-    private static final Map<String, Consumer<ButtonInteractionEvent>> buttonActions = new ConcurrentHashMap<>();
-
     private Bot() {
-        throw new UnsupportedOperationException("Utility class cannot be instantiated");
+        throw new UnsupportedOperationException("Classe utilitária não pode ser instanciada");
     }
 
     // ==================== INICIALIZAÇÃO ====================
 
     /**
-     * [PT] Inicializa o bot Discord usando o token do arquivo .env (chave DISCORD_BOT_TOKEN).
+     * Inicializa o bot Discord usando o token do arquivo .env
+     * (chave {@code DISCORD_BOT_TOKEN}).
      *
-     * [EN] Initializes the Discord bot using the token from the .env file (key DISCORD_BOT_TOKEN).
+     * <p><strong>Pré-condições:</strong> token configurado no {@code .env} e
+     * dependência JDA no classpath.</p>
      *
-     * @return [PT] true se inicializado com sucesso, false caso contrário
-     *         [EN] true if initialized successfully, false otherwise
+     * <p><strong>Pós-condições:</strong> bot conectado ao gateway; ações de
+     * botão passam a ser processadas.</p>
+     *
+     * @return {@code true} se inicializado com sucesso, {@code false} caso contrário
      */
     public static boolean setup() {
         Dependencies.require("net.dv8tion.jda.api.JDA", JDA_COORDINATES, DISCORD_FEATURE);
@@ -131,383 +126,364 @@ public final class Bot {
     }
 
     /**
-     * [PT] Inicializa o bot Discord com um token fornecido explicitamente.
+     * Inicializa o bot Discord com um token fornecido explicitamente.
      *
-     * [EN] Initializes the Discord bot with an explicitly provided token.
-     *
-     * @param token [PT] token do bot Discord
-     *              [EN] Discord bot token
-     * @return [PT] true se inicializado com sucesso
-     *         [EN] true if initialized successfully
+     * @param token Token do bot Discord
+     * @return {@code true} se inicializado com sucesso
      */
     public static synchronized boolean setup(String token) {
         Dependencies.require("net.dv8tion.jda.api.JDA", JDA_COORDINATES, DISCORD_FEATURE);
-        if (initialized) {
-            Console.warn("DiscordBot já foi inicializado.");
-            return true;
-        }
-
-        try {
-            jda = JDABuilder.createDefault(token)
-                    .enableIntents(
-                            GatewayIntent.GUILD_MESSAGES,
-                            GatewayIntent.MESSAGE_CONTENT
-                    )
-                    .addEventListeners(new ButtonListener())
-                    .build();
-            jda.awaitReady();
-            initialized = true;
-            Console.log("DiscordBot inicializado com sucesso como: " + jda.getSelfUser().getName());
-            return true;
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            Console.error("Inicialização do DiscordBot interrompida", e);
-            return false;
-        } catch (Exception e) {
-            Console.error("Falha ao inicializar DiscordBot", e);
-            return false;
-        }
+        return JdaSupport.setup(token);
     }
 
     /**
-     * [PT] Retorna a instância JDA (para uso avançado).
+     * Retorna a instância JDA (para uso avançado).
      *
-     * [EN] Returns the JDA instance (for advanced usage).
-     *
-     * @return [PT] instância JDA ou null se não inicializado
-     *         [EN] JDA instance or null if not initialized
+     * @return Instância JDA ou {@code null} se não inicializado
      */
     public static JDA getJDA() {
-        return jda;
+        return JdaSupport.jda;
     }
 
     /**
-     * [PT] Verifica se o bot está inicializado.
+     * Verifica se o bot está inicializado.
      *
-     * [EN] Checks if the bot is initialized.
-     *
-     * @return [PT] true se inicializado
-     *         [EN] true if initialized
+     * @return {@code true} se inicializado
      */
     public static boolean isInitialized() {
-        return initialized;
+        return JdaSupport.initialized;
     }
 
     // ==================== ENVIO DE MENSAGENS ====================
 
     /**
-     * [PT] Envia uma mensagem de texto simples para um canal.
+     * Envia uma mensagem de texto simples para um canal (bloqueante).
      *
-     * [EN] Sends a plain text message to a channel.
-     *
-     * @param channelId [PT] ID do canal
-     *                  [EN] channel ID
-     * @param message   [PT] conteúdo da mensagem
-     *                  [EN] message content
-     * @return [PT] a mensagem enviada ou null em caso de erro
-     *         [EN] the sent message or null on error
+     * @param channelId ID do canal
+     * @param message   Conteúdo da mensagem
+     * @return A mensagem enviada ou {@code null} em caso de erro
      */
     public static Message sendMessage(String channelId, String message) {
-        if (!initialized) return null;
-        try {
-            TextChannel channel = jda.getTextChannelById(channelId);
-            if (channel == null) {
-                Console.error("Canal não encontrado: " + channelId);
-                return null;
-            }
-            return channel.sendMessage(message).complete();
-        } catch (Exception e) {
-            Console.error("Erro ao enviar mensagem", e);
-            return null;
-        }
+        return JdaSupport.sendMessage(channelId, message);
     }
 
     /**
-     * [PT] Envia uma mensagem com um botão.
-     * <p>
-     * Use {@link #onButtonClick(String, Consumer)} para registrar a ação do botão.
-     * </p>
+     * Envia uma mensagem com um botão (bloqueante).
      *
-     * [EN] Sends a message with a single button.
-     * <p>
-     * Use {@link #onButtonClick(String, Consumer)} to register the button action.
-     * </p>
+     * <p>Use {@link #onButtonClick(String, Consumer)} para registrar a ação do botão.</p>
      *
-     * @param channelId   [PT] ID do canal
-     *                    [EN] channel ID
-     * @param message     [PT] texto da mensagem
-     *                    [EN] message text
-     * @param buttonId    [PT] ID único do botão (para callback via onButtonClick)
-     *                    [EN] unique button ID (for callback via onButtonClick)
-     * @param buttonLabel [PT] texto exibido no botão
-     *                    [EN] button label
-     * @return [PT] a mensagem enviada ou null
-     *         [EN] the sent message or null
+     * @param channelId   ID do canal
+     * @param message     Texto da mensagem
+     * @param buttonId    ID único do botão (para callback via onButtonClick)
+     * @param buttonLabel Texto exibido no botão
+     * @return A mensagem enviada ou {@code null} em caso de erro
      */
     public static Message sendMessageWithButton(String channelId, String message, String buttonId, String buttonLabel) {
-        if (!initialized) return null;
-        try {
-            TextChannel channel = jda.getTextChannelById(channelId);
-            if (channel == null) return null;
-            Button button = Button.primary(buttonId, buttonLabel);
-            return channel.sendMessage(message)
-                    .addComponents(ActionRow.of(button))
-                    .complete();
-        } catch (Exception e) {
-            Console.error("Erro ao enviar mensagem com botão", e);
-            return null;
-        }
+        return JdaSupport.sendMessageWithButton(channelId, message, buttonId, buttonLabel);
     }
 
     /**
-     * [PT] Envia uma mensagem com múltiplos botões (máximo 5 por ActionRow).
+     * Envia uma mensagem com múltiplos botões (máximo 5 por ActionRow).
      *
-     * [EN] Sends a message with multiple buttons (max 5 per ActionRow).
-     *
-     * @param channelId [PT] ID do canal
-     *                  [EN] channel ID
-     * @param message   [PT] texto da mensagem
-     *                  [EN] message text
-     * @param buttons   [PT] mapa de ID -> rótulo do botão
-     *                  [EN] map of ID -> button label
-     * @return [PT] a mensagem enviada ou null
-     *         [EN] the sent message or null
+     * @param channelId ID do canal
+     * @param message   Texto da mensagem
+     * @param buttons   Mapa de ID → rótulo do botão
+     * @return A mensagem enviada ou {@code null} em caso de erro
      */
     public static Message sendMessageWithButtons(String channelId, String message, Map<String, String> buttons) {
-        if (!initialized) return null;
-        try {
-            TextChannel channel = jda.getTextChannelById(channelId);
-            if (channel == null) return null;
-            List<Button> buttonList = new ArrayList<>();
-            for (Map.Entry<String, String> entry : buttons.entrySet()) {
-                buttonList.add(Button.primary(entry.getKey(), entry.getValue()));
-            }
-            return channel.sendMessage(message)
-                    .addComponents(ActionRow.of(buttonList))
-                    .complete();
-        } catch (Exception e) {
-            Console.error("Erro ao enviar mensagem com múltiplos botões", e);
-            return null;
-        }
+        return JdaSupport.sendMessageWithButtons(channelId, message, buttons);
     }
 
     // ==================== ENVIO DE IMAGENS ====================
 
     /**
-     * [PT] Envia uma imagem a partir de uma URL.
+     * Envia uma imagem a partir de uma URL (bloqueante).
      *
-     * [EN] Sends an image from a URL.
-     *
-     * @param channelId [PT] ID do canal
-     *                  [EN] channel ID
-     * @param imageUrl  [PT] URL da imagem
-     *                  [EN] image URL
-     * @param caption   [PT] legenda (pode ser null)
-     *                  [EN] caption (may be null)
-     * @return [PT] a mensagem enviada ou null
-     *         [EN] the sent message or null
+     * @param channelId ID do canal
+     * @param imageUrl  URL da imagem
+     * @param caption   Legenda (pode ser {@code null})
+     * @return A mensagem enviada ou {@code null} em caso de erro
      */
     public static Message sendImageFromUrl(String channelId, String imageUrl, String caption) {
-        if (!initialized) return null;
-        try {
-            TextChannel channel = jda.getTextChannelById(channelId);
-            if (channel == null) return null;
-            URL url = URI.create(imageUrl).toURL();
-            String fileName = imageUrl.substring(imageUrl.lastIndexOf('/') + 1);
-            FileUpload fileUpload = FileUpload.fromData(url.openStream(), fileName);
-            MessageCreateBuilder builder = new MessageCreateBuilder();
-            if (caption != null && !caption.isEmpty()) builder.setContent(caption);
-            builder.setFiles(fileUpload);
-            return channel.sendMessage(builder.build()).complete();
-        } catch (Exception e) {
-            Console.error("Erro ao enviar imagem por URL", e);
-            return null;
-        }
+        return JdaSupport.sendImageFromUrl(channelId, imageUrl, caption);
     }
 
     /**
-     * [PT] Envia uma imagem a partir de uma string Base64.
-     * <p>
-     * Aceita formatos como "data:image/png;base64,..." ou apenas a parte Base64.
-     * </p>
+     * Envia uma imagem a partir de uma string Base64 (bloqueante).
      *
-     * [EN] Sends an image from a Base64 string.
-     * <p>
-     * Accepts formats like "data:image/png;base64,..." or just the Base64 part.
-     * </p>
+     * <p>Aceita formatos como {@code "data:image/png;base64,..."} ou apenas a
+     * parte Base64.</p>
      *
-     * @param channelId [PT] ID do canal
-     *                  [EN] channel ID
-     * @param base64    [PT] string Base64 da imagem
-     *                  [EN] Base64 string of the image
-     * @param caption   [PT] legenda (opcional)
-     *                  [EN] caption (optional)
-     * @return [PT] a mensagem enviada ou null
-     *         [EN] the sent message or null
+     * @param channelId ID do canal
+     * @param base64    String Base64 da imagem
+     * @param caption   Legenda (opcional)
+     * @return A mensagem enviada ou {@code null} em caso de erro
      */
     public static Message sendImageFromBase64(String channelId, String base64, String caption) {
-        if (!initialized) return null;
-        try {
-            String clean = base64.contains(",") ? base64.split(",")[1] : base64;
-            byte[] bytes = Base64.getDecoder().decode(clean);
-            String mimeType = detectMimeType(base64);
-            String extension = mimeTypeToExtension(mimeType);
-            FileUpload fileUpload = FileUpload.fromData(bytes, "image." + extension);
-            MessageCreateBuilder builder = new MessageCreateBuilder();
-            if (caption != null && !caption.isEmpty()) builder.setContent(caption);
-            builder.setFiles(fileUpload);
-            TextChannel channel = jda.getTextChannelById(channelId);
-            if (channel == null) return null;
-            return channel.sendMessage(builder.build()).complete();
-        } catch (Exception e) {
-            Console.error("Erro ao enviar imagem por Base64", e);
-            return null;
-        }
+        return JdaSupport.sendImageFromBase64(channelId, base64, caption);
     }
 
     /**
-     * [PT] Envia uma imagem a partir de um arquivo local.
+     * Envia uma imagem a partir de um arquivo local (bloqueante).
      *
-     * [EN] Sends an image from a local file.
-     *
-     * @param channelId [PT] ID do canal
-     *                  [EN] channel ID
-     * @param filePath  [PT] caminho do arquivo
-     *                  [EN] file path
-     * @param caption   [PT] legenda (opcional)
-     *                  [EN] caption (optional)
-     * @return [PT] a mensagem enviada ou null
-     *         [EN] the sent message or null
+     * @param channelId ID do canal
+     * @param filePath  Caminho do arquivo
+     * @param caption   Legenda (opcional)
+     * @return A mensagem enviada ou {@code null} em caso de erro
      */
     public static Message sendImageFromFile(String channelId, String filePath, String caption) {
-        if (!initialized) return null;
-        try {
-            TextChannel channel = jda.getTextChannelById(channelId);
-            if (channel == null) return null;
-            File file = new File(filePath);
-            if (!file.exists()) {
-                Console.error("Arquivo não encontrado: " + filePath);
-                return null;
-            }
-            FileUpload fileUpload = FileUpload.fromData(file);
-            MessageCreateBuilder builder = new MessageCreateBuilder();
-            if (caption != null && !caption.isEmpty()) builder.setContent(caption);
-            builder.setFiles(fileUpload);
-            return channel.sendMessage(builder.build()).complete();
-        } catch (Exception e) {
-            Console.error("Erro ao enviar imagem por arquivo", e);
-            return null;
-        }
+        return JdaSupport.sendImageFromFile(channelId, filePath, caption);
     }
 
     /**
-     * [PT] Envia uma imagem a partir de um BufferedImage.
+     * Envia uma imagem a partir de um BufferedImage (bloqueante).
      *
-     * [EN] Sends an image from a BufferedImage.
-     *
-     * @param channelId [PT] ID do canal
-     *                  [EN] channel ID
-     * @param image     [PT] imagem a ser enviada
-     *                  [EN] image to send
-     * @param format    [PT] formato da imagem (ex: "png", "jpg")
-     *                  [EN] image format (e.g., "png", "jpg")
-     * @param caption   [PT] legenda (opcional)
-     *                  [EN] caption (optional)
-     * @return [PT] a mensagem enviada ou null
-     *         [EN] the sent message or null
+     * @param channelId ID do canal
+     * @param image     Imagem a ser enviada
+     * @param format    Formato da imagem (ex: "png", "jpg")
+     * @param caption   Legenda (opcional)
+     * @return A mensagem enviada ou {@code null} em caso de erro
      */
     public static Message sendBufferedImage(String channelId, BufferedImage image, String format, String caption) {
-        if (!initialized) return null;
-        try {
-            ByteArrayOutputStream baos = new ByteArrayOutputStream();
-            ImageIO.write(image, format, baos);
-            byte[] bytes = baos.toByteArray();
-            FileUpload fileUpload = FileUpload.fromData(bytes, "image." + format);
-            MessageCreateBuilder builder = new MessageCreateBuilder();
-            if (caption != null && !caption.isEmpty()) builder.setContent(caption);
-            builder.setFiles(fileUpload);
-            TextChannel channel = jda.getTextChannelById(channelId);
-            if (channel == null) return null;
-            return channel.sendMessage(builder.build()).complete();
-        } catch (Exception e) {
-            Console.error("Erro ao enviar BufferedImage", e);
-            return null;
-        }
+        return JdaSupport.sendBufferedImage(channelId, image, format, caption);
     }
 
     // ==================== BOTÕES E CALLBACKS ====================
 
     /**
-     * [PT] Registra uma ação para ser executada quando um botão com o ID especificado for clicado.
+     * Registra uma ação para ser executada quando um botão com o ID especificado
+     * for clicado.
      *
-     * [EN] Registers an action to be executed when a button with the specified ID is clicked.
+     * <p><strong>Pré-condições:</strong> bot inicializado (a ação só é invocada
+     * com o bot conectado).</p>
      *
-     * @param buttonId [PT] ID do botão (deve ser único)
-     *                 [EN] button ID (must be unique)
-     * @param action   [PT] ação a ser executada (recebe o evento)
-     *                 [EN] action to execute (receives the event)
+     * @param buttonId ID do botão (deve ser único)
+     * @param action   Ação a ser executada (recebe o evento)
      */
     public static void onButtonClick(String buttonId, Consumer<ButtonInteractionEvent> action) {
-        buttonActions.put(buttonId, action);
+        JdaSupport.buttonActions.put(buttonId, action);
         Console.debug("Ação registrada para botão: " + buttonId);
     }
 
     /**
-     * [PT] Remove a ação associada a um botão.
+     * Remove a ação associada a um botão.
      *
-     * [EN] Removes the action associated with a button.
-     *
-     * @param buttonId [PT] ID do botão
-     *                 [EN] button ID
+     * @param buttonId ID do botão
      */
     public static void removeButtonAction(String buttonId) {
-        buttonActions.remove(buttonId);
+        JdaSupport.buttonActions.remove(buttonId);
         Console.debug("Ação removida para botão: " + buttonId);
     }
 
-    // ==================== LISTENER INTERNO ====================
+    // ==================== IMPLEMENTAÇÃO (JDA — LAZY) ====================
 
-    private static class ButtonListener extends ListenerAdapter {
-        @Override
-        public void onButtonInteraction(@NotNull ButtonInteractionEvent event) {
-            // JDA 6: getComponentId() substitui getButton().getId()
-            // JDA 6: getComponentId() replaces getButton().getId()
-            String componentId = event.getComponentId();
-            if (buttonActions.containsKey(componentId)) {
-                Console.debug("Botão clicado: " + componentId + " por " + event.getUser().getName());
-                try {
-                    buttonActions.get(componentId).accept(event);
-                } catch (Exception e) {
-                    Console.error("Erro ao processar clique do botão %s", componentId, e);
-                    if (!event.isAcknowledged()) {
-                        event.reply("Ocorreu um erro ao processar sua ação.").setEphemeral(true).queue();
+    /**
+     * Implementação da integração com o JDA. Classe separada para manter as
+     * referências ao JDA fora do bytecode da {@link Bot} — a classe pública
+     * pode ser vinculada sem o JDA e o guard exibe a mensagem de instalação
+     * antes de qualquer uso.
+     */
+    private static final class JdaSupport {
+
+        private static JDA jda;
+        private static boolean initialized = false;
+        private static final Map<String, Consumer<ButtonInteractionEvent>> buttonActions = new ConcurrentHashMap<>();
+
+        private JdaSupport() {
+        }
+
+        static synchronized boolean setup(String token) {
+            if (initialized) {
+                Console.warn("DiscordBot já foi inicializado.");
+                return true;
+            }
+
+            try {
+                jda = JDABuilder.createDefault(token)
+                        .enableIntents(
+                                GatewayIntent.GUILD_MESSAGES,
+                                GatewayIntent.MESSAGE_CONTENT
+                        )
+                        .addEventListeners(new ButtonListener())
+                        .build();
+                jda.awaitReady();
+                initialized = true;
+                Console.log("DiscordBot inicializado com sucesso como: " + jda.getSelfUser().getName());
+                return true;
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                Console.error("Inicialização do DiscordBot interrompida", e);
+                return false;
+            } catch (Exception e) {
+                Console.error("Falha ao inicializar DiscordBot", e);
+                return false;
+            }
+        }
+
+        static Message sendMessage(String channelId, String message) {
+            if (!initialized) return null;
+            try {
+                TextChannel channel = jda.getTextChannelById(channelId);
+                if (channel == null) {
+                    Console.error("Canal não encontrado: " + channelId);
+                    return null;
+                }
+                return channel.sendMessage(message).complete();
+            } catch (Exception e) {
+                Console.error("Erro ao enviar mensagem", e);
+                return null;
+            }
+        }
+
+        static Message sendMessageWithButton(String channelId, String message, String buttonId, String buttonLabel) {
+            if (!initialized) return null;
+            try {
+                TextChannel channel = jda.getTextChannelById(channelId);
+                if (channel == null) return null;
+                Button button = Button.primary(buttonId, buttonLabel);
+                return channel.sendMessage(message)
+                        .addComponents(ActionRow.of(button))
+                        .complete();
+            } catch (Exception e) {
+                Console.error("Erro ao enviar mensagem com botão", e);
+                return null;
+            }
+        }
+
+        static Message sendMessageWithButtons(String channelId, String message, Map<String, String> buttons) {
+            if (!initialized) return null;
+            try {
+                TextChannel channel = jda.getTextChannelById(channelId);
+                if (channel == null) return null;
+                List<Button> buttonList = new ArrayList<>();
+                for (Map.Entry<String, String> entry : buttons.entrySet()) {
+                    buttonList.add(Button.primary(entry.getKey(), entry.getValue()));
+                }
+                return channel.sendMessage(message)
+                        .addComponents(ActionRow.of(buttonList))
+                        .complete();
+            } catch (Exception e) {
+                Console.error("Erro ao enviar mensagem com múltiplos botões", e);
+                return null;
+            }
+        }
+
+        static Message sendImageFromUrl(String channelId, String imageUrl, String caption) {
+            if (!initialized) return null;
+            try {
+                TextChannel channel = jda.getTextChannelById(channelId);
+                if (channel == null) return null;
+                URL url = URI.create(imageUrl).toURL();
+                String fileName = imageUrl.substring(imageUrl.lastIndexOf('/') + 1);
+                FileUpload fileUpload = FileUpload.fromData(url.openStream(), fileName);
+                MessageCreateBuilder builder = new MessageCreateBuilder();
+                if (caption != null && !caption.isEmpty()) builder.setContent(caption);
+                builder.setFiles(fileUpload);
+                return channel.sendMessage(builder.build()).complete();
+            } catch (Exception e) {
+                Console.error("Erro ao enviar imagem por URL", e);
+                return null;
+            }
+        }
+
+        static Message sendImageFromBase64(String channelId, String base64, String caption) {
+            if (!initialized) return null;
+            try {
+                String clean = base64.contains(",") ? base64.split(",")[1] : base64;
+                byte[] bytes = Base64.getDecoder().decode(clean);
+                String mimeType = detectMimeType(base64);
+                String extension = mimeTypeToExtension(mimeType);
+                FileUpload fileUpload = FileUpload.fromData(bytes, "image." + extension);
+                MessageCreateBuilder builder = new MessageCreateBuilder();
+                if (caption != null && !caption.isEmpty()) builder.setContent(caption);
+                builder.setFiles(fileUpload);
+                TextChannel channel = jda.getTextChannelById(channelId);
+                if (channel == null) return null;
+                return channel.sendMessage(builder.build()).complete();
+            } catch (Exception e) {
+                Console.error("Erro ao enviar imagem por Base64", e);
+                return null;
+            }
+        }
+
+        static Message sendImageFromFile(String channelId, String filePath, String caption) {
+            if (!initialized) return null;
+            try {
+                TextChannel channel = jda.getTextChannelById(channelId);
+                if (channel == null) return null;
+                File file = new File(filePath);
+                if (!file.exists()) {
+                    Console.error("Arquivo não encontrado: " + filePath);
+                    return null;
+                }
+                FileUpload fileUpload = FileUpload.fromData(file);
+                MessageCreateBuilder builder = new MessageCreateBuilder();
+                if (caption != null && !caption.isEmpty()) builder.setContent(caption);
+                builder.setFiles(fileUpload);
+                return channel.sendMessage(builder.build()).complete();
+            } catch (Exception e) {
+                Console.error("Erro ao enviar imagem por arquivo", e);
+                return null;
+            }
+        }
+
+        static Message sendBufferedImage(String channelId, BufferedImage image, String format, String caption) {
+            if (!initialized) return null;
+            try {
+                ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                ImageIO.write(image, format, baos);
+                byte[] bytes = baos.toByteArray();
+                FileUpload fileUpload = FileUpload.fromData(bytes, "image." + format);
+                MessageCreateBuilder builder = new MessageCreateBuilder();
+                if (caption != null && !caption.isEmpty()) builder.setContent(caption);
+                builder.setFiles(fileUpload);
+                TextChannel channel = jda.getTextChannelById(channelId);
+                if (channel == null) return null;
+                return channel.sendMessage(builder.build()).complete();
+            } catch (Exception e) {
+                Console.error("Erro ao enviar BufferedImage", e);
+                return null;
+            }
+        }
+
+        private static String detectMimeType(String base64) {
+            if (base64.startsWith("data:image/")) {
+                int start = "data:image/".length();
+                int end = base64.indexOf(';');
+                if (end > start) {
+                    return base64.substring(start, end);
+                }
+            }
+            return "png";
+        }
+
+        private static String mimeTypeToExtension(String mimeType) {
+            switch (mimeType) {
+                case "jpeg": return "jpg";
+                case "jpg":  return "jpg";
+                case "png":  return "png";
+                case "gif":  return "gif";
+                case "webp": return "webp";
+                default:     return "png";
+            }
+        }
+
+        private static class ButtonListener extends ListenerAdapter {
+            @Override
+            public void onButtonInteraction(@NotNull ButtonInteractionEvent event) {
+                String componentId = event.getComponentId();
+                if (buttonActions.containsKey(componentId)) {
+                    Console.debug("Botão clicado: " + componentId + " por " + event.getUser().getName());
+                    try {
+                        buttonActions.get(componentId).accept(event);
+                    } catch (Exception e) {
+                        Console.error("Erro ao processar clique do botão %s", componentId, e);
+                        if (!event.isAcknowledged()) {
+                            event.reply("Ocorreu um erro ao processar sua ação.").setEphemeral(true).queue();
+                        }
                     }
                 }
             }
-        }
-    }
-
-    // ==================== MÉTODOS AUXILIARES ====================
-
-    private static String detectMimeType(String base64) {
-        if (base64.startsWith("data:image/")) {
-            int start = "data:image/".length();
-            int end = base64.indexOf(';');
-            if (end > start) {
-                return base64.substring(start, end);
-            }
-        }
-        return "png";
-    }
-
-    private static String mimeTypeToExtension(String mimeType) {
-        switch (mimeType) {
-            case "jpeg": return "jpg";
-            case "jpg":  return "jpg";
-            case "png":  return "png";
-            case "gif":  return "gif";
-            case "webp": return "webp";
-            default:     return "png";
         }
     }
 }

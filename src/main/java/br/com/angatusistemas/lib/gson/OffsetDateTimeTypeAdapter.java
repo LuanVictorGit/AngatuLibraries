@@ -21,7 +21,7 @@ import com.google.gson.stream.JsonWriter;
  * @author Angatu Sistemas
  * @see GsonAPI
  */
-public class OffsetDateTimeTypeAdapter extends TypeAdapter<OffsetDateTime> {
+public final class OffsetDateTimeTypeAdapter extends TypeAdapter<OffsetDateTime> {
 
     /** Formato ISO 8601 com offset. */
     private final DateTimeFormatter formatter = DateTimeFormatter.ISO_OFFSET_DATE_TIME;

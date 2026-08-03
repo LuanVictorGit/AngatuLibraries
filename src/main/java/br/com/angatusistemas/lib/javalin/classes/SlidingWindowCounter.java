@@ -26,7 +26,7 @@ import java.util.Deque;
  *
  * @author Angatu Sistemas
  */
-public class SlidingWindowCounter {
+public final class SlidingWindowCounter {
 
     /** Tamanho da janela em segundos. */
     private final long windowSizeSeconds;

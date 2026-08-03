@@ -15,19 +15,53 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * [PT] Classe utilitária para operações comuns com datas, horas e fusos horários.
- * <p>
- * Utiliza a API {@code java.time} (Java 8+) para garantir imutabilidade, thread-safety
- * e maior clareza nos métodos.
+ * Classe utilitária para operações com datas, horas e fusos horários.
+ *
+ * <p><strong>Propósito:</strong> operações de data/hora com a API
+ * {@code java.time} (imutável e thread-safe), fuso padrão
+ * {@code America/Sao_Paulo} e formatos brasileiros (dd/MM/yyyy).</p>
+ *
+ * <p><strong>Quando usar:</strong> formatação, parsing, aritmética, diferenças,
+ * extrações e conversões de data/hora em qualquer ponto da aplicação; também é
+ * a base do timestamp usado pelo {@code Console}.</p>
+ *
+ * <p><strong>Quando NÃO usar:</strong> para dados temporais que exigem fuso do
+ * usuário (a classe fixa São Paulo) ou precisão de nanossegundos com
+ * timezone-aware (use {@link java.time.ZonedDateTime} diretamente); para
+ * serialização JSON, os TypeAdapters de {@code GsonAPI} já tratam datas.</p>
+ *
+ * <p><strong>Integração:</strong> usada pelo {@code Console} (timestamps dos
+ * logs), {@code Saveable} (campos {@code long} epoch) e demais módulos; não
+ * depende de bibliotecas externas.</p>
+ *
+ * <p><strong>Fluxo de utilização:</strong> métodos estáticos diretos. Formato
+ * brasileiro ({@code formatDate}, {@code parseDate}), ISO
+ * ({@code formatIso}), custom ({@code formatCustom}, {@code parseCustom}) e
+ * timestamp epoch ({@code getCurrentTimestamp}, {@code fromTimestamp},
+ * {@code toTimestamp}).</p>
+ *
+ * <p><strong>Exemplo:</strong>
+ * <pre>
+ * LocalDate hoje = DataTime.getCurrentDate();
+ * String br = DataTime.formatDate(hoje);                 // "03/08/2026"
+ * LocalDate parsed = DataTime.parseDate("25/12/2026");
+ * int idade = DataTime.calculateAge(LocalDate.of(1990, 5, 10));
+ * </pre>
  * </p>
- * 
- * [EN] Utility class for common date, time and timezone operations.
- * <p>
- * Uses the {@code java.time} API (Java 8+) to ensure immutability, thread-safety
- * and clearer method design.
- * </p>
- * 
- * @author [Sua equipe]
+ *
+ * <p><strong>Boas práticas:</strong> prefira os métodos desta classe ao invés
+ * de {@code SimpleDateFormat} (não thread-safe); use
+ * {@code isValidDate/isValidDateTime} para validar entrada do usuário.</p>
+ *
+ * <p><strong>Limitações:</strong> fuso fixo em São Paulo; métodos {@code custom}
+ * aceitam qualquer padrão — padrões inválidos lançam
+ * {@link java.time.format.DateTimeParseException} ou
+ * {@link java.time.DateTimeException}.</p>
+ *
+ * <p><strong>Extensões futuras:</strong> suporte a fuso configurável e
+ * duração humana (ex: "há 3 dias") são evoluções naturais sem quebrar a API.</p>
+ *
+ * @author Angatu Sistemas
  * @see java.time.LocalDate
  * @see java.time.LocalDateTime
  * @see java.time.ZonedDateTime

@@ -134,28 +134,7 @@ public final class QRCodeAPI {
         if (text == null || text.trim().isEmpty()) {
             throw new IllegalArgumentException("QR Code text cannot be null or empty");
         }
-
-        Map<EncodeHintType, Object> hints = new EnumMap<>(EncodeHintType.class);
-        hints.put(EncodeHintType.ERROR_CORRECTION, errorCorrectionLevel);
-        hints.put(EncodeHintType.MARGIN, quietZonePixels);
-
-        QRCodeWriter writer = new QRCodeWriter();
-        BitMatrix bitMatrix = writer.encode(text, BarcodeFormat.QR_CODE, width, height, hints);
-
-        // Preenche os pixels em um único array (uma chamada nativa ao setRGB)
-        // em vez de width*height chamadas individuais
-        BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
-        int black = Color.BLACK.getRGB();
-        int white = Color.WHITE.getRGB();
-        int[] pixels = new int[width * height];
-        for (int y = 0; y < height; y++) {
-            int rowOffset = y * width;
-            for (int x = 0; x < width; x++) {
-                pixels[rowOffset + x] = bitMatrix.get(x, y) ? black : white;
-            }
-        }
-        image.setRGB(0, 0, width, height, pixels, 0, width);
-        return image;
+        return QrSupport.generate(text, width, height, errorCorrectionLevel, quietZonePixels);
     }
 
     // ==================== MÉTODOS DE SAÍDA ====================
@@ -288,10 +267,53 @@ public final class QRCodeAPI {
     public static String decodeQRCode(BufferedImage image) throws NotFoundException {
         Dependencies.require("com.google.zxing.MultiFormatReader", ZXING_CORE_COORDINATES, QRCODE_FEATURE);
         Dependencies.require("com.google.zxing.client.j2se.BufferedImageLuminanceSource", ZXING_JAVASE_COORDINATES, QRCODE_FEATURE);
-        LuminanceSource source = new BufferedImageLuminanceSource(image);
-        BinaryBitmap bitmap = new BinaryBitmap(new HybridBinarizer(source));
-        Result result = new MultiFormatReader().decode(bitmap);
-        return result.getText();
+        return QrSupport.decode(image);
+    }
+
+    // ==================== IMPLEMENTAÇÃO (ZXING — LAZY) ====================
+
+    /**
+     * Implementação de geração/leitura com ZXing. Classe separada para manter
+     * as referências ao ZXing fora do bytecode da {@link QRCodeAPI} — a classe
+     * pública pode ser vinculada sem o zxing e o guard exibe a mensagem de
+     * instalação antes de qualquer uso.
+     */
+    private static final class QrSupport {
+
+        private QrSupport() {
+        }
+
+        static BufferedImage generate(String text, int width, int height,
+                ErrorCorrectionLevel errorCorrectionLevel, int quietZonePixels) throws WriterException {
+            Map<EncodeHintType, Object> hints = new EnumMap<>(EncodeHintType.class);
+            hints.put(EncodeHintType.ERROR_CORRECTION, errorCorrectionLevel);
+            hints.put(EncodeHintType.MARGIN, quietZonePixels);
+
+            QRCodeWriter writer = new QRCodeWriter();
+            BitMatrix bitMatrix = writer.encode(text, BarcodeFormat.QR_CODE, width, height, hints);
+
+            // Preenche os pixels em um único array (uma chamada nativa ao setRGB)
+            // em vez de width*height chamadas individuais
+            BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
+            int black = Color.BLACK.getRGB();
+            int white = Color.WHITE.getRGB();
+            int[] pixels = new int[width * height];
+            for (int y = 0; y < height; y++) {
+                int rowOffset = y * width;
+                for (int x = 0; x < width; x++) {
+                    pixels[rowOffset + x] = bitMatrix.get(x, y) ? black : white;
+                }
+            }
+            image.setRGB(0, 0, width, height, pixels, 0, width);
+            return image;
+        }
+
+        static String decode(BufferedImage image) throws NotFoundException {
+            LuminanceSource source = new BufferedImageLuminanceSource(image);
+            BinaryBitmap bitmap = new BinaryBitmap(new HybridBinarizer(source));
+            Result result = new MultiFormatReader().decode(bitmap);
+            return result.getText();
+        }
     }
 
     // ==================== UTILITÁRIOS ====================
