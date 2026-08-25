@@ -114,6 +114,27 @@ public final class JavalinAPI {
     /** Máximo de requisições em burst (1 segundo) antes de bloquear */
     private static final int BURST_THRESHOLD = 10;
 
+    /**
+     * Extensões de recurso estático que <b>não</b> entram no rate limit.
+     *
+     * <p>Uma página real carrega CSS, fontes, scripts e dezenas de imagens em
+     * paralelo — o navegador dispara tudo de uma vez, e isso é o comportamento
+     * normal, não um ataque. Contando esses pedidos, uma vitrine com 15 fotos
+     * estourava o {@link #BURST_THRESHOLD} logo no primeiro acesso e, em três
+     * recargas, o visitante levava bloqueio <b>permanente</b> por
+     * {@link #PERM_BLOCK_THRESHOLD}.</p>
+     *
+     * <p>Arquivo estático não é superfície de ataque: não tem query, não toca
+     * o banco e não muda estado. O que precisa de limite é rota — login,
+     * pagamento, escrita. É lá que o contador continua valendo.</p>
+     */
+    private static final Set<String> STATIC_EXTENSIONS = Set.of(
+            ".css", ".js", ".mjs", ".map",
+            ".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".svg", ".ico", ".bmp",
+            ".woff", ".woff2", ".ttf", ".otf", ".eot",
+            ".mp4", ".webm", ".ogg", ".mp3", ".wav",
+            ".webmanifest", ".txt", ".xml", ".pdf");
+
     // ==================== CONFIGURAÇÕES DE RATE LIMIT ====================
 
     /** Configurações de rate limit por padrão de path */
@@ -370,6 +391,26 @@ public final class JavalinAPI {
     }
 
     /**
+     * Remove <b>todos</b> os bloqueios permanentes e zera as violações.
+     *
+     * <p>Operação de manutenção. Existe porque {@link #unblockPermanently(String)}
+     * exige o hash SHA-256 do IP — que, por desenho, ninguém consegue derivar de
+     * volta. Sem isto, um bloqueio indevido não tinha como ser desfeito a não ser
+     * apagando o banco.</p>
+     *
+     * @return Quantidade de bloqueios removidos
+     */
+    public static int unblockAll() {
+        int n = 0;
+        for (PermanentBlock block : Saveable.findAll(PermanentBlock.class))
+            if (block.delete()) n++;
+        for (SuspectIp s : Saveable.findAll(SuspectIp.class)) s.delete();
+        BLOCKED_CACHE.clear();
+        BURST_TRACKER.clear();
+        return n;
+    }
+
+    /**
      * Retorna todos os bloqueios permanentes ativos (não expirados).
      *
      * @return Lista de {@link PermanentBlock} ativos
@@ -449,8 +490,9 @@ public final class JavalinAPI {
                 return;
             }
 
-            // Paths sem limite não passam pela verificação de rate limit
-            if (isUnlimitedPath(path)) return;
+            // Recurso estático e paths sem limite não passam pelo rate limit.
+            // Um <img> a mais numa vitrine não pode virar bloqueio de cliente.
+            if (isStaticResource(path) || isUnlimitedPath(path)) return;
 
             RateLimitConfig cfg = getRateLimitConfig(path);
 
@@ -691,6 +733,24 @@ public final class JavalinAPI {
      */
     private static boolean isUnlimitedPath(String path) {
         return UNLIMITED_PATHS.stream().anyMatch(p -> matchesPathPattern(path, p));
+    }
+
+    /**
+     * Verifica se o path aponta para um recurso estático.
+     *
+     * <p>Decidido pela extensão, e não por prefixo de pasta: projetos servem
+     * estático de lugares diferentes ({@code /assets}, {@code /public},
+     * {@code /styles}, a raiz), e uma lista de pastas erra em todos eles.</p>
+     *
+     * @param path Path da requisição
+     * @return {@code true} se for arquivo estático
+     */
+    private static boolean isStaticResource(String path) {
+        int ponto = path.lastIndexOf('.');
+        if (ponto < 0) return false;
+        int barra = path.lastIndexOf('/');
+        if (ponto < barra) return false;                  // ponto no meio do caminho, não é extensão
+        return STATIC_EXTENSIONS.contains(path.substring(ponto).toLowerCase());
     }
 
     /**
