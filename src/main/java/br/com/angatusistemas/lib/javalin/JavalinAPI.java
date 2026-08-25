@@ -188,6 +188,28 @@ public final class JavalinAPI {
         );
     }
 
+    /**
+     * Substitui um header de segurança padrão.
+     *
+     * <p>Existe por causa da {@code Content-Security-Policy}: o valor padrão
+     * daqui libera {@code *} em toda diretiva, o que faz o header existir sem
+     * proteger de nada — um script injetado apontando para fora passaria
+     * igual. Não dá para apertar isso na biblioteca sem quebrar aplicação que
+     * carrega recurso de terceiro, e a lista de origens só a aplicação
+     * conhece. Então a aplicação declara a sua.</p>
+     *
+     * <p>Chame <b>antes</b> de {@code new AngatuLib(...)} para valer desde a
+     * primeira requisição.</p>
+     *
+     * @param nome  nome do header (ex: {@code "Content-Security-Policy"})
+     * @param valor valor a enviar; {@code null} remove o header
+     */
+    public static void setSecurityHeader(String nome, String valor) {
+        if (nome == null || nome.isBlank()) return;
+        if (valor == null) SECURITY_HEADERS.remove(nome);
+        else SECURITY_HEADERS.put(nome, valor);
+    }
+
     /** Coordenadas Maven do Javalin (versão alvo da biblioteca). */
     private static final String JAVALIN_COORDINATES = "io.javalin:javalin:7.2.2";
     /** Coordenadas Maven do plugin SSL (modo HTTPS). */
@@ -222,7 +244,30 @@ public final class JavalinAPI {
     private static Javalin javalinInstance;
     private static boolean initialized = false;
 
+    /**
+     * Quantos proxies reversos confiáveis existem na frente da aplicação.
+     * Zero (padrão) = nenhum; cabeçalho de proxy é ignorado.
+     */
+    private static int trustedProxyHops = 0;
+
     private JavalinAPI() {}
+
+    /**
+     * Declara quantos proxies reversos confiáveis existem na frente da aplicação.
+     *
+     * <p>Chame com {@code 1} quando houver um nginx (ou Caddy, ou Apache) na
+     * frente; com {@code 2} quando houver nginx atrás de uma CDN. Enquanto for
+     * zero, {@code X-Forwarded-For} é ignorado e vale o IP do socket — que é o
+     * único valor que o cliente não consegue forjar.</p>
+     *
+     * <p>Errar para mais é pior que errar para menos: cada salto declarado a
+     * mais devolve o controle do IP para quem faz a requisição.</p>
+     *
+     * @param hops Número de proxies confiáveis (negativo é tratado como zero)
+     */
+    public static void setTrustedProxyHops(int hops) {
+        trustedProxyHops = Math.max(0, hops);
+    }
 
     // ==================== API PÚBLICA ====================
 
@@ -472,10 +517,16 @@ public final class JavalinAPI {
             // Ignora paths configurados (ex: health check)
             if (shouldIgnorePath(path)) return;
 
-            // Bloqueia inputs maliciosos (SQLi/XSS)
+            // Bloqueia inputs maliciosos (SQLi/XSS).
+            //
+            // Isto NÃO conta violação. O filtro é uma heurística de texto: um
+            // Referer de anúncio, ou uma busca digitada na loja, casa com os
+            // padrões sem que ninguém esteja atacando. Deixar essa heurística
+            // alimentar o contador de bloqueio permanente significa banir para
+            // sempre quem escreveu a frase errada no campo de busca. Recusa-se
+            // a requisição — que é o que protege — e pronto.
             if (hasMaliciousInput(ctx)) {
-                registerViolation(hashIp(getClientIp(ctx)));
-                ctx.status(StatusCode.FORBIDDEN.code()).result("Acesso negado");
+                sendDeniedPage(ctx);
                 return;
             }
 
@@ -508,29 +559,47 @@ public final class JavalinAPI {
 
             // Detecta burst attack (muitas requisições em < 1 segundo)
             if (cfg.isPerIp() && isBurstAttack(ipHash)) {
-                int violations = registerViolation(ipHash);
-                if (violations >= PERM_BLOCK_THRESHOLD) {
-                    createPermanentBlock(ipHash, violations);
-                    sendPermanentBlockPage(ctx);
-                } else {
-                    blockKey(key, HEAVY_BLOCK_SEC);
-                    sendBlockPage(ctx, HEAVY_BLOCK_SEC);
-                }
+                punir(ctx, ip, ipHash, key, HEAVY_BLOCK_SEC);
                 return;
             }
 
             // Verifica e registra a requisição nas janelas deslizantes
-            if (!checkAndRecordRequest(key, cfg)) {
-                int violations = registerViolation(ipHash);
-                if (violations >= PERM_BLOCK_THRESHOLD) {
-                    createPermanentBlock(ipHash, violations);
-                    sendPermanentBlockPage(ctx);
-                } else {
-                    blockKey(key, cfg.getBlockSeconds());
-                    sendBlockPage(ctx, cfg.getBlockSeconds());
-                }
-            }
+            if (!checkAndRecordRequest(key, cfg))
+                punir(ctx, ip, ipHash, key, cfg.getBlockSeconds());
         });
+    }
+
+    /**
+     * Bloqueia a chave e decide se o caso já virou bloqueio permanente.
+     *
+     * <p>Estava escrito duas vezes, igual, em dois pontos do handler — e é o
+     * trecho que mais dói errar: cada cópia é uma chance de uma delas esquecer
+     * de encerrar a requisição ou de escalar cedo demais.</p>
+     *
+     * <p>O bloqueio permanente é a única punição que não passa sozinha, então
+     * exige um IP em que dê para confiar. Se o valor resolvido é loopback ou
+     * rede privada, ou o proxy não está repassando a origem — e aí todo mundo
+     * chega com o mesmo IP — ou é tráfego interno. Banir para sempre nesse
+     * caso derruba a aplicação inteira. Continua valendo o bloqueio temporário,
+     * que contém o abuso e expira.</p>
+     *
+     * @param ctx     Contexto da requisição
+     * @param ip      IP resolvido do cliente
+     * @param ipHash  Hash SHA-256 do IP
+     * @param key     Chave de rate limit a bloquear
+     * @param seconds Duração do bloqueio temporário, em segundos
+     */
+    private static void punir(Context ctx, String ip, String ipHash, String key, long seconds) {
+        int violations = registerViolation(ipHash);
+
+        if (violations >= PERM_BLOCK_THRESHOLD && !isSharedOrLocalIp(ip)) {
+            createPermanentBlock(ipHash, violations);
+            sendPermanentBlockPage(ctx);
+            return;
+        }
+
+        blockKey(key, seconds);
+        sendBlockPage(ctx, seconds);
     }
 
     // ==================== PERSISTÊNCIA ====================
@@ -556,6 +625,16 @@ public final class JavalinAPI {
                 if (s.isPermanentlyBlocked())
                     BLOCKED_CACHE.put(s.getIpHash(), new BlockInfo(Long.MAX_VALUE, "Permanent"));
             }
+
+            /* Bloqueio permanente é invisível para quem administra: quem foi
+             * banido simplesmente não volta para reclamar, e quem olha o site
+             * de outro lugar vê tudo funcionando. Dizer o número toda subida é
+             * o que transforma "o site caiu para alguns" numa pista. */
+            long permanentes = BLOCKED_CACHE.values().stream()
+                    .filter(b -> b.getUnblockTime() == Long.MAX_VALUE).count();
+            if (permanentes > 0)
+                Console.warn("Há %d IP(s) com bloqueio PERMANENTE. Quem estiver na lista "
+                        + "recebe 403 em tudo. Para zerar: JavalinAPI.unblockAll().", permanentes);
         } catch (Exception e) {
             Console.error("Erro ao carregar configurações persistidas", e);
         }
@@ -761,20 +840,73 @@ public final class JavalinAPI {
     }
 
     /**
-     * Extrai o IP real do cliente, considerando proxies reversos e CDNs comuns.
-     * Prioriza os headers: {@code X-Forwarded-For}, {@code X-Real-IP},
-     * {@code CF-Connecting-IP} (Cloudflare), {@code True-Client-IP}.
+     * Extrai o IP do cliente.
+     *
+     * <p><b>Cabeçalho de proxy só vale se houver proxy declarado.</b> A versão
+     * anterior lia {@code X-Forwarded-For} sempre, e pegava o <i>primeiro</i>
+     * item da lista. Os dois pontos estavam errados:</p>
+     *
+     * <ul>
+     *   <li>Sem proxy na frente, o cabeçalho vem do cliente. Mandar
+     *       {@code X-Forwarded-For: 1.2.3.4} contornava rate limit e bloqueio
+     *       permanente de uma vez — e, escolhendo o IP de outra pessoa,
+     *       permitia fazer <i>ela</i> ser bloqueada;</li>
+     *   <li>o primeiro item é justamente a parte que o cliente escreve. Com
+     *       {@code $proxy_add_x_forwarded_for} no nginx, a lista fica
+     *       {@code <o que o cliente mandou>, <o que o proxy viu>} — o valor
+     *       confiável é o do <b>fim</b>.</li>
+     * </ul>
+     *
+     * <p>Por isso a contagem é a partir da direita: {@link #trustedProxyHops}
+     * diz quantos proxies seus existem, e pula-se exatamente esse tanto. O
+     * padrão é zero — sem configuração, vale só o IP do socket.</p>
      *
      * @param ctx Contexto da requisição
-     * @return IP real do cliente
+     * @return IP do cliente
+     * @see #setTrustedProxyHops(int)
      */
     private static String getClientIp(Context ctx) {
-        for (String header : new String[]{"X-Forwarded-For", "X-Real-IP", "CF-Connecting-IP", "True-Client-IP"}) {
+        if (trustedProxyHops <= 0) return ctx.ip();
+
+        String forwarded = ctx.header("X-Forwarded-For");
+        if (forwarded != null && !forwarded.isBlank()) {
+            String[] cadeia = forwarded.split(",");
+            // length - hops: pula os proxies confiáveis, contando do fim.
+            int i = Math.max(0, cadeia.length - trustedProxyHops);
+            String ip = cadeia[i].trim();
+            if (!ip.isBlank() && !"unknown".equalsIgnoreCase(ip)) return ip;
+        }
+
+        // Cabeçalhos de valor único: o proxy sobrescreve, então não há cadeia
+        // para percorrer. Só entram porque um proxy foi declarado.
+        for (String header : new String[]{"CF-Connecting-IP", "True-Client-IP", "X-Real-IP"}) {
             String value = ctx.header(header);
             if (value != null && !value.isBlank() && !"unknown".equalsIgnoreCase(value))
                 return value.split(",")[0].trim();
         }
         return ctx.ip();
+    }
+
+    /**
+     * Verifica se o IP resolvido é local ou de rede privada.
+     *
+     * <p>Serve de rede de segurança para proxy mal configurado: se o nginx não
+     * repassa o IP de origem, <b>todo mundo</b> chega como {@code 127.0.0.1} e
+     * passa a dividir o mesmo contador. Aí o primeiro visitante a esbarrar no
+     * limite bloqueia a loja inteira, para sempre. Um IP assim continua sendo
+     * limitado por rajada, mas nunca vira bloqueio permanente.</p>
+     *
+     * @param ip IP resolvido por {@link #getClientIp(Context)}
+     * @return {@code true} se for loopback ou rede privada
+     */
+    private static boolean isSharedOrLocalIp(String ip) {
+        if (ip == null || ip.isBlank()) return true;
+        String v = ip.trim().toLowerCase();
+        if (v.startsWith("[")) v = v.substring(1);
+        return v.startsWith("127.") || v.equals("::1") || v.startsWith("0:0:0:0:0:0:0:1")
+                || v.startsWith("10.") || v.startsWith("192.168.")
+                || v.startsWith("169.254.") || v.startsWith("fc") || v.startsWith("fd")
+                || v.matches("^172\\.(1[6-9]|2\\d|3[01])\\..*");
     }
 
     /**
@@ -848,38 +980,87 @@ public final class JavalinAPI {
     // ==================== PÁGINAS DE RESPOSTA ====================
 
     /**
-     * Envia uma página HTML de bloqueio temporário com o tempo restante.
+     * Estilo das páginas de recusa. Embutido de propósito.
+     *
+     * <p>Estas páginas aparecem exatamente quando a requisição do cliente foi
+     * recusada. Buscar CSS num CDN aqui é pedir para a página de erro depender
+     * de uma terceira rede — e, sob uma CSP restritiva, o pedido é bloqueado e
+     * o visitante recebe texto cru. Não há nada aqui que justifique um
+     * framework: são quatro linhas de texto.</p>
+     */
+    private static final String DENY_STYLE =
+            "*{box-sizing:border-box}body{margin:0;min-height:100vh;display:flex;"
+            + "align-items:center;justify-content:center;padding:24px;background:#F4F4F5;"
+            + "color:#18181B;font:16px/1.55 system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}"
+            + "main{max-width:26rem;background:#fff;border-radius:14px;padding:32px;"
+            + "box-shadow:0 1px 3px rgba(0,0,0,.1),0 8px 24px rgba(0,0,0,.06)}"
+            + "h1{margin:0 0 12px;font-size:1.3rem;line-height:1.3}"
+            + "p{margin:0;color:#52525B}strong{color:#18181B}"
+            + "@media(prefers-color-scheme:dark){body{background:#18181B;color:#FAFAFA}"
+            + "main{background:#27272A;box-shadow:none}p{color:#A1A1AA}strong{color:#FAFAFA}}";
+
+    /**
+     * Monta uma página de recusa e <b>encerra a requisição</b>.
+     *
+     * <p>O {@code skipRemainingHandlers()} é o ponto crítico, e não um detalhe.
+     * Um {@code before} do Javalin não interrompe nada ao retornar: o servlet
+     * continua para a task HTTP, que casa a rota ou entrega o arquivo estático
+     * por cima do que foi escrito aqui. Sem este corte, um bloqueio vira
+     * decoração — o conteúdo é servido do mesmo jeito e só o código de status
+     * fica errado, o que quebra o site (o navegador recusa CSS e JS com 4xx)
+     * sem proteger coisa alguma.</p>
+     *
+     * @param ctx    Contexto da requisição
+     * @param status Código HTTP da recusa
+     * @param titulo Título curto, em linguagem comum
+     * @param corpo  Explicação em uma frase (HTML já escapado pelo chamador)
+     */
+    private static void sendDenyPage(Context ctx, int status, String titulo, String corpo) {
+        ctx.html("<!DOCTYPE html><html lang=\"pt-BR\"><head><meta charset=\"UTF-8\">"
+                + "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+                + "<meta name=\"robots\" content=\"noindex\">"
+                + "<title>" + titulo + "</title><style>" + DENY_STYLE + "</style></head>"
+                + "<body><main><h1>" + titulo + "</h1><p>" + corpo + "</p></main></body></html>")
+                .status(status);
+        ctx.skipRemainingHandlers();
+    }
+
+    /**
+     * Envia uma página de bloqueio temporário com o tempo restante.
      *
      * @param ctx     Contexto da requisição
      * @param seconds Segundos restantes até o desbloqueio
      */
     private static void sendBlockPage(Context ctx, long seconds) {
-        ctx.html(String.format("""
-                <!DOCTYPE html><html><head><meta charset="UTF-8"><title>Bloqueado</title>
-                <link href="https://cdn.jsdelivr.net/npm/tailwindcss@3.3.3/dist/tailwind.min.css" rel="stylesheet">
-                </head><body class="bg-gray-100 flex items-center justify-center min-h-screen">
-                <div class="bg-white rounded-lg p-8 text-center shadow">
-                <h1 class="text-2xl font-bold text-red-600 mb-4">Acesso Bloqueado</h1>
-                <p class="text-gray-600">Muitas requisições. Aguarde <strong>%d segundos</strong>.</p>
-                </div></body></html>""", seconds))
-                .status(StatusCode.TOO_MANY_REQUESTS.code());
+        long minutos = Math.max(1, Math.round(seconds / 60.0));
+        String espera = seconds < 90
+                ? "<strong>" + Math.max(1, seconds) + " segundos</strong>"
+                : "<strong>" + minutos + (minutos == 1 ? " minuto" : " minutos") + "</strong>";
+        sendDenyPage(ctx, StatusCode.TOO_MANY_REQUESTS.code(), "Muitos acessos seguidos",
+                "Chegaram pedidos demais deste aparelho em pouco tempo. "
+                + "Espere " + espera + " e tente de novo.");
     }
 
     /**
-     * Envia uma página HTML de bloqueio permanente.
+     * Envia uma página de bloqueio permanente.
      *
      * @param ctx Contexto da requisição
      */
     private static void sendPermanentBlockPage(Context ctx) {
-        ctx.html("""
-                <!DOCTYPE html><html><head><meta charset="UTF-8"><title>Bloqueio Permanente</title>
-                <link href="https://cdn.jsdelivr.net/npm/tailwindcss@3.3.3/dist/tailwind.min.css" rel="stylesheet">
-                </head><body class="bg-gray-100 flex items-center justify-center min-h-screen">
-                <div class="bg-white rounded-lg p-8 text-center shadow">
-                <h1 class="text-2xl font-bold text-red-700 mb-4">Acesso Permanentemente Bloqueado</h1>
-                <p class="text-gray-600">Entre em contato com o suporte para regularizar o acesso.</p>
-                </div></body></html>""")
-                .status(StatusCode.FORBIDDEN.code());
+        sendDenyPage(ctx, StatusCode.FORBIDDEN.code(), "Acesso bloqueado",
+                "Este acesso foi bloqueado por atividade fora do normal. "
+                + "Se você acha que houve engano, fale com o suporte.");
+    }
+
+    /**
+     * Envia a recusa de conteúdo suspeito (SQLi/XSS detectado na requisição).
+     *
+     * @param ctx Contexto da requisição
+     */
+    private static void sendDeniedPage(Context ctx) {
+        sendDenyPage(ctx, StatusCode.FORBIDDEN.code(), "Pedido recusado",
+                "O conteúdo enviado tem trechos que o sistema não aceita. "
+                + "Refaça o pedido sem símbolos ou comandos.");
     }
 
     // ==================== REGISTRO DE ROTAS ====================
