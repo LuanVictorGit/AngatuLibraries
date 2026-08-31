@@ -8,6 +8,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Queue;
 import java.util.Set;
@@ -711,13 +712,44 @@ public final class JavalinAPI {
             for (String p : params)
                 if (containsMaliciousPattern(p)) return true;
 
-        if (BODY_METHODS.contains(ctx.method()))
+        if (BODY_METHODS.contains(ctx.method()) && corpoEhTexto(ctx))
             if (containsMaliciousPattern(ctx.body())) return true;
 
         for (String h : ctx.headerMap().values())
             if (containsMaliciousPattern(h)) return true;
 
         return false;
+    }
+
+    /**
+     * O corpo desta requisição pode ser lido para varredura?
+     *
+     * <p><b>{@code ctx.body()} CONSOME o corpo.</b> Depois dele,
+     * {@code ctx.uploadedFiles()} lança {@code BodyAlreadyReadException} e todo
+     * upload multipart do consumidor morre — a rota recebe o corpo já gasto e
+     * não consegue mais separar as partes. Era o que derrubava as três telas de
+     * foto da Ele &amp; Ela: capa da home, capa de categoria e foto de produto.</p>
+     *
+     * <p>E procurar {@code <script} dentro dos bytes de um JPEG não protege
+     * nada: gasta megabytes virando String a cada foto enviada e ainda pode
+     * casar por acaso, recusando a foto sem que ninguém esteja atacando.</p>
+     *
+     * <p>Sem {@code Content-Type} a varredura continua acontecendo — é o
+     * comportamento antigo, e sem cabeçalho não existe multipart para quebrar.
+     * Query params e headers seguem varridos em qualquer caso.</p>
+     *
+     * @param ctx Contexto da requisição
+     * @return {@code false} para multipart e binário, {@code true} para o resto
+     */
+    private static boolean corpoEhTexto(Context ctx) {
+        String tipo = ctx.header("Content-Type");
+        if (tipo == null || tipo.isBlank()) return true;
+        String t = tipo.toLowerCase(Locale.ROOT);
+        if (t.startsWith("multipart/")) return false;
+        return !t.startsWith("image/")
+                && !t.startsWith("video/")
+                && !t.startsWith("audio/")
+                && !t.startsWith("application/octet-stream");
     }
 
     /**
