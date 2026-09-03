@@ -117,7 +117,7 @@ A biblioteca foi projetada para ser **leve, modular e segura**:
 |---|---|
 | **Guard de dependência** | Verificação via reflection no primeiro uso de um módulo; se a biblioteca externa faltar, imprime coordenadas + snippets Maven/Gradle e lança `MissingDependencyException` com a mesma mensagem |
 | **Persistência direta** | O `Saveable` lê e grava direto no SQLite a cada operação — sem cache em memória. Cada busca devolve uma instância nova e toda alteração exige `save()` |
-| **Escrita serializada** | Transações `IMMEDIATE` + `busy_timeout` + coluna `version`: escritas concorrentes (threads ou processos) não se sobrepõem nem perdem alterações |
+| **Escrita serializada** | Transações `IMMEDIATE` + `busy_timeout` + travas por registro: escritas concorrentes (threads ou processos) não se sobrepõem nem perdem alterações |
 | **Janela deslizante** | Algoritmo de rate limiting por timestamps dentro de uma janela (segundo/minuto) — `SlidingWindowCounter` com fila O(1) |
 | **Descoberta de rotas** | Subclasses de `Route` com construtor vazio são encontradas via Reflections e registradas no startup |
 | **Bloqueios persistidos** | IPs suspeitos, bloqueios temporários e permanentes sobrevivem a reinicializações (tabelas `suspectips`, `permanentblocks`, `routeratelimitconfigs`) |
@@ -469,11 +469,6 @@ Usuario joao = Saveable.findById(Usuario.class, u.getId());
 // Alterar registro disputado sem perder a alteração de quem chegou junto
 Saveable.mutate(Conta.class, id, conta -> conta.setSaldo(conta.getSaldo() + 100));
 
-// Gravação otimista: recusa se alguém alterou o registro desde a leitura
-if (!joao.saveIfCurrent()) {
-    joao.reload();   // pega o estado atual e reaplica a alteração
-}
-
 // Duas gravações que precisam valer juntas
 Saveable.transaction(() -> {
     estoque.save();
@@ -486,29 +481,36 @@ Usuario porEmail = Saveable.findFirstByField(Usuario.class, "email", "joao@exemp
 
 // Consultas customizadas (sempre com parâmetros posicionais)
 List<Usuario> joes = Saveable.query(Usuario.class,
-    "SELECT data, version FROM usuarios WHERE json_extract(data, '$.nome') = ?", "João");
+    "SELECT data FROM usuarios WHERE json_extract(data, '$.nome') = ?", "João");
 
 // Encerrar a aplicação
 Saveable.shutdown();
 ```
 
-**Concorrência.** Um único pool HikariCP atende o banco inteiro, com SQLite em WAL,
-`busy_timeout` e transações `IMMEDIATE` — a trava de escrita é tomada no início da
-transação, então duas alterações simultâneas são serializadas em vez de se
-sobreporem. A coluna `version` detecta escrita concorrente: `mutate()` lê, altera e
-grava dentro da mesma transação (sem atualização perdida) e `saveIfCurrent()`
-devolve `false` quando o registro mudou desde a leitura. `save()` é atômico e a
-última escrita vence.
+**Formato do banco inalterado.** Continua um `database.db` **por aplicação**, com a
+tabela no mesmo formato de sempre — `id TEXT PRIMARY KEY, data TEXT NOT NULL` — e
+gravação por `INSERT OR REPLACE`. Nenhuma coluna é criada, alterada ou removida:
+bancos de sistemas que rodam versões anteriores da biblioteca continuam funcionando,
+e um banco escrito por esta versão segue legível pelas anteriores.
 
-**Banco em contêiner.** O arquivo padrão é `database.db` no diretório de trabalho.
-No Coolify, aponte para o volume persistente com `ANGATU_DB_PATH=/data/database.db`
-(ou `-Dangatu.db=...`) — sem isso o banco vive dentro do contêiner e some no deploy
-seguinte.
+**Concorrência.** Um pool HikariCP para o banco daquela aplicação (antes era um pool
+por classe de entidade, todos no mesmo arquivo), com SQLite em WAL, `busy_timeout` e
+transações `IMMEDIATE` — a trava de escrita é tomada no início da transação, então
+duas alterações simultâneas são serializadas em vez de se sobreporem, entre threads e
+entre processos. `save()` é atômico e a última escrita vence; `mutate()` lê, altera e
+grava dentro da mesma transação, sem atualização perdida; `transaction()` faz várias
+gravações valerem juntas ou nenhuma.
 
-> ⚠️ **Mudança de comportamento:** não há mais cache total nem *identity map*. Um
-> objeto alterado só é visível para os outros componentes depois do `save()`, e
-> `findById` devolve instâncias distintas a cada chamada. Consultas frequentes por
-> campo pedem `createIndex(...)`; `findAll`/`findByPredicate` percorrem a tabela.
+**Banco em contêiner.** O arquivo padrão é `database.db` no diretório de trabalho —
+um por projeto, como sempre. No Coolify, aponte para o volume persistente daquele
+projeto com `ANGATU_DB_PATH=/data/database.db` (ou `-Dangatu.db=...`); sem isso o
+banco vive dentro do contêiner e some no deploy seguinte.
+
+> ⚠️ **Mudança de comportamento (só no código, não no banco):** não há mais cache
+> total nem *identity map*. Um objeto alterado só é visível para os outros componentes
+> depois do `save()`, e `findById` devolve instâncias distintas a cada chamada.
+> Consultas frequentes por campo pedem `createIndex(...)`; `findAll`/`findByPredicate`
+> percorrem a tabela.
 
 ### 📨 E-mail (EmailAPI)
 
@@ -736,7 +738,7 @@ Instale o browser uma vez: `mvn exec:java -e -Dexec.mainClass=com.microsoft.play
 | **`isLocalhost()` mudou de critério** | Não olha mais a pasta de certificados: declare `ANGATU_ENV=production` (o `Dockerfile` modelo já faz isso) ou use `localhost` como host em desenvolvimento; sem declaração, host real é tratado como produção |
 | **`JavalinAPI.setup` com nova assinatura** | `setup(int port, boolean enableRateLimit, boolean manageSsl, File folderCerts)` — a ordem mudou de propósito, para que chamadas antigas quebrem no compilador em vez de inverterem o sentido do parâmetro |
 | **`Saveable` sem cache em memória** | Toda leitura vai ao banco e devolve instância nova; alterações só valem após `save()`. Onde havia leitura-alteração-gravação concorrente, use `Saveable.mutate(...)`; consultas frequentes por campo pedem `Saveable.createIndex(...)` |
-| **Tabelas do `Saveable` ganharam `version`/`updated_at`** | Migração automática na primeira utilização (`ALTER TABLE`) — nada a fazer |
+| **Banco de dados sem nenhuma mudança** | Mesmo arquivo (`database.db` por projeto), mesmas colunas (`id`, `data`) e mesmo `INSERT OR REPLACE` — nada a migrar, e os bancos de sistemas em produção continuam compatíveis com versões anteriores da lib |
 | **Todo projeto passa a ter `Dockerfile`** | Copie `templates/Dockerfile` e `templates/.dockerignore`, exponha a porta de `PORT` e monte `/data` no Coolify |
 | **Data holders agora `final`** | `Response`, `BlockInfo`, `RateLimitConfig`, `SlidingWindowCounter`, `CachedHtml`, TypeAdapters e opções do `BrowserAPI` não podem mais ser estendidos (nenhum caso de uso legítimo para herança) |
 
@@ -746,7 +748,7 @@ Instale o browser uma vez: `mvn exec:java -e -Dexec.mainClass=com.microsoft.play
 
 ### Versão atual
 * 🐳 **Hospedagem no Coolify**: HTTP por padrão na porta informada e HTTPS só quando pedido (`new AngatuLib(host, port, rateLimit, manageSsl)`); modelos de `Dockerfile`/`.dockerignore` em `templates/`; ambiente resolvido por `ANGATU_ENV` em vez da pasta de certificados
-* 🗄️ **`Saveable` sem dados em RAM**: cache total e *identity map* removidos — leitura e gravação direto no SQLite, pool único para o banco inteiro, transações `IMMEDIATE`, `busy_timeout`, coluna `version` e travas por registro; novos `mutate()`, `saveIfCurrent()`, `transaction()`, `computeInTransaction()`, `saveAll()`, `createIndex()`, `findFirstByField()`; caminho do banco configurável por `ANGATU_DB_PATH`
+* 🗄️ **`Saveable` sem dados em RAM**: cache total e *identity map* removidos — leitura e gravação direto no SQLite, um pool por aplicação (antes um por classe de entidade), transações `IMMEDIATE`, `busy_timeout` e travas por registro; novos `mutate()`, `transaction()`, `computeInTransaction()`, `saveAll()`, `createIndex()`, `findFirstByField()`; caminho do banco configurável por `ANGATU_DB_PATH`. **Formato do banco inalterado** (`id`, `data`, `INSERT OR REPLACE`): nenhuma migração, bancos existentes seguem compatíveis
 * 🔒 **Restrições de inicialização**: construtores de `Saveable` e `Route` agora `protected` (uso exclusivo via `extends`, com mensagens claras de uso incorreto); `Route` valida servidor ativo e argumentos no construtor; data holders (`Response`, `BlockInfo`, `RateLimitConfig`, `SlidingWindowCounter`, `CachedHtml`, TypeAdapters, opções do `BrowserAPI`) e `Core` agora `final`
 * 🔌 **Carregamento lazy de dependências**: todos os usos de bibliotecas de terceiros movidos para classes helper aninhadas — 39/43 classes públicas passam a ser linkáveis sem dependências e os guards de instalação disparam de fato no primeiro uso (validado por testes de runtime)
 * 📖 JavaDocs estruturados para humanos e IAs (propósito, quando usar/não usar, integração, fluxo, pré/pós-condições, efeitos colaterais, limitações, extensões)

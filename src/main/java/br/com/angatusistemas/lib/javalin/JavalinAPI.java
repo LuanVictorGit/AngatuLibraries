@@ -447,7 +447,7 @@ public final class JavalinAPI {
      */
     public static boolean unblockPermanently(String ipHash) {
         List<PermanentBlock> blocks = Saveable.query(PermanentBlock.class,
-                "SELECT data, version FROM permanentblocks WHERE json_extract(data, '$.ipHash') = ?", ipHash);
+                "SELECT data FROM permanentblocks WHERE json_extract(data, '$.ipHash') = ?", ipHash);
         for (PermanentBlock block : blocks) {
             if (block.delete()) {
                 BLOCKED_CACHE.remove(ipHash);
@@ -670,7 +670,7 @@ public final class JavalinAPI {
 
         Task.runLater(() -> {
             List<SuspectIp> suspects = Saveable.query(SuspectIp.class,
-                    "SELECT data, version FROM suspectips WHERE json_extract(data, '$.ipHash') = ?", ipHash);
+                    "SELECT data FROM suspectips WHERE json_extract(data, '$.ipHash') = ?", ipHash);
             SuspectIp suspect = suspects.isEmpty() ? new SuspectIp(ipHash) : suspects.get(0);
             suspect.setPermanentlyBlocked(true);
             suspect.save();
@@ -687,7 +687,7 @@ public final class JavalinAPI {
         BlockInfo block = BLOCKED_CACHE.get(ipHash);
         if (block == null || block.getUnblockTime() != Long.MAX_VALUE) return false;
         return !Saveable.query(PermanentBlock.class,
-                "SELECT data, version FROM permanentblocks WHERE json_extract(data, '$.ipHash') = ? AND json_extract(data, '$.expiresAt') > ?",
+                "SELECT data FROM permanentblocks WHERE json_extract(data, '$.ipHash') = ? AND json_extract(data, '$.expiresAt') > ?",
                 ipHash, Instant.now().getEpochSecond()).isEmpty();
     }
 
@@ -792,7 +792,7 @@ public final class JavalinAPI {
         int violations = VIOLATION_CACHE.computeIfAbsent(ipHash, k -> new AtomicInteger(0)).incrementAndGet();
         Task.runLater(() -> {
             List<SuspectIp> suspects = Saveable.query(SuspectIp.class,
-                    "SELECT data, version FROM suspectips WHERE json_extract(data, '$.ipHash') = ?", ipHash);
+                    "SELECT data FROM suspectips WHERE json_extract(data, '$.ipHash') = ?", ipHash);
             SuspectIp suspect = suspects.isEmpty() ? new SuspectIp(ipHash) : suspects.get(0);
             suspect.setTotalViolations(violations);
             suspect.save();

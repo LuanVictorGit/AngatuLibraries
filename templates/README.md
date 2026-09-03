@@ -35,9 +35,10 @@ new AngatuLib("meusite.com.br", 443, true, true); // exige /etc/letsencrypt/live
 1. **Application → Docker­file** como build pack, apontando para o repositório.
 2. **Port**: `8080` (mesma do `EXPOSE`/`PORT`).
 3. **Domain**: o domínio do projeto — o Coolify emite e renova o certificado.
-4. **Persistent Storage**: volume nomeado montado em `/data`. É onde ficam
-   `database.db` (SQLite do `Saveable`), `.env` e uploads. Sem isso, os dados
-   somem a cada deploy.
+4. **Persistent Storage**: volume nomeado montado em `/data` — um por projeto. É
+   onde ficam o `database.db` daquele projeto (SQLite do `Saveable`), `.env` e
+   uploads. Sem isso, os dados somem a cada deploy. Cada aplicação tem o seu banco;
+   nada é compartilhado entre projetos.
 5. **Environment Variables**: as chaves do `.env` (`EMAIL_KEY`, `MP_ACCESS_TOKEN`, …).
    A biblioteca lê variáveis de ambiente pelo mesmo `Env.get()`.
 

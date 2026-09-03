@@ -6,7 +6,6 @@ import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.Statement;
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
@@ -22,6 +21,7 @@ import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
 import com.google.gson.Gson;
+import com.google.gson.annotations.SerializedName;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 
@@ -39,24 +39,32 @@ import br.com.angatusistemas.lib.gson.GsonAPI;
  * preencher campos → {@link #save()} → buscar com
  * {@link #findById(Class, String)}</em>.</p>
  *
- * <p><strong>Sem dados em memória:</strong> não existe mais cache total nem
+ * <p><strong>Sem dados em memória:</strong> não existe cache total nem
  * <em>identity map</em>. Cada busca vai ao banco e devolve uma instância nova;
  * cada alteração só existe depois de um {@link #save()} (ou de um
- * {@link #mutate(Class, String, Consumer)}). Isso é o que permite rodar no
- * Coolify com vários componentes — rotas, tarefas agendadas, workers — mexendo
- * nos mesmos registros sem que um sobrescreva o outro a partir de uma cópia
- * velha guardada na RAM.</p>
+ * {@link #mutate(Class, String, Consumer)}). É isso que permite vários
+ * componentes da aplicação — rotas, tarefas agendadas, workers — mexerem nos
+ * mesmos registros sem que um sobrescreva o outro a partir de uma cópia velha
+ * guardada na RAM.</p>
  *
- * <p><strong>Concorrência:</strong> um único pool HikariCP atende todo o banco,
- * com SQLite em modo WAL (leitores não bloqueiam o escritor), {@code busy_timeout}
- * para esperar em vez de falhar e transações {@code IMMEDIATE} — que pegam a
- * trava de escrita já no início, serializando escritas entre threads e entre
- * processos. Sobre isso há travas por registro dentro do processo e uma coluna
- * {@code version} para detecção de escrita concorrente:</p>
+ * <p><strong>Formato do banco inalterado:</strong> continua um
+ * {@code database.db} <strong>por aplicação</strong>, no diretório de trabalho
+ * do processo, com a tabela no mesmo formato de sempre
+ * ({@code id TEXT PRIMARY KEY, data TEXT NOT NULL}) e gravação por
+ * {@code INSERT OR REPLACE}. Bancos criados por versões anteriores da
+ * biblioteca seguem funcionando sem migração, e um banco escrito por esta
+ * versão continua legível pelas anteriores — nenhuma coluna é adicionada,
+ * removida ou renomeada.</p>
+ *
+ * <p><strong>Concorrência:</strong> um único pool HikariCP para o banco daquela
+ * aplicação (antes havia um pool por classe de entidade, todos disputando o
+ * mesmo arquivo), com SQLite em modo WAL (leitores não bloqueiam o escritor),
+ * {@code busy_timeout} para esperar em vez de falhar e transações
+ * {@code IMMEDIATE} — que pegam a trava de escrita já no início, serializando
+ * escritas entre threads e entre processos. Sobre isso há travas por registro
+ * dentro do processo:</p>
  * <ul>
  *   <li>{@link #save()} — gravação atômica; a última escrita vence;</li>
- *   <li>{@link #saveIfCurrent()} — só grava se ninguém alterou o registro desde
- *       a leitura (devolve {@code false} no conflito);</li>
  *   <li>{@link #mutate(Class, String, Consumer)} — <strong>a forma correta</strong>
  *       de alterar um registro disputado: lê, altera e grava dentro da mesma
  *       transação, sem janela para atualização perdida;</li>
@@ -74,15 +82,15 @@ import br.com.angatusistemas.lib.gson.GsonAPI;
  *
  * <p><strong>Mapeamento:</strong> cada subclasse vira uma tabela — nome da
  * classe em minúsculas, com 's' no final se ainda não terminar em 's'
- * ({@code User} → {@code users}). As colunas são {@code id} (TEXT, chave
- * primária), {@code data} (TEXT, o objeto em JSON), {@code version} (INTEGER) e
- * {@code updated_at} (INTEGER, época em segundos). Tabelas criadas por versões
- * anteriores ganham as colunas novas automaticamente na primeira utilização.</p>
+ * ({@code User} → {@code users}). O objeto é serializado em JSON pelo
+ * {@link GsonAPI} na coluna {@code data}; a chave primária {@code id} vem de
+ * {@link #getId()} (UUID gerado e injetado por reflexão quando ausente).</p>
  *
  * <p><strong>Banco de dados:</strong> {@code database.db} no diretório de
- * trabalho. Em contêiner, aponte para o volume persistente com
- * {@code ANGATU_DB_PATH=/data/database.db} (ou {@code -Dangatu.db=...}) — sem
- * isso o banco vive dentro do contêiner e some no próximo deploy.</p>
+ * trabalho — cada projeto tem o seu, como sempre. Em contêiner, aponte para o
+ * volume persistente daquele projeto com {@code ANGATU_DB_PATH=/data/database.db}
+ * (ou {@code -Dangatu.db=...}); sem isso o banco vive dentro do contêiner e some
+ * no próximo deploy.</p>
  *
  * <p><strong>Desempenho:</strong> busca por ID é um SELECT na chave primária.
  * {@link #findAll(Class)} e {@link #findByPredicate(Class, Predicate)} leem a
@@ -101,9 +109,9 @@ import br.com.angatusistemas.lib.gson.GsonAPI;
  * dependências (sqlite-jdbc, HikariCP, gson) são verificadas no primeiro uso
  * com instruções de instalação se ausentes.</p>
  *
- * <p><strong>Limitações:</strong> SQLite é um banco de arquivo — vários
- * contêineres só compartilham o mesmo banco se compartilharem o mesmo volume no
- * mesmo host; para réplicas em máquinas diferentes, use um banco cliente/servidor.
+ * <p><strong>Limitações:</strong> SQLite é um banco de arquivo — dois processos
+ * só compartilham o mesmo banco se compartilharem o mesmo arquivo, no mesmo
+ * host; para réplicas em máquinas diferentes, use um banco cliente/servidor.
  * Campos {@code transient} não são persistidos.</p>
  *
  * @author Angatu Sistemas
@@ -119,28 +127,24 @@ public abstract class Saveable {
     private static final String HIKARI_COORDINATES = "com.zaxxer.hikari:HikariCP:7.0.2";
     private static final String PERSISTENCE_FEATURE = "Persistência (Saveable)";
 
-    /** Arquivo padrão do banco, relativo ao diretório de trabalho. */
+    /** Arquivo padrão do banco, relativo ao diretório de trabalho da aplicação. */
     private static final String DEFAULT_DATABASE = "database.db";
     /** Conexões do pool: leitores concorrentes; a escrita é serializada pelo SQLite. */
     private static final int POOL_SIZE = 12;
     /** Tempo que uma conexão espera pela trava de escrita antes de desistir (ms). */
     private static final String BUSY_TIMEOUT_MS = "5000";
-    /** Tentativas de gravação otimista antes de desistir de um registro disputado. */
-    private static final int MUTATE_ATTEMPTS = 5;
     /** Quantidade de travas por faixa (striped locks) — limita a disputa sem crescer sem fim. */
     private static final int LOCK_STRIPES = 64;
     /** Nomes de campo aceitos no SQL de índice/consulta por campo. */
     private static final Pattern SAFE_FIELD = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*");
-    /** Versão desconhecida: objeto novo ou nunca lido do banco. */
-    private static final long UNKNOWN_VERSION = -1L;
 
     // ==================== ESTADO GLOBAL ====================
 
-    /** Pool único para todo o banco (antes havia um pool por classe). */
+    /** Pool do banco desta aplicação (antes havia um pool por classe de entidade). */
     private static volatile HikariDataSource dataSource;
     private static final Object DATA_SOURCE_LOCK = new Object();
 
-    /** Classes cuja tabela já foi criada/migrada nesta execução. */
+    /** Classes cuja tabela já foi criada nesta execução. */
     private static final Set<Class<?>> PREPARED_TABLES = ConcurrentHashMap.newKeySet();
     private static final Object PREPARE_LOCK = new Object();
 
@@ -153,14 +157,6 @@ public abstract class Saveable {
     static {
         for (int i = 0; i < LOCK_STRIPES; i++) ROW_LOCKS[i] = new ReentrantLock();
     }
-
-    // ==================== ESTADO DA INSTÂNCIA ====================
-
-    /**
-     * Versão do registro no momento da leitura. {@code transient} de propósito:
-     * é controle de concorrência, não faz parte do JSON persistido.
-     */
-    private transient long persistedVersion = UNKNOWN_VERSION;
 
     // ==================== CONSTRUTOR ====================
 
@@ -202,16 +198,16 @@ public abstract class Saveable {
      */
     public abstract String getId();
 
-    // ==================== INSTÂNCIA: GRAVAÇÃO ====================
+    // ==================== INSTÂNCIA ====================
 
     /**
-     * Grava o objeto no banco (inserção ou atualização), de forma atômica.
+     * Grava o objeto no banco ({@code INSERT OR REPLACE}), de forma atômica.
      *
-     * <p>A gravação inteira acontece dentro de uma transação de escrita: ou o
-     * registro fica completo, ou nada muda. Quando dois componentes gravam o
-     * mesmo registro ao mesmo tempo, as escritas são serializadas e a última
-     * vence — nenhuma delas corrompe o registro, mas a anterior é substituída.
-     * Se o que você quer é alterar um campo sem perder a alteração do outro, use
+     * <p>A gravação acontece dentro de uma transação de escrita: ou o registro
+     * fica completo, ou nada muda. Quando dois componentes gravam o mesmo
+     * registro ao mesmo tempo, as escritas são serializadas e a última vence —
+     * nenhuma delas corrompe o registro, mas a anterior é substituída. Se o que
+     * você quer é alterar um campo sem perder a alteração do outro, use
      * {@link #mutate(Class, String, Consumer)}.</p>
      *
      * <p>Sem ID, um UUID é gerado e injetado via reflexão no campo {@code id}
@@ -229,73 +225,8 @@ public abstract class Saveable {
 
         ReentrantLock lock = acquireRowLock(type, id);
         try {
-            Boolean saved = write(Boolean.FALSE, "salvar " + type.getSimpleName() + " id=" + id, conn -> {
-                upsert(conn, table, id, json);
-                persistedVersion = currentVersion(conn, table, id);
-                return Boolean.TRUE;
-            });
-            return Boolean.TRUE.equals(saved);
-        } finally {
-            releaseRowLock(lock);
-        }
-    }
-
-    /**
-     * Grava o objeto somente se ninguém tiver alterado o registro desde a
-     * leitura (controle otimista pela coluna {@code version}).
-     *
-     * <p>Use quando perder a alteração de outro componente for inaceitável e
-     * você quiser tratar o conflito no seu código — recarregando com
-     * {@link #reload()} e tentando de novo, ou avisando o usuário. Para o caso
-     * comum, {@link #mutate(Class, String, Consumer)} resolve o conflito
-     * sozinho.</p>
-     *
-     * @return {@code true} se gravado; {@code false} se o registro foi alterado
-     *         por outro componente (ou já existia, no caso de objeto novo)
-     */
-    public boolean saveIfCurrent() {
-        Class<?> type = getClass();
-        String id = ensureId();
-        if (id == null) return false;
-        prepare(type);
-        String json = GsonAPI.get().toJson(this);
-        String table = tableName(type);
-        long expected = persistedVersion;
-        long now = Instant.now().getEpochSecond();
-
-        ReentrantLock lock = acquireRowLock(type, id);
-        try {
-            Boolean saved = write(Boolean.FALSE, "salvar " + type.getSimpleName() + " id=" + id, conn -> {
-                if (expected == UNKNOWN_VERSION) {
-                    // Objeto novo: só grava se o ID ainda não existir
-                    String sql = "INSERT INTO " + table + " (id, data, version, updated_at) VALUES (?, ?, 1, ?)"
-                            + " ON CONFLICT(id) DO NOTHING";
-                    try (PreparedStatement ps = conn.prepareStatement(sql)) {
-                        ps.setString(1, id);
-                        ps.setString(2, json);
-                        ps.setLong(3, now);
-                        if (ps.executeUpdate() == 0) {
-                            Console.warn("saveIfCurrent() em %s id=%s: o registro já existe e esta instância não sabe a"
-                                    + " versão dele. Leia com findById/findByField (ou traga a coluna version na"
-                                    + " consulta) antes de gravar de forma otimista.", table, id);
-                            return Boolean.FALSE;
-                        }
-                    }
-                    persistedVersion = 1L;
-                    return Boolean.TRUE;
-                }
-                String sql = "UPDATE " + table + " SET data = ?, version = version + 1, updated_at = ?"
-                        + " WHERE id = ? AND version = ?";
-                try (PreparedStatement ps = conn.prepareStatement(sql)) {
-                    ps.setString(1, json);
-                    ps.setLong(2, now);
-                    ps.setString(3, id);
-                    ps.setLong(4, expected);
-                    if (ps.executeUpdate() == 0) return Boolean.FALSE;
-                }
-                persistedVersion = expected + 1;
-                return Boolean.TRUE;
-            });
+            Boolean saved = write(Boolean.FALSE, "salvar " + type.getSimpleName() + " id=" + id,
+                    conn -> writeRow(conn, table, id, json));
             return Boolean.TRUE.equals(saved);
         } finally {
             releaseRowLock(lock);
@@ -317,8 +248,8 @@ public abstract class Saveable {
      * Recarrega os campos do objeto a partir do banco, descartando alterações
      * locais não gravadas.
      *
-     * <p>É o passo natural depois de um {@link #saveIfCurrent()} recusado: pega
-     * o estado atual do registro para reaplicar a alteração.</p>
+     * <p>Útil quando o registro pode ter sido alterado por outro componente
+     * desde a leitura.</p>
      *
      * @return A própria instância recarregada, ou {@code null} se o registro não
      *         existir mais
@@ -331,26 +262,12 @@ public abstract class Saveable {
         String table = tableName(type);
 
         return read(null, "recarregar " + type.getSimpleName() + " id=" + id, conn -> {
-            Row row = selectRow(conn, table, id);
-            if (row == null) return null;
-            Object fresh = GsonAPI.get().fromJson(row.json(), type);
+            String json = selectJson(conn, table, id);
+            if (json == null) return null;
+            Object fresh = GsonAPI.get().fromJson(json, type);
             copyFields(fresh, this);
-            persistedVersion = row.version();
             return this;
         });
-    }
-
-    /**
-     * Versão do registro conhecida por esta instância.
-     *
-     * <p>Começa em {@code -1} (objeto novo), passa a valer o número gravado no
-     * banco após a leitura ou a gravação e cresce a cada alteração. Serve para
-     * o controle otimista de {@link #saveIfCurrent()}.</p>
-     *
-     * @return Versão conhecida do registro, ou {@code -1} se desconhecida
-     */
-    public long getPersistedVersion() {
-        return persistedVersion;
     }
 
     // ==================== ESTÁTICOS: LEITURA ====================
@@ -371,8 +288,8 @@ public abstract class Saveable {
         prepare(clazz);
         String table = tableName(clazz);
         return read(null, "buscar " + clazz.getSimpleName() + " id=" + id, conn -> {
-            Row row = selectRow(conn, table, id);
-            return row == null ? null : materialize(clazz, row.json(), row.version());
+            String json = selectJson(conn, table, id);
+            return json == null ? null : GsonAPI.get().fromJson(json, clazz);
         });
     }
 
@@ -389,7 +306,7 @@ public abstract class Saveable {
      */
     public static <T> List<T> findAll(Class<T> clazz) {
         prepare(clazz);
-        return query(clazz, "SELECT data, version FROM " + tableName(clazz));
+        return query(clazz, "SELECT data FROM " + tableName(clazz));
     }
 
     /**
@@ -430,8 +347,8 @@ public abstract class Saveable {
     public static <T> List<T> findByField(Class<T> clazz, String fieldName, Object value) {
         if (isIndexableField(fieldName, value)) {
             prepare(clazz);
-            return query(clazz, "SELECT data, version FROM " + tableName(clazz)
-                    + " WHERE json_extract(data, '$." + fieldName + "') = ?", value);
+            return query(clazz, "SELECT data FROM " + tableName(clazz)
+                    + " WHERE json_extract(data, '$." + jsonKey(clazz, fieldName) + "') = ?", value);
         }
         return findByPredicate(clazz, obj -> Objects.equals(fieldValue(obj, fieldName), value));
     }
@@ -451,8 +368,8 @@ public abstract class Saveable {
     public static <T> T findFirstByField(Class<T> clazz, String fieldName, Object value) {
         if (isIndexableField(fieldName, value)) {
             prepare(clazz);
-            List<T> found = query(clazz, "SELECT data, version FROM " + tableName(clazz)
-                    + " WHERE json_extract(data, '$." + fieldName + "') = ? LIMIT 1", value);
+            List<T> found = query(clazz, "SELECT data FROM " + tableName(clazz)
+                    + " WHERE json_extract(data, '$." + jsonKey(clazz, fieldName) + "') = ? LIMIT 1", value);
             return found.isEmpty() ? null : found.get(0);
         }
         List<T> found = findByField(clazz, fieldName, value);
@@ -502,10 +419,9 @@ public abstract class Saveable {
     /**
      * Executa SQL na tabela da entidade.
      *
-     * <p>Consultas devem trazer a coluna {@code data} (o JSON do objeto); se
-     * também trouxerem {@code version}, a instância já volta pronta para
-     * {@link #saveIfCurrent()}. Comandos que não retornam linhas (DDL, UPDATE,
-     * DELETE) são aceitos e devolvem lista vazia.</p>
+     * <p>Consultas devem trazer a coluna {@code data} (o JSON do objeto).
+     * Comandos que não retornam linhas (DDL, UPDATE, DELETE) são aceitos e
+     * devolvem lista vazia.</p>
      *
      * <p><strong>Sempre com parâmetros posicionais</strong> — nunca concatene
      * valores no SQL:</p>
@@ -513,10 +429,10 @@ public abstract class Saveable {
      * Saveable.createIndex(User.class, "email");
      *
      * List&lt;User&gt; users = Saveable.query(User.class,
-     *     "SELECT data, version FROM users WHERE json_extract(data, '$.email') = ?", email);
+     *     "SELECT data FROM users WHERE json_extract(data, '$.email') = ?", email);
      *
      * List&lt;User&gt; page = Saveable.query(User.class,
-     *     "SELECT data, version FROM users ORDER BY id LIMIT 100 OFFSET ?", 0);
+     *     "SELECT data FROM users ORDER BY id LIMIT 100 OFFSET ?", 0);
      * </pre>
      *
      * @param clazz  Classe destino dos objetos
@@ -533,19 +449,15 @@ public abstract class Saveable {
             List<T> found = new ArrayList<>();
             try (PreparedStatement ps = conn.prepareStatement(sql)) {
                 for (int i = 0; i < params.length; i++) ps.setObject(i + 1, params[i]);
-                boolean hasResultSet = ps.execute();
-                if (!hasResultSet) return found;
+                if (!ps.execute()) return found; // comando sem resultado (DDL/UPDATE/DELETE)
                 try (ResultSet rs = ps.getResultSet()) {
                     int dataColumn = columnIndex(rs.getMetaData(), "data");
                     if (dataColumn == 0) {
                         throw new UnsupportedOperationException(
                                 "Consulta customizada deve retornar a coluna 'data' com o JSON do objeto: " + sql);
                     }
-                    int versionColumn = columnIndex(rs.getMetaData(), "version");
-                    while (rs.next()) {
-                        long version = versionColumn == 0 ? UNKNOWN_VERSION : rs.getLong(versionColumn);
-                        found.add(materialize(clazz, rs.getString(dataColumn), version));
-                    }
+                    Gson gson = GsonAPI.get();
+                    while (rs.next()) found.add(gson.fromJson(rs.getString(dataColumn), clazz));
                 }
             }
             return found;
@@ -558,7 +470,9 @@ public abstract class Saveable {
      *
      * <p>Sem cache em memória, o índice é o que mantém a busca por campo barata.
      * Chame uma vez na inicialização, para cada campo consultado com frequência
-     * (e-mail, token de sessão, chave estrangeira).</p>
+     * (e-mail, token de sessão, chave estrangeira). Índice não altera a
+     * estrutura da tabela: o banco continua compatível com qualquer versão da
+     * biblioteca.</p>
      *
      * @param clazz     Classe da entidade
      * @param fieldName Nome do campo indexado (ex: {@code "email"})
@@ -575,7 +489,7 @@ public abstract class Saveable {
         Boolean created = write(Boolean.FALSE, "criar índice " + index, conn -> {
             try (Statement st = conn.createStatement()) {
                 st.execute("CREATE INDEX IF NOT EXISTS " + index + " ON " + table
-                        + "(json_extract(data, '$." + fieldName + "'))");
+                        + "(json_extract(data, '$." + jsonKey(clazz, fieldName) + "'))");
             }
             return Boolean.TRUE;
         });
@@ -588,9 +502,10 @@ public abstract class Saveable {
      * Lê, altera e grava um registro dentro da mesma transação — sem janela para
      * atualização perdida.
      *
-     * <p>É a forma correta de mexer em registro disputado. Enquanto o bloco
-     * roda, nenhum outro componente grava aquele registro; o que a alteração
-     * enxerga é o estado atual do banco, não uma cópia lida antes.</p>
+     * <p>É a forma correta de mexer em registro disputado. A transação de
+     * escrita é exclusiva: enquanto o bloco roda, nenhum outro componente grava
+     * naquele banco, e o que a alteração enxerga é o estado atual do registro,
+     * não uma cópia lida antes.</p>
      *
      * <pre>
      * Saveable.mutate(Account.class, id, account -&gt; account.setBalance(account.getBalance() + 100));
@@ -600,48 +515,24 @@ public abstract class Saveable {
      * @param id     Identificador do registro
      * @param change Alteração a aplicar sobre o estado atual do registro
      * @param <T>    Tipo da entidade
-     * @return Objeto já alterado e gravado, ou {@code null} se o registro não
-     *         existir (ou se o conflito persistir após as tentativas)
+     * @return Objeto já alterado e gravado, ou {@code null} se o registro não existir
      */
     public static <T extends Saveable> T mutate(Class<T> clazz, String id, Consumer<T> change) {
         if (id == null || change == null) return null;
         prepare(clazz);
         String table = tableName(clazz);
-        boolean[] conflict = {false};
 
         ReentrantLock lock = acquireRowLock(clazz, id);
         try {
-            for (int attempt = 1; attempt <= MUTATE_ATTEMPTS; attempt++) {
-                conflict[0] = false;
-                T updated = write(null, "alterar " + clazz.getSimpleName() + " id=" + id, conn -> {
-                    Row row = selectRow(conn, table, id);
-                    if (row == null) return null;
+            return write(null, "alterar " + clazz.getSimpleName() + " id=" + id, conn -> {
+                String json = selectJson(conn, table, id);
+                if (json == null) return null;
 
-                    T obj = materialize(clazz, row.json(), row.version());
-                    change.accept(obj);
-
-                    String sql = "UPDATE " + table + " SET data = ?, version = version + 1, updated_at = ?"
-                            + " WHERE id = ? AND version = ?";
-                    try (PreparedStatement ps = conn.prepareStatement(sql)) {
-                        ps.setString(1, GsonAPI.get().toJson(obj));
-                        ps.setLong(2, Instant.now().getEpochSecond());
-                        ps.setString(3, id);
-                        ps.setLong(4, row.version());
-                        if (ps.executeUpdate() == 0) {
-                            conflict[0] = true;
-                            return null;
-                        }
-                    }
-                    ((Saveable) obj).persistedVersion = row.version() + 1;
-                    return obj;
-                });
-
-                if (updated != null) return updated;
-                if (!conflict[0]) return null; // registro inexistente: repetir não ajuda
-            }
-            Console.warn("Não foi possível alterar %s id=%s: %d tentativas seguidas com escrita concorrente.",
-                    clazz.getSimpleName(), id, MUTATE_ATTEMPTS);
-            return null;
+                T obj = GsonAPI.get().fromJson(json, clazz);
+                change.accept(obj);
+                writeRow(conn, table, id, GsonAPI.get().toJson(obj));
+                return obj;
+            });
         } finally {
             releaseRowLock(lock);
         }
@@ -785,11 +676,11 @@ public abstract class Saveable {
     }
 
     /**
-     * Caminho do arquivo do banco em uso.
+     * Caminho do arquivo do banco desta aplicação.
      *
-     * <p>Padrão: {@code database.db} no diretório de trabalho. Em contêiner,
-     * defina {@code ANGATU_DB_PATH} (ou {@code -Dangatu.db}) apontando para o
-     * volume persistente.</p>
+     * <p>Padrão: {@code database.db} no diretório de trabalho — um por projeto,
+     * como sempre. Em contêiner, defina {@code ANGATU_DB_PATH} (ou
+     * {@code -Dangatu.db}) apontando para o volume persistente daquele projeto.</p>
      *
      * @return Caminho do arquivo SQLite
      */
@@ -800,9 +691,6 @@ public abstract class Saveable {
     }
 
     // ==================== INFRAESTRUTURA ====================
-
-    /** Linha crua do banco: JSON do objeto e versão do registro. */
-    private record Row(String json, long version) {}
 
     /** Operação que usa uma conexão já resolvida (do pool ou da transação). */
     @FunctionalInterface
@@ -868,13 +756,13 @@ public abstract class Saveable {
     /**
      * Cria o pool na primeira utilização.
      *
-     * <p>Um pool para o banco inteiro (não mais um por classe): o SQLite tem um
-     * escritor por vez, então vários pools apenas multiplicavam conexões
-     * disputando a mesma trava. O modo WAL libera as leituras, o
-     * {@code busy_timeout} faz a escrita esperar em vez de estourar
-     * {@code SQLITE_BUSY} e o {@code transaction_mode=IMMEDIATE} garante que
-     * toda transação de escrita pegue a trava logo no início — é isso que impede
-     * duas alterações concorrentes de se sobreporem.</p>
+     * <p>Um pool para o banco desta aplicação (não mais um por classe de
+     * entidade): o SQLite tem um escritor por vez, então vários pools apenas
+     * multiplicavam conexões disputando a mesma trava do mesmo arquivo. O modo
+     * WAL libera as leituras, o {@code busy_timeout} faz a escrita esperar em
+     * vez de estourar {@code SQLITE_BUSY} e o {@code transaction_mode=IMMEDIATE}
+     * garante que toda transação de escrita pegue a trava logo no início — é
+     * isso que impede duas alterações concorrentes de se sobreporem.</p>
      */
     private static HikariDataSource dataSource() {
         HikariDataSource current = dataSource;
@@ -898,7 +786,6 @@ public abstract class Saveable {
             config.addDataSourceProperty("synchronous", "NORMAL");
             config.addDataSourceProperty("busy_timeout", BUSY_TIMEOUT_MS);
             config.addDataSourceProperty("transaction_mode", "IMMEDIATE");
-            config.addDataSourceProperty("foreign_keys", "true");
             config.addDataSourceProperty("cache_size", 10000);
             config.addDataSourceProperty("temp_store", "MEMORY");
 
@@ -909,8 +796,11 @@ public abstract class Saveable {
     }
 
     /**
-     * Garante que a tabela da classe exista e tenha as colunas de controle de
-     * concorrência. Executa uma vez por classe, por execução.
+     * Garante que a tabela da classe exista, no mesmo formato de sempre
+     * ({@code id}, {@code data}). Executa uma vez por classe, por execução.
+     *
+     * <p>Nenhuma coluna é adicionada ou alterada: o banco de um sistema que roda
+     * outra versão da biblioteca continua idêntico e compatível.</p>
      */
     private static void prepare(Class<?> type) {
         if (PREPARED_TABLES.contains(type)) return;
@@ -918,13 +808,14 @@ public abstract class Saveable {
             if (PREPARED_TABLES.contains(type)) return;
 
             String table = tableName(type);
+            String sql = "CREATE TABLE IF NOT EXISTS " + table + " (id TEXT PRIMARY KEY, data TEXT NOT NULL)";
             Connection running = CURRENT_TRANSACTION.get();
             try {
                 if (running != null) {
-                    createAndMigrate(running, table);
+                    createTable(running, sql);
                 } else {
                     try (Connection conn = dataSource().getConnection()) {
-                        createAndMigrate(conn, table);
+                        createTable(conn, sql);
                     }
                 }
                 PREPARED_TABLES.add(type);
@@ -934,67 +825,32 @@ public abstract class Saveable {
         }
     }
 
-    /** Cria a tabela e acrescenta as colunas que faltarem (bancos antigos). */
-    private static void createAndMigrate(Connection conn, String table) throws SQLException {
+    /** Executa o CREATE TABLE IF NOT EXISTS da entidade. */
+    private static void createTable(Connection conn, String sql) throws SQLException {
         try (Statement st = conn.createStatement()) {
-            st.execute("CREATE TABLE IF NOT EXISTS " + table + " ("
-                    + "id TEXT PRIMARY KEY, "
-                    + "data TEXT NOT NULL, "
-                    + "version INTEGER NOT NULL DEFAULT 0, "
-                    + "updated_at INTEGER NOT NULL DEFAULT 0)");
-        }
-        Set<String> columns = new java.util.HashSet<>();
-        try (Statement st = conn.createStatement();
-             ResultSet rs = st.executeQuery("PRAGMA table_info(" + table + ")")) {
-            while (rs.next()) columns.add(rs.getString("name").toLowerCase(Locale.ROOT));
-        }
-        try (Statement st = conn.createStatement()) {
-            if (!columns.contains("version"))
-                st.execute("ALTER TABLE " + table + " ADD COLUMN version INTEGER NOT NULL DEFAULT 0");
-            if (!columns.contains("updated_at"))
-                st.execute("ALTER TABLE " + table + " ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0");
+            st.execute(sql);
         }
     }
 
-    /** Grava o registro criando ou substituindo, sempre incrementando a versão. */
-    private static void upsert(Connection conn, String table, String id, String json) throws SQLException {
-        String sql = "INSERT INTO " + table + " (id, data, version, updated_at) VALUES (?, ?, 1, ?)"
-                + " ON CONFLICT(id) DO UPDATE SET data = excluded.data,"
-                + " version = " + table + ".version + 1, updated_at = excluded.updated_at";
-        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+    /** Grava o registro no formato de sempre: {@code INSERT OR REPLACE (id, data)}. */
+    private static boolean writeRow(Connection conn, String table, String id, String json) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(
+                "INSERT OR REPLACE INTO " + table + " (id, data) VALUES (?, ?)")) {
             ps.setString(1, id);
             ps.setString(2, json);
-            ps.setLong(3, Instant.now().getEpochSecond());
             ps.executeUpdate();
+            return true;
         }
     }
 
-    /** Lê a linha crua (JSON + versão) de um registro. */
-    private static Row selectRow(Connection conn, String table, String id) throws SQLException {
-        try (PreparedStatement ps = conn.prepareStatement("SELECT data, version FROM " + table + " WHERE id = ?")) {
+    /** Lê o JSON de um registro pelo ID. */
+    private static String selectJson(Connection conn, String table, String id) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement("SELECT data FROM " + table + " WHERE id = ?")) {
             ps.setString(1, id);
             try (ResultSet rs = ps.executeQuery()) {
-                return rs.next() ? new Row(rs.getString("data"), rs.getLong("version")) : null;
+                return rs.next() ? rs.getString("data") : null;
             }
         }
-    }
-
-    /** Lê a versão atual de um registro (após a gravação). */
-    private static long currentVersion(Connection conn, String table, String id) throws SQLException {
-        try (PreparedStatement ps = conn.prepareStatement("SELECT version FROM " + table + " WHERE id = ?")) {
-            ps.setString(1, id);
-            try (ResultSet rs = ps.executeQuery()) {
-                return rs.next() ? rs.getLong(1) : UNKNOWN_VERSION;
-            }
-        }
-    }
-
-    /** Desserializa o JSON e registra a versão lida na instância. */
-    private static <T> T materialize(Class<T> clazz, String json, long version) {
-        Gson gson = GsonAPI.get();
-        T obj = gson.fromJson(json, clazz);
-        if (obj instanceof Saveable saveable) saveable.persistedVersion = version;
-        return obj;
     }
 
     /** Índice da coluna pelo nome, ou {@code 0} se ela não estiver no resultado. */
@@ -1039,6 +895,24 @@ public abstract class Saveable {
     private static boolean isIndexableField(String fieldName, Object value) {
         return fieldName != null && SAFE_FIELD.matcher(fieldName).matches()
                 && (value instanceof String || value instanceof Number || value instanceof Boolean);
+    }
+
+    /**
+     * Nome da chave no JSON persistido: normalmente igual ao campo Java, exceto
+     * quando o campo declara {@code @SerializedName}.
+     */
+    private static String jsonKey(Class<?> clazz, String fieldName) {
+        Class<?> type = clazz;
+        while (type != null && type != Object.class) {
+            try {
+                java.lang.reflect.Field field = type.getDeclaredField(fieldName);
+                SerializedName annotation = field.getAnnotation(SerializedName.class);
+                return annotation == null ? fieldName : annotation.value();
+            } catch (NoSuchFieldException e) {
+                type = type.getSuperclass();
+            }
+        }
+        return fieldName;
     }
 
     /** Lê um campo por reflexão (fallback do filtro por campo). */
