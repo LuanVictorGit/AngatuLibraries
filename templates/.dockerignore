@@ -1,0 +1,44 @@
+# Contexto de build enxuto: só entra o que o Maven precisa (pom.xml e src/).
+# Copie para a raiz do projeto junto do Dockerfile.
+
+# Build local
+target/
+out/
+bin/
+
+# Controle de versão e CI
+.git/
+.gitignore
+.github/
+
+# Banco e dados locais — o volume do Coolify é a fonte da verdade em produção
+*.db
+*.db-shm
+*.db-wal
+data/
+uploads/
+
+# Segredos: variáveis de ambiente são configuradas no painel do Coolify
+.env
+.env.*
+
+# Ferramentas de desenvolvimento (o CSS do Tailwind vai versionado, gerado antes do commit)
+tools/
+node_modules/
+package.json
+package-lock.json
+
+# Editores
+.idea/
+.vscode/
+.settings/
+.classpath
+.project
+.factorypath
+
+# Documentação e temporários
+docs/
+*.md
+*.log
+*.tmp
+*.bak

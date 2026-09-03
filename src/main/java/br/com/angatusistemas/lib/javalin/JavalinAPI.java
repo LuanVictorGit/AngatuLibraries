@@ -51,7 +51,7 @@ import io.javalin.http.staticfiles.Location;
  *   <li>Rate limiting por IP e por rota com janela deslizante</li>
  *   <li>Bloqueios temporários e permanentes persistidos em banco de dados</li>
  *   <li>Headers de segurança HTTP automáticos</li>
- *   <li>Suporte a SSL/TLS com redirecionamento automático</li>
+ *   <li>HTTP por padrão (TLS da hospedagem) e HTTPS opcional com redirecionamento</li>
  *   <li>Servir arquivos estáticos corretamente tanto em HTTP quanto HTTPS</li>
  * </ul>
  *
@@ -84,7 +84,7 @@ import io.javalin.http.staticfiles.Location;
  *
  * <p><strong>Limitações:</strong> exige as dependências
  * {@code io.javalin:javalin:7.2.2} (web), {@code io.javalin.community.ssl:javalin-ssl:7.2.2}
- * (HTTPS), {@code org.reflections:reflections:0.10.2} (rotas automáticas) e os
+ * (apenas no modo HTTPS gerenciado), {@code org.reflections:reflections:0.10.2} (rotas automáticas) e os
  * requisitos do {@link Saveable} (persistência de bloqueios). Dependências
  * ausentes são detectadas com mensagens de instalação claras.</p>
  *
@@ -273,18 +273,36 @@ public final class JavalinAPI {
     // ==================== API PÚBLICA ====================
 
     /**
-     * Inicializa o servidor Javalin com todas as configurações de segurança.
+     * Inicializa o servidor Javalin em HTTP com todas as configurações de
+     * segurança — a forma usada pelos projetos hospedados no Coolify.
      *
-     * <p>Em modo HTTPS, o SSL é configurado automaticamente com os certificados
-     * fornecidos. Os arquivos estáticos são servidos tanto em HTTP quanto HTTPS.</p>
-     *
-     * @param folderCerts Pasta contendo {@code fullchain.pem} e {@code privkey.pem}
-     * @param port        Porta principal (HTTPS usa esta porta; HTTP usa {@code port + 1})
-     * @param localhost   {@code true} para modo local sem SSL (porta 80)
+     * @param port            Porta HTTP em que o servidor escuta
      * @param enableRateLimit {@code true} para habilitar rate limiting
      * @return Instância configurada do Javalin, ou {@code null} em caso de falha
      */
-    public static Javalin setup(File folderCerts, int port, boolean localhost, boolean enableRateLimit) {
+    public static Javalin setup(int port, boolean enableRateLimit) {
+        return setup(port, enableRateLimit, false, null);
+    }
+
+    /**
+     * Inicializa o servidor Javalin com todas as configurações de segurança,
+     * escolhendo explicitamente quem gerencia o certificado SSL.
+     *
+     * <p>O padrão é <strong>HTTP</strong>: o servidor escuta em
+     * {@code 0.0.0.0:port} e o TLS fica com a hospedagem (Coolify, nginx ou
+     * outro proxy reverso). O modo HTTPS só é ligado quando
+     * {@code manageSsl} é {@code true} — aí o plugin javalin-ssl assume os
+     * certificados, escuta HTTPS na porta informada e mantém {@code port + 1}
+     * apenas para redirecionar o HTTP.</p>
+     *
+     * @param port            Porta principal (HTTP; ou HTTPS quando {@code manageSsl})
+     * @param enableRateLimit {@code true} para habilitar rate limiting
+     * @param manageSsl       {@code true} para o Javalin gerenciar o certificado SSL
+     * @param folderCerts     Pasta com {@code fullchain.pem} e {@code privkey.pem};
+     *                        usada somente quando {@code manageSsl} é {@code true}
+     * @return Instância configurada do Javalin, ou {@code null} em caso de falha
+     */
+    public static Javalin setup(int port, boolean enableRateLimit, boolean manageSsl, File folderCerts) {
         Dependencies.require("io.javalin.Javalin", JAVALIN_COORDINATES, "Web Server (Javalin)");
         if (initialized) return javalinInstance;
 
@@ -310,21 +328,24 @@ public final class JavalinAPI {
                 // Tamanho máximo do body (1 GB)
                 config.http.maxRequestSize = 1_000L * 1_024L * 1_024L;
 
-                // Configuração SSL para produção
-                if (!localhost) {
-                    Console.log("Javalin iniciado em modo HTTPS (porta %d)", port);
+                // HTTPS só quando pedido explicitamente: no Coolify o TLS
+                // termina no proxy de borda e o contêiner recebe HTTP
+                if (manageSsl) {
+                    Console.log("Javalin iniciado em modo HTTPS gerenciado (porta %d, HTTP em %d apenas para redirecionar)",
+                            port, port + 1);
                     Dependencies.require("io.javalin.community.ssl.SslPlugin", JAVALIN_SSL_COORDINATES,
-                            "Web Server (Javalin)");
+                            "Web Server (Javalin) — HTTPS gerenciado");
                     SslSetup.configure(config, folderCerts, port);
                 } else {
-                    Console.log("Javalin iniciado em modo HTTP local (porta 80)");
+                    Console.log("Javalin iniciado em modo HTTP (porta %d) — HTTPS a cargo da hospedagem", port);
                 }
             });
 
-            if (localhost) {
-                javalin.start(80);
-            } else {
+            // No modo HTTPS as portas são definidas pelo plugin SSL
+            if (manageSsl) {
                 javalin.start();
+            } else {
+                javalin.start(port);
             }
 
             javalinInstance = javalin;
@@ -426,7 +447,7 @@ public final class JavalinAPI {
      */
     public static boolean unblockPermanently(String ipHash) {
         List<PermanentBlock> blocks = Saveable.query(PermanentBlock.class,
-                "SELECT data FROM permanentblocks WHERE json_extract(data, '$.ipHash') = ?", ipHash);
+                "SELECT data, version FROM permanentblocks WHERE json_extract(data, '$.ipHash') = ?", ipHash);
         for (PermanentBlock block : blocks) {
             if (block.delete()) {
                 BLOCKED_CACHE.remove(ipHash);
@@ -507,10 +528,6 @@ public final class JavalinAPI {
                 ctx.redirect(path.replace(".html", ""));
                 return;
             }
-
-            // Captura o host de origem na primeira requisição
-            if (AngatuLib.getInstance().getOriginHost() == null)
-                AngatuLib.getInstance().setOriginHost(ctx.scheme() + "://" + ctx.host());
 
             // Aplica headers de segurança em todas as respostas
             SECURITY_HEADERS.forEach(ctx::header);
@@ -653,7 +670,7 @@ public final class JavalinAPI {
 
         Task.runLater(() -> {
             List<SuspectIp> suspects = Saveable.query(SuspectIp.class,
-                    "SELECT data FROM suspectips WHERE json_extract(data, '$.ipHash') = ?", ipHash);
+                    "SELECT data, version FROM suspectips WHERE json_extract(data, '$.ipHash') = ?", ipHash);
             SuspectIp suspect = suspects.isEmpty() ? new SuspectIp(ipHash) : suspects.get(0);
             suspect.setPermanentlyBlocked(true);
             suspect.save();
@@ -670,7 +687,7 @@ public final class JavalinAPI {
         BlockInfo block = BLOCKED_CACHE.get(ipHash);
         if (block == null || block.getUnblockTime() != Long.MAX_VALUE) return false;
         return !Saveable.query(PermanentBlock.class,
-                "SELECT data FROM permanentblocks WHERE json_extract(data, '$.ipHash') = ? AND json_extract(data, '$.expiresAt') > ?",
+                "SELECT data, version FROM permanentblocks WHERE json_extract(data, '$.ipHash') = ? AND json_extract(data, '$.expiresAt') > ?",
                 ipHash, Instant.now().getEpochSecond()).isEmpty();
     }
 
@@ -775,7 +792,7 @@ public final class JavalinAPI {
         int violations = VIOLATION_CACHE.computeIfAbsent(ipHash, k -> new AtomicInteger(0)).incrementAndGet();
         Task.runLater(() -> {
             List<SuspectIp> suspects = Saveable.query(SuspectIp.class,
-                    "SELECT data FROM suspectips WHERE json_extract(data, '$.ipHash') = ?", ipHash);
+                    "SELECT data, version FROM suspectips WHERE json_extract(data, '$.ipHash') = ?", ipHash);
             SuspectIp suspect = suspects.isEmpty() ? new SuspectIp(ipHash) : suspects.get(0);
             suspect.setTotalViolations(violations);
             suspect.save();
@@ -1112,7 +1129,8 @@ public final class JavalinAPI {
     // ==================== HELPERS (CARREGAMENTO LAZY) ====================
 
     /**
-     * Configura o plugin SSL/TLS do Javalin (javalin-ssl). Classe separada para
+     * Configura o plugin SSL/TLS do Javalin (javalin-ssl), usado somente quando
+     * a aplicação pede HTTPS gerenciado na inicialização. Classe separada para
      * que a {@link JavalinAPI} possa ser vinculada sem a dependência do plugin —
      * o guard de dependência roda antes deste helper ser tocado.
      */

@@ -1,0 +1,3 @@
+# Modelos de deploy: o Docker executa estes arquivos no Linux — CRLF quebra o shell.
+templates/Dockerfile text eol=lf
+templates/.dockerignore text eol=lf

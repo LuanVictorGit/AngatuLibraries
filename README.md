@@ -28,12 +28,13 @@
 7. [Configuração](#-configuração)
 8. [Primeiros passos](#-primeiros-passos)
 9. [Estrutura recomendada para projetos](#-estrutura-recomendada-para-projetos)
-10. [Guias por funcionalidade](#-guias-por-funcionalidade)
-11. [Boas práticas](#-boas-práticas)
-12. [Solução de problemas comuns](#-solução-de-problemas-comuns)
-13. [FAQ](#-faq)
-14. [Migração entre versões](#-migração-entre-versões)
-15. [Changelog resumido](#-changelog-resumido)
+10. [Deploy no Coolify (Docker)](#-deploy-no-coolify-docker)
+11. [Guias por funcionalidade](#-guias-por-funcionalidade)
+12. [Boas práticas](#-boas-práticas)
+13. [Solução de problemas comuns](#-solução-de-problemas-comuns)
+14. [FAQ](#-faq)
+15. [Migração entre versões](#-migração-entre-versões)
+16. [Changelog resumido](#-changelog-resumido)
 
 ---
 
@@ -65,7 +66,7 @@ A biblioteca foi projetada para ser **leve, modular e segura**:
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
 │                         SUA APLICAÇÃO                                 │
-│  Main → new AngatuLib(dominio, porta, rateLimit)                     │
+│  Main → new AngatuLib(host, porta, rateLimit[, gerenciarSsl])        │
 └──────────────────────────────┬───────────────────────────────────────┘
                                │ bootstrap
 ┌──────────────────────────────▼───────────────────────────────────────┐
@@ -78,7 +79,7 @@ A biblioteca foi projetada para ser **leve, modular e segura**:
 │         │                │                         ▼                  │
 │  ┌──────▼────────────────▼───────────────────────────────────────┐   │
 │  │                  JavalinAPI (Web Server)                     │   │
-│  │  SSL · Rate limiting · SQLi/XSS · Headers · Estáticos        │   │
+│  │  HTTP (ou HTTPS opcional) · Rate limit · SQLi/XSS · Headers   │   │
 │  │  ┌──────────────┐  ┌──────────────┐  ┌────────────────────┐  │   │
 │  │  │ Route (abstr.)│  │ HtmlRouteAPI │  │ AssetsAPI         │  │   │
 │  │  │ rotas auto    │  │ páginas /public│ │ cache + MIME      │  │   │
@@ -115,7 +116,8 @@ A biblioteca foi projetada para ser **leve, modular e segura**:
 | Conceito | Descrição |
 |---|---|
 | **Guard de dependência** | Verificação via reflection no primeiro uso de um módulo; se a biblioteca externa faltar, imprime coordenadas + snippets Maven/Gradle e lança `MissingDependencyException` com a mesma mensagem |
-| **Cache total (identity map)** | O `Saveable` carrega a tabela inteira na memória no primeiro acesso; o mesmo ID retorna sempre a mesma instância Java |
+| **Persistência direta** | O `Saveable` lê e grava direto no SQLite a cada operação — sem cache em memória. Cada busca devolve uma instância nova e toda alteração exige `save()` |
+| **Escrita serializada** | Transações `IMMEDIATE` + `busy_timeout` + coluna `version`: escritas concorrentes (threads ou processos) não se sobrepõem nem perdem alterações |
 | **Janela deslizante** | Algoritmo de rate limiting por timestamps dentro de uma janela (segundo/minuto) — `SlidingWindowCounter` com fila O(1) |
 | **Descoberta de rotas** | Subclasses de `Route` com construtor vazio são encontradas via Reflections e registradas no startup |
 | **Bloqueios persistidos** | IPs suspeitos, bloqueios temporários e permanentes sobrevivem a reinicializações (tabelas `suspectips`, `permanentblocks`, `routeratelimitconfigs`) |
@@ -125,13 +127,13 @@ A biblioteca foi projetada para ser **leve, modular e segura**:
 
 ```
 main()
- └─ new AngatuLib(dominio, porta, rateLimit)
+ └─ new AngatuLib(host, porta, rateLimit[, gerenciarSsl])
      ├─ 1. Dependencies.require("io.javalin.Javalin", ...)   → mensagem clara se faltar
      ├─ 2. System.setOut(InterceptorOutputStream → Console)  → log colorido
-     ├─ 3. Detecta localhost (sem /etc/letsencrypt/live/<dominio>)
-     ├─ 4. JavalinAPI.setup(...)
+     ├─ 3. Resolve o ambiente (ANGATU_ENV / host local) → isLocalhost()
+     ├─ 4. JavalinAPI.setup(porta, rateLimit, gerenciarSsl, certs)
      │      ├─ loadPersistedConfigs()   → bloqueios/configs do banco
-     │      ├─ SSL (HTTPS) ou HTTP local
+     │      ├─ HTTP na porta informada (padrão) ou HTTPS gerenciado (opcional)
      │      ├─ before-handler: headers + SQLi/XSS + rate limiting
      │      └─ Task.runTimerWithFixedDelay(cleanupOldData, 24h)
      ├─ 5. HtmlRouteAPI.registerAllRoutes()  → páginas /public/*.html
@@ -144,7 +146,7 @@ main()
 
 | Módulo | Classe principal | Descrição |
 |---|---|---|
-| 🌐 **Web Server** | `JavalinAPI`, `HtmlRouteAPI`, `Route` | Servidor HTTP/HTTPS (Javalin 7.2.2) com rate limiting, proteção contra SQLi/XSS, SSL automático e rotas por convenção |
+| 🌐 **Web Server** | `JavalinAPI`, `HtmlRouteAPI`, `Route` | Servidor HTTP (Javalin 7.2.2) com rate limiting, proteção contra SQLi/XSS, rotas por convenção e HTTPS opcional sob demanda |
 | 📁 **Assets** | `AssetsAPI` | Servir arquivos estáticos do classpath com cache e MIME types |
 | 🗄️ **Persistência** | `Saveable` | ORM JSON sobre SQLite (HikariCP + WAL) com cache em memória e identidade por ID |
 | 📨 **E-mail** | `EmailAPI`, `EmailFormatter` | Envio SMTP (Gmail) assíncrono, HTML, anexos, múltiplos destinatários e validação |
@@ -235,7 +237,7 @@ A biblioteca **não** empacota nem propaga dependências de terceiros. Cada mód
 
 | Módulo | Dependências necessárias |
 |---|---|
-| Web Server, HTML, Assets, Rotas | `io.javalin:javalin:7.2.2`, `io.javalin.community.ssl:javalin-ssl:7.2.2` (HTTPS), `org.reflections:reflections:0.10.2` (rotas automáticas), + um binding SLF4J (ex: `org.slf4j:slf4j-simple:2.0.17`) |
+| Web Server, HTML, Assets, Rotas | `io.javalin:javalin:7.2.2`, `io.javalin.community.ssl:javalin-ssl:7.2.2` (só no modo HTTPS gerenciado), `org.reflections:reflections:0.10.2` (rotas automáticas), + um binding SLF4J (ex: `org.slf4j:slf4j-simple:2.0.17`) |
 | Persistência (`Saveable`) | `org.xerial:sqlite-jdbc:3.51.3.0`, `com.zaxxer:HikariCP:7.0.2`, `com.google.code.gson:gson:2.13.2` |
 | JSON (`GsonAPI`) | `com.google.code.gson:gson:2.13.2` |
 | `.env` (`Env`) | `io.github.cdimascio:dotenv-java:3.2.0` |
@@ -284,26 +286,43 @@ Console.setDebugEnabled(true);
 
 ## 🚀 Primeiros passos
 
-O ponto de entrada é a classe `AngatuLib`. Em modo local (sem certificados), o servidor sobe em HTTP na porta **80**; com certificados Let's Encrypt em `/etc/letsencrypt/live/<dominio>`, sobe em **HTTPS** na porta informada (HTTP na porta + 1, com redirecionamento).
+O ponto de entrada é a classe `AngatuLib`. O servidor sobe em **HTTP na porta informada** — o HTTPS é da hospedagem (o Coolify termina o TLS no proxy de borda). O Javalin só gerencia certificado quando isso é pedido explicitamente no quarto parâmetro.
 
 ```java
 import br.com.angatusistemas.lib.AngatuLib;
 
 public class Main {
     public static void main(String[] args) {
-        // Local: http://localhost:80
-        new AngatuLib("localhost", 80, true);
+        int port = Integer.parseInt(System.getenv().getOrDefault("PORT", "8080"));
 
-        // Produção: https://meusite.com.br:443 (HTTP redireciona para HTTPS)
-        // new AngatuLib("meusite.com.br", 443, false);
+        // Padrão: HTTP na porta informada (Coolify cuida do HTTPS)
+        new AngatuLib("meusite.com.br", port, true);
+
+        // Desenvolvimento local
+        // new AngatuLib("localhost", 8080, true);
+
+        // Fora do Coolify, com Let's Encrypt no próprio servidor:
+        // new AngatuLib("meusite.com.br", 443, true, true);
     }
 }
 ```
 
+**Assinaturas:**
+
+```java
+new AngatuLib(String host, int port, boolean bloqByMaxRequisitions)
+new AngatuLib(String host, int port, boolean bloqByMaxRequisitions, boolean manageSsl)
+```
+
+- `manageSsl = false` (padrão) — HTTP na porta informada; certificado, renovação e redirecionamento ficam com o Coolify/proxy reverso.
+- `manageSsl = true` — o Javalin assume o certificado de `/etc/letsencrypt/live/<host>` (HTTPS na porta informada, HTTP em `porta + 1` só para redirecionar). Se os arquivos `fullchain.pem`/`privkey.pem` não existirem, a inicialização falha com `IllegalStateException` — pedir HTTPS e servir HTTP calado seria um rebaixamento silencioso de segurança.
+
+**Ambiente:** `isLocalhost()` não depende mais da pasta de certificados (dentro de um contêiner ela nunca existe). A resolução é: `ANGATU_ENV`/`ENVIRONMENT`/`-Dangatu.env` (`production` ou `development`) → `manageSsl` → nome de host local (`localhost`, `127.0.0.1`, `::1`, `*.local`) → e, na ausência de tudo, **produção**.
+
 Ao iniciar, a biblioteca:
 1. Verifica as dependências dos módulos usados (mensagens claras se faltarem);
 2. Redireciona `System.out` para o log colorido do `Console`;
-3. Configura o Javalin com headers de segurança, rate limiting e SSL (se houver certificados);
+3. Configura o Javalin com headers de segurança, rate limiting e — se pedido — SSL;
 4. Descobre e registra automaticamente todas as rotas (`Route`) e páginas HTML em `/public`;
 5. Agenda a limpeza diária de bloqueios expirados.
 
@@ -342,6 +361,31 @@ seu-projeto/
 
 ---
 
+## 🐳 Deploy no Coolify (Docker)
+
+Todo projeto que usa a AngatuLibraries é publicado pelo **Coolify** e, por isso,
+tem um `Dockerfile` na raiz. Os modelos prontos estão em
+[`templates/`](templates/) — `Dockerfile` e `.dockerignore` para copiar no projeto,
+com o passo a passo em [`templates/README.md`](templates/README.md).
+
+O essencial:
+
+| Item | Valor |
+|---|---|
+| Porta | lida de `PORT` (padrão `8080`), exposta no `Dockerfile` e configurada no Coolify |
+| TLS | do Coolify — a aplicação sobe em HTTP (`new AngatuLib(host, port, true)`) |
+| Proxy | `JavalinAPI.setTrustedProxyHops(1)` para o IP real chegar ao rate limiting |
+| Volume | `/data` montado como *persistent storage*; `ANGATU_DB_PATH=/data/database.db` |
+| Ambiente | `ANGATU_ENV=production` já vem no `Dockerfile` |
+| Saúde | rota `GET /health` fora do rate limit, usada pelo `HEALTHCHECK` |
+
+```bash
+# valide a mesma imagem localmente antes de subir
+docker build -t meuprojeto . && docker run --rm -p 8080:8080 -v meuprojeto-data:/data meuprojeto
+```
+
+---
+
 ## 📖 Guias por funcionalidade
 
 ### 🌐 Servidor web com segurança (JavalinAPI)
@@ -352,7 +396,7 @@ import br.com.angatusistemas.lib.javalin.classes.RateLimitConfig;
 
 public class Config {
     public static void main(String[] args) {
-        new AngatuLib("localhost", 80, true);
+        new AngatuLib("localhost", 8080, true);
 
         // Rate limit por rota: 3 req/s, 20 req/min, bloqueio de 2 min por IP
         JavalinAPI.configureRateLimit("/api/*", new RateLimitConfig(3, 20, 120));
@@ -419,20 +463,52 @@ Usuario u = new Usuario();
 u.setNome("João");
 u.save(); // gera UUID automaticamente se id for nulo
 
-// Buscar (mesma instância sempre — cache em memória)
+// Buscar — vai ao banco e devolve uma instância nova a cada chamada
 Usuario joao = Saveable.findById(Usuario.class, u.getId());
 
-// Consultas customizadas com json_extract (crie índices para performance)
-Saveable.query(Usuario.class,
-    "CREATE INDEX IF NOT EXISTS idx_nome ON usuarios(json_extract(data, '$.nome'))");
+// Alterar registro disputado sem perder a alteração de quem chegou junto
+Saveable.mutate(Conta.class, id, conta -> conta.setSaldo(conta.getSaldo() + 100));
+
+// Gravação otimista: recusa se alguém alterou o registro desde a leitura
+if (!joao.saveIfCurrent()) {
+    joao.reload();   // pega o estado atual e reaplica a alteração
+}
+
+// Duas gravações que precisam valer juntas
+Saveable.transaction(() -> {
+    estoque.save();
+    new Pedido(usuarioId, produtoId).save();
+});
+
+// Índice + busca por campo resolvida no SQL
+Saveable.createIndex(Usuario.class, "email");
+Usuario porEmail = Saveable.findFirstByField(Usuario.class, "email", "joao@exemplo.com");
+
+// Consultas customizadas (sempre com parâmetros posicionais)
 List<Usuario> joes = Saveable.query(Usuario.class,
-    "SELECT data FROM usuarios WHERE json_extract(data, '$.nome') = ?", "João");
+    "SELECT data, version FROM usuarios WHERE json_extract(data, '$.nome') = ?", "João");
 
 // Encerrar a aplicação
 Saveable.shutdown();
 ```
 
-> ⚠️ O cache total carrega a tabela inteira em memória no primeiro acesso — ideal para até centenas de milhares de registros. Para volumes maiores, consulte o JavaDoc de `Saveable`.
+**Concorrência.** Um único pool HikariCP atende o banco inteiro, com SQLite em WAL,
+`busy_timeout` e transações `IMMEDIATE` — a trava de escrita é tomada no início da
+transação, então duas alterações simultâneas são serializadas em vez de se
+sobreporem. A coluna `version` detecta escrita concorrente: `mutate()` lê, altera e
+grava dentro da mesma transação (sem atualização perdida) e `saveIfCurrent()`
+devolve `false` quando o registro mudou desde a leitura. `save()` é atômico e a
+última escrita vence.
+
+**Banco em contêiner.** O arquivo padrão é `database.db` no diretório de trabalho.
+No Coolify, aponte para o volume persistente com `ANGATU_DB_PATH=/data/database.db`
+(ou `-Dangatu.db=...`) — sem isso o banco vive dentro do contêiner e some no deploy
+seguinte.
+
+> ⚠️ **Mudança de comportamento:** não há mais cache total nem *identity map*. Um
+> objeto alterado só é visível para os outros componentes depois do `save()`, e
+> `findById` devolve instâncias distintas a cada chamada. Consultas frequentes por
+> campo pedem `createIndex(...)`; `findAll`/`findByPredicate` percorrem a tabela.
 
 ### 📨 E-mail (EmailAPI)
 
@@ -588,10 +664,12 @@ if (resp2.isSuccess()) {
 2. **Chame `Saveable.shutdown()` e `Task.shutdown()` ao encerrar a aplicação** para fechar pools e evitar vazamentos.
 3. **Chame `BrowserAPI.shutdown()`** ao finalizar uso de scraping/screenshots (encerra os processos headless).
 4. **Use `JavalinAPI.configureRateLimit()` antes de `AngatuLib`** para proteger rotas sensíveis (login, APIs).
-5. **Crie índices `json_extract`** nas tabelas do Saveable para consultas frequentes.
-6. **Não guarde segredos no código** — use o arquivo `.env` (`Env.get()`).
-7. **Use `Password.criptography()`/`checkCriptography()`** para senhas (BCrypt com salt automático).
-8. **Configure `-Dangatu.debug=true` apenas em desenvolvimento** — logs de debug são silenciosos por padrão.
+5. **Crie índices com `Saveable.createIndex(Entidade.class, "campo")`** para toda consulta frequente por campo — sem cache em memória, o índice é o que segura o custo.
+6. **Use `Saveable.mutate(...)` para alterar registro disputado** e `Saveable.transaction(...)` quando duas gravações precisam valer juntas.
+7. **Declare `JavalinAPI.setTrustedProxyHops(1)` atrás do Coolify** (ou de qualquer proxy reverso) — sem isso o rate limiting enxerga o IP do proxy.
+8. **Não guarde segredos no código** — use o arquivo `.env` (`Env.get()`), que também lê as variáveis de ambiente do Coolify.
+9. **Use `Password.criptography()`/`checkCriptography()`** para senhas (BCrypt com salt automático).
+10. **Configure `-Dangatu.debug=true` apenas em desenvolvimento** — logs de debug são silenciosos por padrão.
 
 ---
 
@@ -606,7 +684,10 @@ if (resp2.isSuccess()) {
 | `Credenciais de e-mail não configuradas` | `.env` sem `EMAIL_KEY`/`EMAIL_PASSWORD` | Configure as variáveis e reinicie |
 | `Chaves VAPID não configuradas` | Web Push sem chaves | Chame `PushBootstrap.setup()` (gera e persiste automaticamente) |
 | `Playwright` não abre navegador | Browser não instalado | `mvn exec:java -e -Dexec.mainClass=com.microsoft.playwright.CLI -Dexec.args="install chromium"` |
-| `OutOfMemoryError` no `Saveable` | Tabela com milhões de registros (cache total) | Consulte o JavaDoc de `Saveable` — implemente cache lazy ou use SQL direto |
+| Consulta lenta no `Saveable` | `findAll`/`findByPredicate` percorrendo a tabela inteira | `Saveable.createIndex(Entidade.class, "campo")` + `findByField`/`query` com `json_extract` |
+| Alteração some / valor volta ao anterior | Objeto alterado sem `save()`, ou dois componentes gravando o mesmo registro | Toda alteração exige `save()`; para registro disputado, use `Saveable.mutate(...)` |
+| Banco vazio a cada deploy no Coolify | SQLite dentro do contêiner, sem volume | Monte `/data` como *persistent storage* e defina `ANGATU_DB_PATH=/data/database.db` |
+| `HTTPS foi solicitado (manageSsl = true) mas os certificados não foram encontrados` | Quarto parâmetro `true` sem `fullchain.pem`/`privkey.pem` | Gere os certificados do domínio ou use o construtor de três parâmetros (HTTPS do Coolify) |
 | `Não foi possível registrar a rota` | Registro manual antes do servidor ativo | Registre após o `setup` ou deixe a descoberta automática fazer o trabalho |
 | Logs sem cor no terminal | Terminal sem suporte ANSI ou stream redirecionado | Use um terminal compatível (Windows Terminal, VS Code) |
 
@@ -630,7 +711,7 @@ Ambos: a chave é `IP|path` quando `perIp = true` (padrão). Bloqueios temporár
 Sim. Usa HikariCP (pool de 20 conexões), WAL mode, cache `ConcurrentHashMap` e escritas `INSERT OR REPLACE` transacionais.
 
 **Preciso de certificados para rodar localmente?**
-Não. Sem a pasta de certificados, o `AngatuLib` ativa automaticamente o modo localhost (HTTP na porta 80).
+Não. O padrão é HTTP na porta informada — o HTTPS só entra quando você pede, passando `manageSsl = true` no quarto parâmetro do construtor. No Coolify, o certificado é da hospedagem.
 
 **Playwright não funciona — o que fazer?**
 Instale o browser uma vez: `mvn exec:java -e -Dexec.mainClass=com.microsoft.playwright.CLI -Dexec.args="install chromium"`.
@@ -651,6 +732,12 @@ Instale o browser uma vez: `mvn exec:java -e -Dexec.mainClass=com.microsoft.play
 | Logging do `EmailAPI` padronizado | Mensagens agora usam `Console` (mesma formatação do restante da biblioteca) |
 | **Construtores de `Route` agora `protected`** | Não quebra subclasses existentes (construtor vazio + `super(...)` continua válido); apenas instanciação direta (já impossível — classe abstrata) fica formalmente bloqueada |
 | **Construtor de `Saveable` agora `protected`** | Mesma política — uso exclusivo via `extends`, sem quebra de subclasses existentes |
+| **HTTPS deixou de ser automático** | O construtor de três parâmetros agora sobe em **HTTP na porta informada** (antes: porta 80 em localhost, HTTPS se houvesse certificados). Quem quiser o Javalin gerenciando o certificado passa `true` no quarto parâmetro: `new AngatuLib(host, 443, true, true)` |
+| **`isLocalhost()` mudou de critério** | Não olha mais a pasta de certificados: declare `ANGATU_ENV=production` (o `Dockerfile` modelo já faz isso) ou use `localhost` como host em desenvolvimento; sem declaração, host real é tratado como produção |
+| **`JavalinAPI.setup` com nova assinatura** | `setup(int port, boolean enableRateLimit, boolean manageSsl, File folderCerts)` — a ordem mudou de propósito, para que chamadas antigas quebrem no compilador em vez de inverterem o sentido do parâmetro |
+| **`Saveable` sem cache em memória** | Toda leitura vai ao banco e devolve instância nova; alterações só valem após `save()`. Onde havia leitura-alteração-gravação concorrente, use `Saveable.mutate(...)`; consultas frequentes por campo pedem `Saveable.createIndex(...)` |
+| **Tabelas do `Saveable` ganharam `version`/`updated_at`** | Migração automática na primeira utilização (`ALTER TABLE`) — nada a fazer |
+| **Todo projeto passa a ter `Dockerfile`** | Copie `templates/Dockerfile` e `templates/.dockerignore`, exponha a porta de `PORT` e monte `/data` no Coolify |
 | **Data holders agora `final`** | `Response`, `BlockInfo`, `RateLimitConfig`, `SlidingWindowCounter`, `CachedHtml`, TypeAdapters e opções do `BrowserAPI` não podem mais ser estendidos (nenhum caso de uso legítimo para herança) |
 
 ---
@@ -658,6 +745,8 @@ Instale o browser uma vez: `mvn exec:java -e -Dexec.mainClass=com.microsoft.play
 ## 📝 Changelog resumido
 
 ### Versão atual
+* 🐳 **Hospedagem no Coolify**: HTTP por padrão na porta informada e HTTPS só quando pedido (`new AngatuLib(host, port, rateLimit, manageSsl)`); modelos de `Dockerfile`/`.dockerignore` em `templates/`; ambiente resolvido por `ANGATU_ENV` em vez da pasta de certificados
+* 🗄️ **`Saveable` sem dados em RAM**: cache total e *identity map* removidos — leitura e gravação direto no SQLite, pool único para o banco inteiro, transações `IMMEDIATE`, `busy_timeout`, coluna `version` e travas por registro; novos `mutate()`, `saveIfCurrent()`, `transaction()`, `computeInTransaction()`, `saveAll()`, `createIndex()`, `findFirstByField()`; caminho do banco configurável por `ANGATU_DB_PATH`
 * 🔒 **Restrições de inicialização**: construtores de `Saveable` e `Route` agora `protected` (uso exclusivo via `extends`, com mensagens claras de uso incorreto); `Route` valida servidor ativo e argumentos no construtor; data holders (`Response`, `BlockInfo`, `RateLimitConfig`, `SlidingWindowCounter`, `CachedHtml`, TypeAdapters, opções do `BrowserAPI`) e `Core` agora `final`
 * 🔌 **Carregamento lazy de dependências**: todos os usos de bibliotecas de terceiros movidos para classes helper aninhadas — 39/43 classes públicas passam a ser linkáveis sem dependências e os guards de instalação disparam de fato no primeiro uso (validado por testes de runtime)
 * 📖 JavaDocs estruturados para humanos e IAs (propósito, quando usar/não usar, integração, fluxo, pré/pós-condições, efeitos colaterais, limitações, extensões)

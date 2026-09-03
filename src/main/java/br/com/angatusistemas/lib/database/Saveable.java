@@ -6,14 +6,20 @@ import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.Instant;
 import java.util.ArrayList;
-import java.util.HashMap;
+import java.util.Collection;
 import java.util.List;
-import java.util.Map;
+import java.util.Locale;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Consumer;
 import java.util.function.Predicate;
+import java.util.function.Supplier;
+import java.util.regex.Pattern;
 
 import com.google.gson.Gson;
 import com.zaxxer.hikari.HikariConfig;
@@ -24,26 +30,70 @@ import br.com.angatusistemas.lib.dependencies.Dependencies;
 import br.com.angatusistemas.lib.gson.GsonAPI;
 
 /**
- * [PT] Classe abstrata que fornece persistência automática em SQLite para objetos Java,
- * com cache total em memória (identity map) que garante a mesma instância para cada ID.
+ * Classe abstrata que fornece persistência automática em SQLite para objetos
+ * Java, lendo e gravando <strong>direto no banco</strong> a cada operação.
  *
- * <p><strong>Quando usar:</strong> para persistir entidades simples (dezenas de
- * milhares de registros) sem SQL manual — estenda esta classe, implemente
- * {@link #getId()} e use os métodos estáticos de busca/salvamento. O fluxo
- * típico: <em>estender → criar com construtor vazio → preencher campos →
- * {@code save()} → buscar com {@link #findById(Class, String)}</em>.</p>
+ * <p><strong>Propósito:</strong> persistir entidades sem SQL manual — estenda
+ * esta classe, implemente {@link #getId()} e use os métodos estáticos de
+ * busca/gravação. O fluxo típico: <em>estender → criar com construtor vazio →
+ * preencher campos → {@link #save()} → buscar com
+ * {@link #findById(Class, String)}</em>.</p>
  *
- * <p><strong>Quando NÃO usar:</strong> para tabelas com milhões de registros
- * (o cache total carrega tudo em memória), para relacionamentos complexos ou
+ * <p><strong>Sem dados em memória:</strong> não existe mais cache total nem
+ * <em>identity map</em>. Cada busca vai ao banco e devolve uma instância nova;
+ * cada alteração só existe depois de um {@link #save()} (ou de um
+ * {@link #mutate(Class, String, Consumer)}). Isso é o que permite rodar no
+ * Coolify com vários componentes — rotas, tarefas agendadas, workers — mexendo
+ * nos mesmos registros sem que um sobrescreva o outro a partir de uma cópia
+ * velha guardada na RAM.</p>
+ *
+ * <p><strong>Concorrência:</strong> um único pool HikariCP atende todo o banco,
+ * com SQLite em modo WAL (leitores não bloqueiam o escritor), {@code busy_timeout}
+ * para esperar em vez de falhar e transações {@code IMMEDIATE} — que pegam a
+ * trava de escrita já no início, serializando escritas entre threads e entre
+ * processos. Sobre isso há travas por registro dentro do processo e uma coluna
+ * {@code version} para detecção de escrita concorrente:</p>
+ * <ul>
+ *   <li>{@link #save()} — gravação atômica; a última escrita vence;</li>
+ *   <li>{@link #saveIfCurrent()} — só grava se ninguém alterou o registro desde
+ *       a leitura (devolve {@code false} no conflito);</li>
+ *   <li>{@link #mutate(Class, String, Consumer)} — <strong>a forma correta</strong>
+ *       de alterar um registro disputado: lê, altera e grava dentro da mesma
+ *       transação, sem janela para atualização perdida;</li>
+ *   <li>{@link #transaction(Runnable)} — várias operações com tudo ou nada.</li>
+ * </ul>
+ *
+ * <p><strong>Quando NÃO usar:</strong> para relacionamentos complexos ou
  * consultas analíticas (use SQL direto com o driver) e para dados binários
- * grandes (ex: imagens — considere armazenar em disco e persistir o caminho).
+ * grandes (ex: imagens — prefira salvar em disco/volume e persistir o caminho).
  * <strong>Não instancie esta classe diretamente</strong> — é abstrata e o
  * construtor é {@code protected}: o uso é exclusivamente via {@code extends}.</p>
  *
- * <p><strong>Restrição de inicialização:</strong> esta classe funciona apenas
- * por herança. Subclasses precisam de um construtor vazio (para o Gson
- * desserializar) e de campos serializáveis. Instanciação direta é bloqueada
- * pelo compilador (classe abstrata).</p>
+ * <p><strong>Restrição de inicialização:</strong> subclasses precisam de um
+ * construtor vazio (para o Gson desserializar) e de campos serializáveis.</p>
+ *
+ * <p><strong>Mapeamento:</strong> cada subclasse vira uma tabela — nome da
+ * classe em minúsculas, com 's' no final se ainda não terminar em 's'
+ * ({@code User} → {@code users}). As colunas são {@code id} (TEXT, chave
+ * primária), {@code data} (TEXT, o objeto em JSON), {@code version} (INTEGER) e
+ * {@code updated_at} (INTEGER, época em segundos). Tabelas criadas por versões
+ * anteriores ganham as colunas novas automaticamente na primeira utilização.</p>
+ *
+ * <p><strong>Banco de dados:</strong> {@code database.db} no diretório de
+ * trabalho. Em contêiner, aponte para o volume persistente com
+ * {@code ANGATU_DB_PATH=/data/database.db} (ou {@code -Dangatu.db=...}) — sem
+ * isso o banco vive dentro do contêiner e some no próximo deploy.</p>
+ *
+ * <p><strong>Desempenho:</strong> busca por ID é um SELECT na chave primária.
+ * {@link #findAll(Class)} e {@link #findByPredicate(Class, Predicate)} leem a
+ * tabela inteira — para consultas frequentes por campo, crie o índice com
+ * {@link #createIndex(Class, String)} e use {@link #findByField(Class, String, Object)}
+ * ou {@link #query(Class, String, Object...)}, que resolvem no SQL.</p>
+ *
+ * <p><strong>Boas práticas:</strong> use {@link #query(Class, String, Object...)}
+ * com parâmetros posicionais (nunca concatene valores no SQL); prefira
+ * {@link #mutate(Class, String, Consumer)} a ler-alterar-salvar quando o
+ * registro for disputado; chame {@link #shutdown()} ao encerrar a aplicação.</p>
  *
  * <p><strong>Integração:</strong> entidades internas como {@code PermanentBlock},
  * {@code SuspectIp}, {@code RouteRateLimitConfig}, {@code Key} (Web Push) e
@@ -51,153 +101,66 @@ import br.com.angatusistemas.lib.gson.GsonAPI;
  * dependências (sqlite-jdbc, HikariCP, gson) são verificadas no primeiro uso
  * com instruções de instalação se ausentes.</p>
  *
- * <p><strong>Boas práticas:</strong> crie índices via
- * {@code json_extract(data, '$.campo')} para consultas frequentes; use
- * {@link #query(Class, String, Object...)} com parâmetros posicionais (nunca
- * concatene SQL); chame {@link #shutdown()} ao encerrar a aplicação.</p>
+ * <p><strong>Limitações:</strong> SQLite é um banco de arquivo — vários
+ * contêineres só compartilham o mesmo banco se compartilharem o mesmo volume no
+ * mesmo host; para réplicas em máquinas diferentes, use um banco cliente/servidor.
+ * Campos {@code transient} não são persistidos.</p>
  *
- * <p><strong>Limitações:</strong> cache total em memória (ideal para até
- * centenas de milhares de registros); banco fixo {@code database.db} na raiz do
- * projeto; escrita usa {@code INSERT OR REPLACE} (substituição por ID).</p>
- *
- * <p><strong>Extensões futuras:</strong> o método privado
- * {@code loadAllIntoCache} pode ser substituído por cache lazy em subclasses;
- * a classe não é {@code sealed} propositalmente — consumidores precisam
- * estendê-la para criar entidades.</p>
- * <p>
- * Cada subclasse concreta (ex: {@code Usuario}, {@code Produto}) é mapeada para uma tabela própria
- * no banco de dados {@code database.db}. O nome da tabela é o nome da classe em minúsculas,
- * acrescido de 's' se não terminar com 's' (ex: {@code Usuario} → {@code usuarios},
- * {@code Produto} → {@code produtos}, {@code Pessoa} → {@code pessoas}).
- * </p>
- * <p>
- * Os objetos são serializados em JSON (via Gson) e armazenados em uma coluna {@code data}.
- * A tabela possui uma chave primária {@code id} (TEXT), que é o identificador único do objeto.
- * </p>
- * <p>
- * <b>Cache total:</b> Ao primeiro acesso a uma classe (ex: {@link #findById} ou {@link #findAll}),
- * todos os registros da tabela são carregados para um cache em memória. A partir daí,
- * qualquer operação de busca retorna a <strong>mesma instância Java</strong> para um mesmo ID.
- Isso resolve problemas de concorrência e inconsistência (ex: modificar um objeto em dois lugares diferentes).
- * </p>
- * <p>
- * <b>Gerenciamento de ID:</b>
- * O ID é obtido através do método abstrato {@link #getId()}. Se o objeto não tiver um ID
- * (retornar {@code null} ou vazio), um UUID aleatório é gerado e injetado via reflexão no campo
- * chamado "id" ou em qualquer campo que termine com "id" (case‑insensitive). O objeto então
- * passa a ter esse ID permanentemente.
- * </p>
- * <p>
- * <b>Sincronização:</b>
- * Os métodos {@link #save()}, {@link #delete()} e {@link #deleteById(Class, String)} mantêm
- * o cache atualizado automaticamente. O método {@link #reload()} recarrega os dados do banco
- * e atualiza a instância atual (que permanece a mesma no cache).
- * </p>
- * <p>
- * <b>Concorrência e performance:</b>
- * A classe utiliza um pool de conexões HikariCP (máx. 20 conexões) e configura o SQLite em modo
- * WAL ({@code PRAGMA journal_mode=WAL}), permitindo leituras concorrentes durante escritas.
- * Escritas são transacionais e bloqueiam apenas a linha em questão (devido ao uso de
- * {@code INSERT OR REPLACE}). Leituras por ID são extremamente rápidas (acesso direto ao cache).
- * </p>
- * <p>
- * <b>Suporte a milhões de objetos:</b>
- * <strong>Atenção:</strong> O cache total carrega <strong>todos</strong> os objetos da tabela na memória.
- * Para tabelas com milhões de registros, isso pode causar {@code OutOfMemoryError}.
- * Se você precisa trabalhar com grandes volumes, modifique o método {@link #loadAllIntoCache(Class)}
- * para implementar um cache lazy (sob demanda). Esta implementação é ideal para conjuntos de dados
- * de até centenas de milhares de registros.
- * </p>
- * <p>
- * <b>Índices customizados:</b>
- * Você pode criar índices em campos extraídos do JSON usando a função {@code json_extract}.
- * Exemplo:
- * <pre>
- * Saveable.query(Usuario.class,
- *     "CREATE INDEX IF NOT EXISTS idx_nome ON usuarios(json_extract(data, '$.nome'))");
- * </pre>
- * </p>
- * <p>
- * <b>Encerramento do pool:</b>
- * Ao final da aplicação, chame {@link #shutdown()} para fechar todas as conexões e limpar o cache.
- * </p>
- *
- * [EN] Abstract class that provides automatic SQLite persistence for Java objects,
- * with full in‑memory caching (identity map) ensuring the same instance per ID.
- * <p>
- * Each concrete subclass (e.g. {@code User}, {@code Product}) is mapped to its own table
- * in the {@code database.db} file. The table name is the lowercased class name, plus an 's'
- * if it doesn't already end with 's' (e.g. {@code User} → {@code users}).
- * </p>
- * <p>
- * Objects are serialized to JSON (via Gson) and stored in a {@code data} column.
- * The table has a primary key {@code id} (TEXT) which is the unique identifier.
- * </p>
- * <p>
- * <b>Full caching:</b> On first access to a class (e.g. {@link #findById} or {@link #findAll}),
- * all records are loaded into an in‑memory cache. From that point on, any lookup returns the
- * <strong>same Java instance</strong> for a given ID. This solves concurrency and inconsistency issues
- * (e.g., modifying an object in two different places).
- * </p>
- * <p>
- * <b>ID management:</b>
- * The ID is obtained via the abstract method {@link #getId()}. If the object has no ID
- * (returns {@code null} or empty), a random UUID is generated and injected via reflection
- * into a field named "id" or any field ending with "id" (case‑insensitive). The object then
- * permanently owns that ID.
- * </p>
- * <p>
- * <b>Synchronization:</b>
- * Methods {@link #save()}, {@link #delete()} and {@link #deleteById(Class, String)} keep the cache
- * updated automatically. {@link #reload()} fetches fresh data from the database and updates the
- * current instance (which remains the same in the cache).
- * </p>
- * <p>
- * <b>Concurrency and performance:</b>
- * A HikariCP connection pool (max 20 connections) is used. SQLite is configured in WAL mode
- * ({@code PRAGMA journal_mode=WAL}), allowing concurrent reads during writes.
- * Writes are transactional and lock only the affected row (due to {@code INSERT OR REPLACE}).
- * Reads by ID are extremely fast (direct cache access).
- * </p>
- * <p>
- * <b>Support for millions of objects:</b>
- * <strong>Caution:</strong> Full caching loads <strong>all</strong> objects into memory.
- * For tables with millions of rows, this may cause {@code OutOfMemoryError}.
- * If you work with large datasets, modify {@link #loadAllIntoCache(Class)} to implement lazy caching.
- * This implementation is ideal for up to hundreds of thousands of records.
- * </p>
- * <p>
- * <b>Custom indexes:</b>
- * You can create indexes on JSON fields using the {@code json_extract} function.
- * Example:
- * <pre>
- * Saveable.query(User.class,
- *     "CREATE INDEX IF NOT EXISTS idx_name ON users(json_extract(data, '$.name'))");
- * </pre>
- * </p>
- * <p>
- * <b>Shutdown:</b>
- * Call {@link #shutdown()} when your application terminates to close all connections and clear the cache.
- * </p>
- *
- * @author Equipe Angatu Sistemas
+ * @author Angatu Sistemas
  * @see GsonAPI
  * @see <a href="https://www.sqlite.org/wal.html">SQLite WAL mode</a>
  */
 public abstract class Saveable {
 
-    // Pool de conexões por classe
-    private static final Map<Class<?>, HikariDataSource> DATA_SOURCES = new HashMap<>();
-    private static final Object DATA_SOURCE_LOCK = new Object();
-
-    // Cache principal: classe -> (id -> instância)
-    // Carregado completamente na primeira vez que a classe é acessada
-    private static final Map<Class<?>, Map<String, Object>> CACHE = new ConcurrentHashMap<>();
+    // ==================== CONSTANTES ====================
 
     /** Coordenadas Maven das dependências do módulo de persistência. */
     private static final String SQLITE_COORDINATES = "org.xerial:sqlite-jdbc:3.51.3.0";
     private static final String HIKARI_COORDINATES = "com.zaxxer.hikari:HikariCP:7.0.2";
     private static final String PERSISTENCE_FEATURE = "Persistência (Saveable)";
+
+    /** Arquivo padrão do banco, relativo ao diretório de trabalho. */
+    private static final String DEFAULT_DATABASE = "database.db";
+    /** Conexões do pool: leitores concorrentes; a escrita é serializada pelo SQLite. */
+    private static final int POOL_SIZE = 12;
+    /** Tempo que uma conexão espera pela trava de escrita antes de desistir (ms). */
+    private static final String BUSY_TIMEOUT_MS = "5000";
+    /** Tentativas de gravação otimista antes de desistir de um registro disputado. */
+    private static final int MUTATE_ATTEMPTS = 5;
+    /** Quantidade de travas por faixa (striped locks) — limita a disputa sem crescer sem fim. */
+    private static final int LOCK_STRIPES = 64;
+    /** Nomes de campo aceitos no SQL de índice/consulta por campo. */
+    private static final Pattern SAFE_FIELD = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*");
+    /** Versão desconhecida: objeto novo ou nunca lido do banco. */
+    private static final long UNKNOWN_VERSION = -1L;
+
+    // ==================== ESTADO GLOBAL ====================
+
+    /** Pool único para todo o banco (antes havia um pool por classe). */
+    private static volatile HikariDataSource dataSource;
+    private static final Object DATA_SOURCE_LOCK = new Object();
+
+    /** Classes cuja tabela já foi criada/migrada nesta execução. */
+    private static final Set<Class<?>> PREPARED_TABLES = ConcurrentHashMap.newKeySet();
+    private static final Object PREPARE_LOCK = new Object();
+
+    /** Conexão presa à thread enquanto durar uma transação explícita. */
+    private static final ThreadLocal<Connection> CURRENT_TRANSACTION = new ThreadLocal<>();
+
+    /** Travas por faixa: serializam leitura-alteração-gravação do mesmo registro. */
+    private static final ReentrantLock[] ROW_LOCKS = new ReentrantLock[LOCK_STRIPES];
+
+    static {
+        for (int i = 0; i < LOCK_STRIPES; i++) ROW_LOCKS[i] = new ReentrantLock();
+    }
+
+    // ==================== ESTADO DA INSTÂNCIA ====================
+
+    /**
+     * Versão do registro no momento da leitura. {@code transient} de propósito:
+     * é controle de concorrência, não faz parte do JSON persistido.
+     */
+    private transient long persistedVersion = UNKNOWN_VERSION;
 
     // ==================== CONSTRUTOR ====================
 
@@ -208,10 +171,10 @@ public abstract class Saveable {
      * <p><strong>Forma correta de uso:</strong> crie uma entidade concreta que
      * estenda {@code Saveable} e implemente {@link #getId()}:
      * <pre>
-     * public class Usuario extends Saveable {
+     * public class User extends Saveable {
      *     private String id;
-     *     private String nome;
-     *     public Usuario() {} // obrigatório para desserialização Gson
+     *     private String name;
+     *     public User() {} // obrigatório para desserialização Gson
      *     &#64;Override public String getId() { return id; }
      * }
      * </pre>
@@ -219,582 +182,901 @@ public abstract class Saveable {
      *
      * <p><strong>Uso incorreto:</strong> instanciar {@code Saveable} diretamente
      * é impossível — a classe é abstrata e o construtor é {@code protected}.
-     * Subclasses anônimas também são desencorajadas: uma entidade deve ter
-     * campos persistidos e um construtor vazio para o Gson.</p>
-     *
-     * <p>A manipulação dos dados usa os métodos estáticos da classe
-     * ({@link #findById(Class, String)}, {@link #findAll(Class)},
-     * {@link #query(Class, String, Object...)} etc.), nunca a instanciação
-     * manual do {@code Saveable}.</p>
+     * Subclasses anônimas também são desencorajadas: uma entidade precisa de
+     * campos persistidos e de um construtor vazio para o Gson.</p>
      */
     protected Saveable() {
         // Construtor protegido: garante que a classe só seja utilizada via herança
     }
 
-    // ==================== MÉTODOS ABSTRATOS ====================
+    // ==================== MÉTODO ABSTRATO ====================
 
     /**
-     * [PT] Retorna o identificador único do objeto.
-     * <p>
-     * A implementação deve simplesmente retornar o valor do campo que representa o ID
-     * (ex: {@code return this.id;}). Se o objeto ainda não tiver um ID (campo nulo),
-     * este método pode retornar {@code null} – um UUID será gerado e injetado automaticamente.
-     * </p>
+     * Retorna o identificador único do objeto.
      *
-     * [EN] Returns the unique identifier of the object.
-     * <p>
-     * The implementation should simply return the value of the ID field
-     * (e.g. {@code return this.id;}). If the object does not yet have an ID (field is null),
-     * this method may return {@code null} – a UUID will be generated and injected automatically.
-     * </p>
+     * <p>A implementação deve apenas devolver o campo do ID
+     * ({@code return this.id;}). Se ainda não houver ID, pode retornar
+     * {@code null} — um UUID é gerado e injetado na primeira gravação.</p>
      *
-     * @return [PT] string do ID ou {@code null} se ainda não definido
-     *         [EN] ID string or {@code null} if not yet set
+     * @return Identificador do objeto, ou {@code null} se ainda não definido
      */
     public abstract String getId();
 
-    // ==================== MÉTODOS DE INSTÂNCIA ====================
+    // ==================== INSTÂNCIA: GRAVAÇÃO ====================
 
     /**
-     * [PT] Salva o objeto atual no banco de dados (INSERT OR REPLACE).
-     * <p>
-     * Se o objeto não possuir um ID, um UUID é gerado, injetado no objeto via reflexão,
-     * e então o registro é salvo. Após salvar, o cache é atualizado com a mesma instância.
-     * Operação thread-safe.
-     * </p>
+     * Grava o objeto no banco (inserção ou atualização), de forma atômica.
      *
-     * [EN] Saves the current object to the database (INSERT OR REPLACE).
-     * <p>
-     * If the object has no ID, a UUID is generated, injected via reflection,
-     * and then the record is saved. After saving, the cache is updated with the same instance.
-     * Thread-safe operation.
-     * </p>
+     * <p>A gravação inteira acontece dentro de uma transação de escrita: ou o
+     * registro fica completo, ou nada muda. Quando dois componentes gravam o
+     * mesmo registro ao mesmo tempo, as escritas são serializadas e a última
+     * vence — nenhuma delas corrompe o registro, mas a anterior é substituída.
+     * Se o que você quer é alterar um campo sem perder a alteração do outro, use
+     * {@link #mutate(Class, String, Consumer)}.</p>
      *
-     * @return [PT] {@code true} se salvo com sucesso
-     *         [EN] {@code true} if saved successfully
+     * <p>Sem ID, um UUID é gerado e injetado via reflexão no campo {@code id}
+     * (ou no primeiro campo terminado em "id").</p>
+     *
+     * @return {@code true} se gravado com sucesso
      */
     public boolean save() {
-        // Garante que o cache está carregado antes de modificar
-        ensureCacheLoaded(this.getClass());
-
-        String id = getId();
-        if (id == null || id.isEmpty()) {
-            id = UUID.randomUUID().toString();
-            try {
-                injectIdField(this, id);
-            } catch (Exception e) {
-                Console.error("Falha ao injetar ID em %s", e, this.getClass().getSimpleName());
-                return false;
-            }
-        }
-        String tableName = getTableName(this.getClass());
+        Class<?> type = getClass();
+        String id = ensureId();
+        if (id == null) return false;
+        prepare(type);
         String json = GsonAPI.get().toJson(this);
-        String sql = "INSERT OR REPLACE INTO " + tableName + " (id, data) VALUES (?, ?)";
-        try (Connection conn = getDataSource(this.getClass()).getConnection();
-             PreparedStatement pstmt = conn.prepareStatement(sql)) {
-            pstmt.setString(1, id);
-            pstmt.setString(2, json);
-            pstmt.executeUpdate();
-            // Atualiza o cache com a mesma instância (já é a atual)
-            cachePut(this.getClass(), id, this);
-            return true;
-        } catch (SQLException e) {
-            Console.error("Erro ao salvar %s id=%s", e, this.getClass().getSimpleName(), id);
-            return false;
+        String table = tableName(type);
+
+        ReentrantLock lock = acquireRowLock(type, id);
+        try {
+            Boolean saved = write(Boolean.FALSE, "salvar " + type.getSimpleName() + " id=" + id, conn -> {
+                upsert(conn, table, id, json);
+                persistedVersion = currentVersion(conn, table, id);
+                return Boolean.TRUE;
+            });
+            return Boolean.TRUE.equals(saved);
+        } finally {
+            releaseRowLock(lock);
         }
     }
 
     /**
-     * [PT] Exclui o objeto atual do banco de dados, baseado em seu ID.
-     * Também o remove do cache.
+     * Grava o objeto somente se ninguém tiver alterado o registro desde a
+     * leitura (controle otimista pela coluna {@code version}).
      *
-     * [EN] Deletes the current object from the database based on its ID.
-     * Also removes it from the cache.
+     * <p>Use quando perder a alteração de outro componente for inaceitável e
+     * você quiser tratar o conflito no seu código — recarregando com
+     * {@link #reload()} e tentando de novo, ou avisando o usuário. Para o caso
+     * comum, {@link #mutate(Class, String, Consumer)} resolve o conflito
+     * sozinho.</p>
      *
-     * @return [PT] {@code true} se o registro foi removido ou não existia
-     *         [EN] {@code true} if the record was removed or did not exist
+     * @return {@code true} se gravado; {@code false} se o registro foi alterado
+     *         por outro componente (ou já existia, no caso de objeto novo)
+     */
+    public boolean saveIfCurrent() {
+        Class<?> type = getClass();
+        String id = ensureId();
+        if (id == null) return false;
+        prepare(type);
+        String json = GsonAPI.get().toJson(this);
+        String table = tableName(type);
+        long expected = persistedVersion;
+        long now = Instant.now().getEpochSecond();
+
+        ReentrantLock lock = acquireRowLock(type, id);
+        try {
+            Boolean saved = write(Boolean.FALSE, "salvar " + type.getSimpleName() + " id=" + id, conn -> {
+                if (expected == UNKNOWN_VERSION) {
+                    // Objeto novo: só grava se o ID ainda não existir
+                    String sql = "INSERT INTO " + table + " (id, data, version, updated_at) VALUES (?, ?, 1, ?)"
+                            + " ON CONFLICT(id) DO NOTHING";
+                    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                        ps.setString(1, id);
+                        ps.setString(2, json);
+                        ps.setLong(3, now);
+                        if (ps.executeUpdate() == 0) {
+                            Console.warn("saveIfCurrent() em %s id=%s: o registro já existe e esta instância não sabe a"
+                                    + " versão dele. Leia com findById/findByField (ou traga a coluna version na"
+                                    + " consulta) antes de gravar de forma otimista.", table, id);
+                            return Boolean.FALSE;
+                        }
+                    }
+                    persistedVersion = 1L;
+                    return Boolean.TRUE;
+                }
+                String sql = "UPDATE " + table + " SET data = ?, version = version + 1, updated_at = ?"
+                        + " WHERE id = ? AND version = ?";
+                try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                    ps.setString(1, json);
+                    ps.setLong(2, now);
+                    ps.setString(3, id);
+                    ps.setLong(4, expected);
+                    if (ps.executeUpdate() == 0) return Boolean.FALSE;
+                }
+                persistedVersion = expected + 1;
+                return Boolean.TRUE;
+            });
+            return Boolean.TRUE.equals(saved);
+        } finally {
+            releaseRowLock(lock);
+        }
+    }
+
+    /**
+     * Exclui o registro correspondente a este objeto.
+     *
+     * @return {@code true} se o registro foi removido
      */
     public boolean delete() {
         String id = getId();
         if (id == null) return false;
-        return deleteById(this.getClass(), id);
+        return deleteById(getClass(), id);
     }
 
     /**
-     * [PT] Recarrega os dados do objeto a partir do banco de dados, sobrescrevendo
-     * os campos atuais com os valores persistidos.
-     * <p>
-     * Útil quando o objeto pode ter sido modificado externamente. A instância
-     * permanece a mesma (e continua no cache).
-     * </p>
+     * Recarrega os campos do objeto a partir do banco, descartando alterações
+     * locais não gravadas.
      *
-     * [EN] Reloads the object's data from the database, overwriting current fields
-     * with persisted values.
-     * <p>
-     * Useful when the object may have been modified externally. The instance remains
-     * the same (and stays in the cache).
-     * </p>
+     * <p>É o passo natural depois de um {@link #saveIfCurrent()} recusado: pega
+     * o estado atual do registro para reaplicar a alteração.</p>
      *
-     * @return [PT] a própria instância recarregada, ou {@code null} se o ID for inválido ou não encontrado
-     *         [EN] the reloaded instance itself, or {@code null} if ID is invalid or not found
+     * @return A própria instância recarregada, ou {@code null} se o registro não
+     *         existir mais
      */
     public Saveable reload() {
         String id = getId();
         if (id == null) return null;
+        Class<?> type = getClass();
+        prepare(type);
+        String table = tableName(type);
 
-        ensureCacheLoaded(this.getClass());
-
-        String tableName = getTableName(this.getClass());
-        String sql = "SELECT data FROM " + tableName + " WHERE id = ?";
-        try (Connection conn = getDataSource(this.getClass()).getConnection();
-             PreparedStatement pstmt = conn.prepareStatement(sql)) {
-            pstmt.setString(1, id);
-            ResultSet rs = pstmt.executeQuery();
-            if (rs.next()) {
-                String json = rs.getString("data");
-                Saveable fresh = (Saveable) GsonAPI.get().fromJson(json, this.getClass());
-                copyFields(fresh, this);
-                // A instância já está no cache (garantido pelo carregamento inicial ou save)
-                cachePut(this.getClass(), id, this);
-                return this;
-            }
-            return null;
-        } catch (SQLException e) {
-            Console.error("Erro ao recarregar %s id=%s", e, this.getClass().getSimpleName(), id);
-            return null;
-        }
-    }
-
-    // ==================== MÉTODOS ESTÁTICOS (MANAGER) ====================
-
-    /**
-     * [PT] Busca um objeto pelo ID. Sempre retorna a mesma instância para um mesmo ID.
-     * <p>
-     * Performance: acesso direto ao cache (O(1)). Milissegundos mesmo com milhões de registros.
-     * Se o cache ainda não foi carregado, todos os registros da tabela são carregados na memória.
-     * </p>
-     *
-     * [EN] Finds an object by its ID. Always returns the same instance for the same ID.
-     * <p>
-     * Performance: direct cache access (O(1)). Milliseconds even with millions of records.
-     * If the cache hasn't been loaded yet, all records are loaded into memory.
-     * </p>
-     *
-     * @param clazz [PT] classe do objeto (ex: Usuario.class)
-     *              [EN] class of the object (e.g. User.class)
-     * @param id    [PT] identificador único
-     *              [EN] unique identifier
-     * @param <T>   [PT] tipo da classe
-     *              [EN] type of the class
-     * @return [PT] objeto encontrado ou {@code null}
-     *         [EN] found object or {@code null}
-     */
-    public static <T> T findById(Class<T> clazz, String id) {
-        ensureCacheLoaded(clazz);
-        Map<String, Object> classCache = CACHE.get(clazz);
-        if (classCache != null && classCache.containsKey(id)) {
-            return clazz.cast(classCache.get(id));
-        }
-        return null;
-    }
-
-    /**
-     * [PT] Retorna TODOS os objetos da classe (do cache).
-     * <p>
-     * <strong>ATENÇÃO:</strong> Este método retorna todos os objetos do cache em memória.
-     * Se você estiver usando cache total, isso é rápido mas consome memória.
-     * Para grandes volumes, o cache total não é recomendado.
-     * </p>
-     *
-     * [EN] Returns ALL objects of the class (from cache).
-     * <p>
-     * <strong>WARNING:</strong> This method returns all objects from the in‑memory cache.
-     * If you use full caching, this is fast but consumes memory.
-     * For large datasets, full caching is not recommended.
-     * </p>
-     *
-     * @param clazz [PT] classe dos objetos
-     *              [EN] object class
-     * @param <T>   [PT] tipo
-     *              [EN] type
-     * @return [PT] lista com todos os objetos (pode ser vazia)
-     *         [EN] list with all objects (may be empty)
-     */
-    public static <T> List<T> findAll(Class<T> clazz) {
-        ensureCacheLoaded(clazz);
-        Map<String, Object> classCache = CACHE.get(clazz);
-        if (classCache == null) return new ArrayList<>();
-        List<T> result = new ArrayList<>(classCache.size());
-        for (Object value : classCache.values()) {
-            result.add(clazz.cast(value));
-        }
-        return result;
-    }
-
-    /**
-     * [PT] Filtra objetos usando um predicado em memória (sobre o cache).
-     * <p>
-     * Como opera sobre o cache, é eficiente para conjuntos carregados.
-     * </p>
-     *
-     * [EN] Filters objects using an in‑memory predicate (over the cache).
-     * <p>
-     * Since it operates on the cache, it is efficient for loaded sets.
-     * </p>
-     *
-     * @param clazz     [PT] classe dos objetos
-     *                  [EN] object class
-     * @param predicate [PT] condição de teste
-     *                  [EN] test condition
-     * @param <T>       [PT] tipo
-     *                  [EN] type
-     * @return [PT] lista filtrada (nunca nula)
-     *         [EN] filtered list (never null)
-     */
-    public static <T> List<T> findByPredicate(Class<T> clazz, Predicate<T> predicate) {
-        List<T> all = findAll(clazz);
-        List<T> result = new ArrayList<>();
-        for (T obj : all) {
-            if (predicate.test(obj)) {
-                result.add(obj);
-            }
-        }
-        return result;
-    }
-
-    /**
-     * [PT] Busca objetos por um campo via reflexão (sobre o cache).
-     * <p>
-     * Como opera sobre o cache, é rápido para conjuntos carregados.
-     * </p>
-     *
-     * [EN] Finds objects by a field using reflection (over the cache).
-     * <p>
-     * Since it operates on the cache, it is fast for loaded sets.
-     * </p>
-     *
-     * @param clazz     [PT] classe dos objetos
-     *                  [EN] object class
-     * @param fieldName [PT] nome exato do campo (ex: "nome")
-     *                  [EN] exact field name (e.g., "name")
-     * @param value     [PT] valor a ser comparado
-     *                  [EN] value to compare
-     * @param <T>       [PT] tipo
-     *                  [EN] type
-     * @return [PT] lista de objetos que possuem o campo com o valor especificado
-     *         [EN] list of objects that have the field with the specified value
-     */
-    public static <T> List<T> findByField(Class<T> clazz, String fieldName, Object value) {
-        return findByPredicate(clazz, obj -> {
-            try {
-                java.lang.reflect.Field field = clazz.getDeclaredField(fieldName);
-                field.setAccessible(true);
-                return Objects.equals(field.get(obj), value);
-            } catch (Exception e) {
-                return false;
-            }
+        return read(null, "recarregar " + type.getSimpleName() + " id=" + id, conn -> {
+            Row row = selectRow(conn, table, id);
+            if (row == null) return null;
+            Object fresh = GsonAPI.get().fromJson(row.json(), type);
+            copyFields(fresh, this);
+            persistedVersion = row.version();
+            return this;
         });
     }
 
     /**
-     * [PT] Exclui um objeto pelo ID (banco e cache).
+     * Versão do registro conhecida por esta instância.
      *
-     * [EN] Deletes an object by its ID (database and cache).
+     * <p>Começa em {@code -1} (objeto novo), passa a valer o número gravado no
+     * banco após a leitura ou a gravação e cresce a cada alteração. Serve para
+     * o controle otimista de {@link #saveIfCurrent()}.</p>
      *
-     * @param clazz [PT] classe do objeto
-     *              [EN] object class
-     * @param id    [PT] identificador
-     *              [EN] identifier
-     * @return [PT] {@code true} se o registro foi removido
-     *         [EN] {@code true} if the record was deleted
+     * @return Versão conhecida do registro, ou {@code -1} se desconhecida
      */
-    public static boolean deleteById(Class<?> clazz, String id) {
-        ensureCacheLoaded(clazz);
-        String tableName = getTableName(clazz);
-        String sql = "DELETE FROM " + tableName + " WHERE id = ?";
-        try (Connection conn = getDataSource(clazz).getConnection();
-             PreparedStatement pstmt = conn.prepareStatement(sql)) {
-            // CORREÇÃO: definir o parâmetro antes de executar
-            pstmt.setString(1, id);
-            int affectedRows = pstmt.executeUpdate();
-            boolean deleted = affectedRows > 0;
-            if (deleted) {
-                Map<String, Object> classCache = CACHE.get(clazz);
-                if (classCache != null) classCache.remove(id);
-            }
-            return deleted;
-        } catch (SQLException e) {
-            Console.error("Erro ao deletar %s id=%s", e, clazz.getSimpleName(), id);
-            return false;
-        }
+    public long getPersistedVersion() {
+        return persistedVersion;
+    }
+
+    // ==================== ESTÁTICOS: LEITURA ====================
+
+    /**
+     * Busca um objeto pelo ID, lendo direto do banco.
+     *
+     * <p>Cada chamada devolve uma instância nova: alterar o objeto retornado não
+     * afeta ninguém até o {@link #save()}.</p>
+     *
+     * @param clazz Classe da entidade (ex: {@code User.class})
+     * @param id    Identificador único
+     * @param <T>   Tipo da entidade
+     * @return Objeto encontrado, ou {@code null}
+     */
+    public static <T> T findById(Class<T> clazz, String id) {
+        if (id == null) return null;
+        prepare(clazz);
+        String table = tableName(clazz);
+        return read(null, "buscar " + clazz.getSimpleName() + " id=" + id, conn -> {
+            Row row = selectRow(conn, table, id);
+            return row == null ? null : materialize(clazz, row.json(), row.version());
+        });
     }
 
     /**
-     * [PT] Exclui todos os objetos da classe (remove todos os registros da tabela e limpa o cache).
+     * Retorna todos os objetos da classe.
      *
-     * [EN] Deletes all objects of the class (truncates the table and clears the cache).
+     * <p>Lê a tabela inteira: use com consciência do tamanho dela. Para filtrar,
+     * prefira {@link #findByField(Class, String, Object)} ou
+     * {@link #query(Class, String, Object...)}, que filtram no banco.</p>
      *
-     * @param clazz [PT] classe dos objetos
-     *              [EN] object class
-     * @return [PT] número de registros removidos
-     *         [EN] number of records removed
+     * @param clazz Classe da entidade
+     * @param <T>   Tipo da entidade
+     * @return Lista com todos os objetos (pode ser vazia, nunca {@code null})
      */
-    public static int deleteAll(Class<?> clazz) {
-        ensureCacheLoaded(clazz);
-        String tableName = getTableName(clazz);
-        String sql = "DELETE FROM " + tableName;
-        try (Connection conn = getDataSource(clazz).getConnection();
-             Statement stmt = conn.createStatement()) {
-            int deleted = stmt.executeUpdate(sql);
-            if (deleted > 0) {
-                CACHE.remove(clazz); // remove todo o cache da classe
-            }
-            return deleted;
-        } catch (SQLException e) {
-            Console.error("Erro ao deletar todos %s", e, clazz.getSimpleName());
-            return 0;
-        }
+    public static <T> List<T> findAll(Class<T> clazz) {
+        prepare(clazz);
+        return query(clazz, "SELECT data, version FROM " + tableName(clazz));
     }
 
     /**
-     * [PT] Verifica se existe um objeto com o ID informado (usando cache).
+     * Filtra objetos com um predicado avaliado em memória.
      *
-     * [EN] Checks whether an object with the given ID exists (using cache).
+     * <p>Percorre a tabela inteira e desserializa cada registro — conveniente,
+     * mas caro. Quando o filtro é por um campo, use
+     * {@link #findByField(Class, String, Object)} com o índice criado por
+     * {@link #createIndex(Class, String)}.</p>
      *
-     * @param clazz [PT] classe
-     *              [EN] class
-     * @param id    [PT] identificador
-     *              [EN] identifier
-     * @return [PT] {@code true} se existir
-     *         [EN] {@code true} if exists
+     * @param clazz     Classe da entidade
+     * @param predicate Condição de seleção
+     * @param <T>       Tipo da entidade
+     * @return Lista filtrada (nunca {@code null})
+     */
+    public static <T> List<T> findByPredicate(Class<T> clazz, Predicate<T> predicate) {
+        List<T> result = new ArrayList<>();
+        for (T obj : findAll(clazz)) {
+            if (predicate.test(obj)) result.add(obj);
+        }
+        return result;
+    }
+
+    /**
+     * Busca objetos por um campo do JSON.
+     *
+     * <p>Valores simples (texto, número, booleano) são filtrados pelo próprio
+     * SQLite com {@code json_extract} — rápido, e mais ainda com o índice de
+     * {@link #createIndex(Class, String)}. Outros tipos caem no filtro em
+     * memória por reflexão.</p>
+     *
+     * @param clazz     Classe da entidade
+     * @param fieldName Nome exato do campo (ex: {@code "email"})
+     * @param value     Valor procurado
+     * @param <T>       Tipo da entidade
+     * @return Lista de objetos com o campo igual ao valor (nunca {@code null})
+     */
+    public static <T> List<T> findByField(Class<T> clazz, String fieldName, Object value) {
+        if (isIndexableField(fieldName, value)) {
+            prepare(clazz);
+            return query(clazz, "SELECT data, version FROM " + tableName(clazz)
+                    + " WHERE json_extract(data, '$." + fieldName + "') = ?", value);
+        }
+        return findByPredicate(clazz, obj -> Objects.equals(fieldValue(obj, fieldName), value));
+    }
+
+    /**
+     * Busca o primeiro objeto cujo campo seja igual ao valor informado.
+     *
+     * <p>Atalho para o caso mais comum — achar o usuário pelo e-mail, a sessão
+     * pelo token — sem trazer a lista inteira.</p>
+     *
+     * @param clazz     Classe da entidade
+     * @param fieldName Nome exato do campo
+     * @param value     Valor procurado
+     * @param <T>       Tipo da entidade
+     * @return Primeiro objeto encontrado, ou {@code null}
+     */
+    public static <T> T findFirstByField(Class<T> clazz, String fieldName, Object value) {
+        if (isIndexableField(fieldName, value)) {
+            prepare(clazz);
+            List<T> found = query(clazz, "SELECT data, version FROM " + tableName(clazz)
+                    + " WHERE json_extract(data, '$." + fieldName + "') = ? LIMIT 1", value);
+            return found.isEmpty() ? null : found.get(0);
+        }
+        List<T> found = findByField(clazz, fieldName, value);
+        return found.isEmpty() ? null : found.get(0);
+    }
+
+    /**
+     * Verifica se existe um registro com o ID informado.
+     *
+     * @param clazz Classe da entidade
+     * @param id    Identificador
+     * @return {@code true} se o registro existir
      */
     public static boolean exists(Class<?> clazz, String id) {
-        ensureCacheLoaded(clazz);
-        Map<String, Object> classCache = CACHE.get(clazz);
-        return classCache != null && classCache.containsKey(id);
+        if (id == null) return false;
+        prepare(clazz);
+        String table = tableName(clazz);
+        Boolean found = read(Boolean.FALSE, "verificar " + clazz.getSimpleName() + " id=" + id, conn -> {
+            try (PreparedStatement ps = conn.prepareStatement("SELECT 1 FROM " + table + " WHERE id = ? LIMIT 1")) {
+                ps.setString(1, id);
+                try (ResultSet rs = ps.executeQuery()) {
+                    return rs.next();
+                }
+            }
+        });
+        return Boolean.TRUE.equals(found);
     }
 
     /**
-     * [PT] Retorna a quantidade total de objetos persistidos (tamanho do cache).
+     * Conta os registros persistidos da classe.
      *
-     * [EN] Returns the total number of persisted objects (cache size).
-     *
-     * @param clazz [PT] classe
-     *              [EN] class
-     * @return [PT] contagem de registros
-     *         [EN] count of records
+     * @param clazz Classe da entidade
+     * @return Quantidade de registros
      */
     public static long count(Class<?> clazz) {
-        ensureCacheLoaded(clazz);
-        Map<String, Object> classCache = CACHE.get(clazz);
-        return classCache == null ? 0 : classCache.size();
+        prepare(clazz);
+        String table = tableName(clazz);
+        Long total = read(0L, "contar " + clazz.getSimpleName(), conn -> {
+            try (Statement st = conn.createStatement();
+                 ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM " + table)) {
+                return rs.next() ? rs.getLong(1) : 0L;
+            }
+        });
+        return total == null ? 0L : total;
     }
 
     /**
-     * [PT] Executa uma consulta SQL customizada que retorna objetos a partir da coluna {@code data}.
-     * <p>
-     * A consulta deve retornar uma coluna chamada {@code data} contendo o JSON do objeto.
-     * Os objetos resultantes são transformados para as instâncias cacheadas (garantindo identidade).
-     * </p>
-     * <p>
-     * <b>Exemplo de uso eficiente:</b>
+     * Executa SQL na tabela da entidade.
+     *
+     * <p>Consultas devem trazer a coluna {@code data} (o JSON do objeto); se
+     * também trouxerem {@code version}, a instância já volta pronta para
+     * {@link #saveIfCurrent()}. Comandos que não retornam linhas (DDL, UPDATE,
+     * DELETE) são aceitos e devolvem lista vazia.</p>
+     *
+     * <p><strong>Sempre com parâmetros posicionais</strong> — nunca concatene
+     * valores no SQL:</p>
      * <pre>
-     * // Cria um índice no campo 'nome' (uma vez)
-     * Saveable.query(Usuario.class, "CREATE INDEX IF NOT EXISTS idx_nome ON usuarios(json_extract(data, '$.nome'))");
+     * Saveable.createIndex(User.class, "email");
      *
-     * // Busca usuários com nome = 'João'
-     * List&lt;Usuario&gt; usuarios = Saveable.query(Usuario.class,
-     *     "SELECT data FROM usuarios WHERE json_extract(data, '$.nome') = ?", "João");
-     *
-     * // Paginação
-     * List&lt;Usuario&gt; page = Saveable.query(Usuario.class,
-     *     "SELECT data FROM usuarios ORDER BY id LIMIT 100 OFFSET ?", 0);
-     * </pre>
-     * </p>
-     *
-     * [EN] Executes a custom SQL query that returns objects from the {@code data} column.
-     * <p>
-     * The query must return a column named {@code data} containing the object's JSON.
-     * The resulting objects are resolved to cached instances (guaranteeing identity).
-     * </p>
-     * <p>
-     * <b>Efficient usage example:</b>
-     * <pre>
-     * // Create an index on field 'name' (once)
-     * Saveable.query(User.class, "CREATE INDEX IF NOT EXISTS idx_name ON users(json_extract(data, '$.name'))");
-     *
-     * // Find users with name = 'John'
      * List&lt;User&gt; users = Saveable.query(User.class,
-     *     "SELECT data FROM users WHERE json_extract(data, '$.name') = ?", "John");
+     *     "SELECT data, version FROM users WHERE json_extract(data, '$.email') = ?", email);
      *
-     * // Pagination
      * List&lt;User&gt; page = Saveable.query(User.class,
-     *     "SELECT data FROM users ORDER BY id LIMIT 100 OFFSET ?", 0);
+     *     "SELECT data, version FROM users ORDER BY id LIMIT 100 OFFSET ?", 0);
      * </pre>
-     * </p>
      *
-     * @param clazz  [PT] classe destino dos objetos
-     *               [EN] target object class
-     * @param sql    [PT] consulta SQL (deve conter uma coluna "data")
-     *               [EN] SQL query (must contain a "data" column)
-     * @param params [PT] parâmetros posicionais (opcional)
-     *               [EN] positional parameters (optional)
-     * @param <T>    [PT] tipo da classe
-     *               [EN] type of the class
-     * @return [PT] lista de objetos resultantes (pode ser vazia)
-     *         [EN] list of resulting objects (may be empty)
-     * @throws UnsupportedOperationException [PT] se a consulta não retornar a coluna "data"
-     *                                       [EN] if the query does not return a "data" column
+     * @param clazz  Classe destino dos objetos
+     * @param sql    Comando SQL
+     * @param params Parâmetros posicionais
+     * @param <T>    Tipo da entidade
+     * @return Lista de objetos resultantes (pode ser vazia)
+     * @throws UnsupportedOperationException se a consulta retornar linhas sem a
+     *         coluna {@code data}
      */
     public static <T> List<T> query(Class<T> clazz, String sql, Object... params) {
-        ensureCacheLoaded(clazz);
-        List<T> list = new ArrayList<>();
-        try (Connection conn = getDataSource(clazz).getConnection();
-             PreparedStatement pstmt = conn.prepareStatement(sql)) {
-            for (int i = 0; i < params.length; i++) {
-                pstmt.setObject(i + 1, params[i]);
-            }
-            ResultSet rs = pstmt.executeQuery();
-            ResultSetMetaData meta = rs.getMetaData();
-            boolean hasDataColumn = false;
-            for (int i = 1; i <= meta.getColumnCount(); i++) {
-                if (meta.getColumnName(i).equalsIgnoreCase("data")) {
-                    hasDataColumn = true;
-                    break;
-                }
-            }
-            if (!hasDataColumn) {
-                throw new UnsupportedOperationException("Query customizada deve retornar uma coluna chamada 'data' contendo o JSON do objeto.");
-            }
-            Gson gson = GsonAPI.get();
-            while (rs.next()) {
-                String json = rs.getString("data");
-                T obj = gson.fromJson(json, clazz);
-                // Obtém o ID do objeto desserializado para buscar a instância cacheada
-                String id = extractId(obj);
-                if (id != null) {
-                    T cached = findById(clazz, id);
-                    if (cached != null) {
-                        list.add(cached);
-                        continue;
+        prepare(clazz);
+        List<T> list = read(new ArrayList<>(), "consultar " + clazz.getSimpleName(), conn -> {
+            List<T> found = new ArrayList<>();
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                for (int i = 0; i < params.length; i++) ps.setObject(i + 1, params[i]);
+                boolean hasResultSet = ps.execute();
+                if (!hasResultSet) return found;
+                try (ResultSet rs = ps.getResultSet()) {
+                    int dataColumn = columnIndex(rs.getMetaData(), "data");
+                    if (dataColumn == 0) {
+                        throw new UnsupportedOperationException(
+                                "Consulta customizada deve retornar a coluna 'data' com o JSON do objeto: " + sql);
+                    }
+                    int versionColumn = columnIndex(rs.getMetaData(), "version");
+                    while (rs.next()) {
+                        long version = versionColumn == 0 ? UNKNOWN_VERSION : rs.getLong(versionColumn);
+                        found.add(materialize(clazz, rs.getString(dataColumn), version));
                     }
                 }
-                // Se não encontrou no cache (ex: registro novo inserido externamente), adiciona ao cache
-                if (id != null) {
-                    cachePut(clazz, id, obj);
-                }
-                list.add(obj);
             }
-        } catch (SQLException e) {
-            Console.error("Erro na query customizada: %s", e, sql);
-        }
-        return list;
+            return found;
+        });
+        return list == null ? new ArrayList<>() : list;
     }
 
     /**
-     * [PT] Fecha todos os pools de conexão e limpa o cache. Deve ser chamado ao encerrar a aplicação
-     * para evitar vazamento de recursos.
+     * Cria (se ainda não existir) um índice sobre um campo do JSON.
      *
-     * [EN] Closes all connection pools and clears the cache. Should be called when shutting down
-     * the application to avoid resource leaks.
+     * <p>Sem cache em memória, o índice é o que mantém a busca por campo barata.
+     * Chame uma vez na inicialização, para cada campo consultado com frequência
+     * (e-mail, token de sessão, chave estrangeira).</p>
+     *
+     * @param clazz     Classe da entidade
+     * @param fieldName Nome do campo indexado (ex: {@code "email"})
+     * @return {@code true} se o índice existe ao final da chamada
+     */
+    public static boolean createIndex(Class<?> clazz, String fieldName) {
+        if (fieldName == null || !SAFE_FIELD.matcher(fieldName).matches()) {
+            Console.error("Nome de campo inválido para índice: " + fieldName);
+            return false;
+        }
+        prepare(clazz);
+        String table = tableName(clazz);
+        String index = "idx_" + table + "_" + fieldName.toLowerCase(Locale.ROOT);
+        Boolean created = write(Boolean.FALSE, "criar índice " + index, conn -> {
+            try (Statement st = conn.createStatement()) {
+                st.execute("CREATE INDEX IF NOT EXISTS " + index + " ON " + table
+                        + "(json_extract(data, '$." + fieldName + "'))");
+            }
+            return Boolean.TRUE;
+        });
+        return Boolean.TRUE.equals(created);
+    }
+
+    // ==================== ESTÁTICOS: GRAVAÇÃO ====================
+
+    /**
+     * Lê, altera e grava um registro dentro da mesma transação — sem janela para
+     * atualização perdida.
+     *
+     * <p>É a forma correta de mexer em registro disputado. Enquanto o bloco
+     * roda, nenhum outro componente grava aquele registro; o que a alteração
+     * enxerga é o estado atual do banco, não uma cópia lida antes.</p>
+     *
+     * <pre>
+     * Saveable.mutate(Account.class, id, account -&gt; account.setBalance(account.getBalance() + 100));
+     * </pre>
+     *
+     * @param clazz  Classe da entidade
+     * @param id     Identificador do registro
+     * @param change Alteração a aplicar sobre o estado atual do registro
+     * @param <T>    Tipo da entidade
+     * @return Objeto já alterado e gravado, ou {@code null} se o registro não
+     *         existir (ou se o conflito persistir após as tentativas)
+     */
+    public static <T extends Saveable> T mutate(Class<T> clazz, String id, Consumer<T> change) {
+        if (id == null || change == null) return null;
+        prepare(clazz);
+        String table = tableName(clazz);
+        boolean[] conflict = {false};
+
+        ReentrantLock lock = acquireRowLock(clazz, id);
+        try {
+            for (int attempt = 1; attempt <= MUTATE_ATTEMPTS; attempt++) {
+                conflict[0] = false;
+                T updated = write(null, "alterar " + clazz.getSimpleName() + " id=" + id, conn -> {
+                    Row row = selectRow(conn, table, id);
+                    if (row == null) return null;
+
+                    T obj = materialize(clazz, row.json(), row.version());
+                    change.accept(obj);
+
+                    String sql = "UPDATE " + table + " SET data = ?, version = version + 1, updated_at = ?"
+                            + " WHERE id = ? AND version = ?";
+                    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                        ps.setString(1, GsonAPI.get().toJson(obj));
+                        ps.setLong(2, Instant.now().getEpochSecond());
+                        ps.setString(3, id);
+                        ps.setLong(4, row.version());
+                        if (ps.executeUpdate() == 0) {
+                            conflict[0] = true;
+                            return null;
+                        }
+                    }
+                    ((Saveable) obj).persistedVersion = row.version() + 1;
+                    return obj;
+                });
+
+                if (updated != null) return updated;
+                if (!conflict[0]) return null; // registro inexistente: repetir não ajuda
+            }
+            Console.warn("Não foi possível alterar %s id=%s: %d tentativas seguidas com escrita concorrente.",
+                    clazz.getSimpleName(), id, MUTATE_ATTEMPTS);
+            return null;
+        } finally {
+            releaseRowLock(lock);
+        }
+    }
+
+    /**
+     * Grava vários objetos em uma única transação — todos ou nenhum.
+     *
+     * @param objects Objetos a gravar (podem ser de classes diferentes)
+     * @return Quantidade de objetos gravados
+     */
+    public static int saveAll(Collection<? extends Saveable> objects) {
+        if (objects == null || objects.isEmpty()) return 0;
+        int[] saved = {0};
+        transaction(() -> {
+            for (Saveable obj : objects) {
+                if (obj != null && obj.save()) saved[0]++;
+            }
+        });
+        return saved[0];
+    }
+
+    /**
+     * Exclui um registro pelo ID.
+     *
+     * @param clazz Classe da entidade
+     * @param id    Identificador
+     * @return {@code true} se o registro foi removido
+     */
+    public static boolean deleteById(Class<?> clazz, String id) {
+        if (id == null) return false;
+        prepare(clazz);
+        String table = tableName(clazz);
+        ReentrantLock lock = acquireRowLock(clazz, id);
+        try {
+            Boolean deleted = write(Boolean.FALSE, "excluir " + clazz.getSimpleName() + " id=" + id, conn -> {
+                try (PreparedStatement ps = conn.prepareStatement("DELETE FROM " + table + " WHERE id = ?")) {
+                    ps.setString(1, id);
+                    return ps.executeUpdate() > 0;
+                }
+            });
+            return Boolean.TRUE.equals(deleted);
+        } finally {
+            releaseRowLock(lock);
+        }
+    }
+
+    /**
+     * Exclui todos os registros da classe.
+     *
+     * @param clazz Classe da entidade
+     * @return Quantidade de registros removidos
+     */
+    public static int deleteAll(Class<?> clazz) {
+        prepare(clazz);
+        String table = tableName(clazz);
+        Integer deleted = write(0, "excluir todos os " + clazz.getSimpleName(), conn -> {
+            try (Statement st = conn.createStatement()) {
+                return st.executeUpdate("DELETE FROM " + table);
+            }
+        });
+        return deleted == null ? 0 : deleted;
+    }
+
+    // ==================== TRANSAÇÕES ====================
+
+    /**
+     * Executa várias operações em uma única transação: ou todas valem, ou
+     * nenhuma vale.
+     *
+     * <p>Use quando duas gravações precisam ser verdade ao mesmo tempo — baixar
+     * o estoque e criar o pedido, debitar de um e creditar no outro. Chamadas
+     * aninhadas juntam-se à transação em curso.</p>
+     *
+     * <pre>
+     * Saveable.transaction(() -&gt; {
+     *     stock.setQuantity(stock.getQuantity() - 1);
+     *     stock.save();
+     *     new Order(userId, productId).save();
+     * });
+     * </pre>
+     *
+     * @param actions Operações a executar
+     * @throws RuntimeException se alguma operação falhar — a transação inteira é
+     *         desfeita e a exceção é repassada
+     */
+    public static void transaction(Runnable actions) {
+        computeInTransaction(() -> {
+            actions.run();
+            return null;
+        });
+    }
+
+    /**
+     * Igual a {@link #transaction(Runnable)}, mas devolve um resultado.
+     *
+     * @param actions Operações a executar, produzindo o resultado
+     * @param <T>     Tipo do resultado
+     * @return Valor produzido pelo bloco
+     * @throws RuntimeException se alguma operação falhar — a transação inteira é
+     *         desfeita e a exceção é repassada
+     */
+    public static <T> T computeInTransaction(Supplier<T> actions) {
+        Connection running = CURRENT_TRANSACTION.get();
+        if (running != null) return actions.get(); // já existe transação nesta thread
+
+        Connection conn = null;
+        boolean committed = false;
+        try {
+            conn = dataSource().getConnection();
+            conn.setAutoCommit(false); // dispara BEGIN IMMEDIATE: trava de escrita desde o início
+            CURRENT_TRANSACTION.set(conn);
+            T result = actions.get();
+            conn.commit();
+            committed = true;
+            return result;
+        } catch (SQLException e) {
+            throw new IllegalStateException("Falha ao abrir/confirmar transação do Saveable", e);
+        } finally {
+            CURRENT_TRANSACTION.remove();
+            if (conn != null) {
+                if (!committed) rollbackQuietly(conn);
+                restoreAndClose(conn);
+            }
+        }
+    }
+
+    // ==================== CICLO DE VIDA ====================
+
+    /**
+     * Fecha o pool de conexões. Chame no encerramento da aplicação (shutdown
+     * hook) para não vazar conexões nem deixar o WAL sem checkpoint.
      */
     public static void shutdown() {
         synchronized (DATA_SOURCE_LOCK) {
-            for (HikariDataSource ds : DATA_SOURCES.values()) {
-                if (!ds.isClosed()) ds.close();
-            }
-            DATA_SOURCES.clear();
+            if (dataSource != null && !dataSource.isClosed()) dataSource.close();
+            dataSource = null;
         }
-        CACHE.clear();
+        PREPARED_TABLES.clear();
+        CURRENT_TRANSACTION.remove();
     }
 
-    // ==================== MÉTODOS INTERNOS PRIVADOS ====================
-
-    private static HikariDataSource getDataSource(Class<?> clazz) {
-        // Verificação lazy (sem quebrar o classload): só dispara quando a
-        // persistência for realmente utilizada
-        Dependencies.require("org.sqlite.JDBC", SQLITE_COORDINATES, PERSISTENCE_FEATURE);
-        Dependencies.require("com.zaxxer.hikari.HikariDataSource", HIKARI_COORDINATES, PERSISTENCE_FEATURE);
-        synchronized (DATA_SOURCE_LOCK) {
-            if (!DATA_SOURCES.containsKey(clazz)) {
-                HikariConfig config = new HikariConfig();
-                config.setJdbcUrl("jdbc:sqlite:database.db");
-                config.setConnectionTestQuery("SELECT 1");
-                config.setMaximumPoolSize(20);
-                config.setMinimumIdle(2);
-                config.setIdleTimeout(30000);
-                config.setPoolName("Saveable-" + clazz.getSimpleName());
-                config.addDataSourceProperty("journal_mode", "WAL");
-                config.addDataSourceProperty("synchronous", "NORMAL");
-                config.addDataSourceProperty("cache_size", 10000);
-                config.addDataSourceProperty("temp_store", "MEMORY");
-                DATA_SOURCES.put(clazz, new HikariDataSource(config));
-                createTable(clazz);
-                // Carrega todos os registros da tabela para o cache
-                loadAllIntoCache(clazz);
-            }
-            return DATA_SOURCES.get(clazz);
-        }
+    /**
+     * Caminho do arquivo do banco em uso.
+     *
+     * <p>Padrão: {@code database.db} no diretório de trabalho. Em contêiner,
+     * defina {@code ANGATU_DB_PATH} (ou {@code -Dangatu.db}) apontando para o
+     * volume persistente.</p>
+     *
+     * @return Caminho do arquivo SQLite
+     */
+    public static String databasePath() {
+        String path = System.getProperty("angatu.db");
+        if (path == null || path.isBlank()) path = System.getenv("ANGATU_DB_PATH");
+        return path == null || path.isBlank() ? DEFAULT_DATABASE : path.trim();
     }
 
-    private static void createTable(Class<?> clazz) {
-        String tableName = getTableName(clazz);
-        String sql = "CREATE TABLE IF NOT EXISTS " + tableName + " (id TEXT PRIMARY KEY, data TEXT NOT NULL)";
-        try (Connection conn = getDataSource(clazz).getConnection();
-             Statement stmt = conn.createStatement()) {
-            stmt.execute(sql);
-            stmt.execute("PRAGMA journal_mode=WAL");
-            stmt.execute("PRAGMA synchronous=NORMAL");
+    // ==================== INFRAESTRUTURA ====================
+
+    /** Linha crua do banco: JSON do objeto e versão do registro. */
+    private record Row(String json, long version) {}
+
+    /** Operação que usa uma conexão já resolvida (do pool ou da transação). */
+    @FunctionalInterface
+    private interface SqlWork<R> {
+        R apply(Connection conn) throws SQLException;
+    }
+
+    /**
+     * Executa uma leitura. Fora de transação, a conexão vem do pool em
+     * autocommit — leitores não bloqueiam nem são bloqueados no modo WAL.
+     */
+    private static <R> R read(R fallback, String what, SqlWork<R> work) {
+        Connection running = CURRENT_TRANSACTION.get();
+        if (running != null) {
+            try {
+                return work.apply(running);
+            } catch (SQLException e) {
+                throw new IllegalStateException("Erro ao " + what, e);
+            }
+        }
+        try (Connection conn = dataSource().getConnection()) {
+            return work.apply(conn);
         } catch (SQLException e) {
-            throw new RuntimeException("Erro ao criar tabela " + tableName, e);
+            Console.error("Erro ao " + what, e);
+            return fallback;
         }
     }
 
     /**
-     * Carrega todos os registros da tabela para o cache.
+     * Executa uma escrita dentro de uma transação. Se já houver transação na
+     * thread, a operação entra nela — o commit fica com quem abriu.
      */
-    private static void loadAllIntoCache(Class<?> clazz) {
-        String tableName = getTableName(clazz);
-        String sql = "SELECT id, data FROM " + tableName;
-        Map<String, Object> classCache = new ConcurrentHashMap<>();
-        try (Connection conn = getDataSource(clazz).getConnection();
-             Statement stmt = conn.createStatement();
-             ResultSet rs = stmt.executeQuery(sql)) {
-            Gson gson = GsonAPI.get();
-            while (rs.next()) {
-                String id = rs.getString("id");
-                String json = rs.getString("data");
-                Object obj = gson.fromJson(json, clazz);
-                classCache.put(id, obj);
+    private static <R> R write(R fallback, String what, SqlWork<R> work) {
+        Connection running = CURRENT_TRANSACTION.get();
+        if (running != null) {
+            try {
+                return work.apply(running);
+            } catch (SQLException e) {
+                // Dentro de transação, falhar em silêncio corromperia o "tudo ou nada"
+                throw new IllegalStateException("Erro ao " + what, e);
             }
-            CACHE.put(clazz, classCache);
+        }
+
+        Connection conn = null;
+        try {
+            conn = dataSource().getConnection();
+            conn.setAutoCommit(false);
+            R result = work.apply(conn);
+            conn.commit();
+            return result;
         } catch (SQLException e) {
-            Console.error("Erro ao carregar cache para %s", e, clazz.getSimpleName());
-            CACHE.put(clazz, new ConcurrentHashMap<>()); // cache vazio
+            rollbackQuietly(conn);
+            Console.error("Erro ao " + what, e);
+            return fallback;
+        } catch (RuntimeException e) {
+            rollbackQuietly(conn);
+            throw e;
+        } finally {
+            restoreAndClose(conn);
         }
     }
 
-    private static void ensureCacheLoaded(Class<?> clazz) {
-        if (!CACHE.containsKey(clazz)) {
-            // Dispara a criação da tabela e carregamento via getDataSource
-            getDataSource(clazz);
+    /**
+     * Cria o pool na primeira utilização.
+     *
+     * <p>Um pool para o banco inteiro (não mais um por classe): o SQLite tem um
+     * escritor por vez, então vários pools apenas multiplicavam conexões
+     * disputando a mesma trava. O modo WAL libera as leituras, o
+     * {@code busy_timeout} faz a escrita esperar em vez de estourar
+     * {@code SQLITE_BUSY} e o {@code transaction_mode=IMMEDIATE} garante que
+     * toda transação de escrita pegue a trava logo no início — é isso que impede
+     * duas alterações concorrentes de se sobreporem.</p>
+     */
+    private static HikariDataSource dataSource() {
+        HikariDataSource current = dataSource;
+        if (current != null && !current.isClosed()) return current;
+
+        Dependencies.require("org.sqlite.JDBC", SQLITE_COORDINATES, PERSISTENCE_FEATURE);
+        Dependencies.require("com.zaxxer.hikari.HikariDataSource", HIKARI_COORDINATES, PERSISTENCE_FEATURE);
+
+        synchronized (DATA_SOURCE_LOCK) {
+            if (dataSource != null && !dataSource.isClosed()) return dataSource;
+
+            String path = databasePath();
+            HikariConfig config = new HikariConfig();
+            config.setJdbcUrl("jdbc:sqlite:" + path);
+            config.setConnectionTestQuery("SELECT 1");
+            config.setMaximumPoolSize(POOL_SIZE);
+            config.setMinimumIdle(2);
+            config.setIdleTimeout(30000);
+            config.setPoolName("Saveable");
+            config.addDataSourceProperty("journal_mode", "WAL");
+            config.addDataSourceProperty("synchronous", "NORMAL");
+            config.addDataSourceProperty("busy_timeout", BUSY_TIMEOUT_MS);
+            config.addDataSourceProperty("transaction_mode", "IMMEDIATE");
+            config.addDataSourceProperty("foreign_keys", "true");
+            config.addDataSourceProperty("cache_size", 10000);
+            config.addDataSourceProperty("temp_store", "MEMORY");
+
+            dataSource = new HikariDataSource(config);
+            Console.log("&7Banco SQLite: &f%s &7(WAL, %d conexões, escrita serializada)", path, POOL_SIZE);
+            return dataSource;
         }
     }
 
-    private static void cachePut(Class<?> clazz, String id, Object obj) {
-        Map<String, Object> classCache = CACHE.computeIfAbsent(clazz, k -> new ConcurrentHashMap<>());
-        classCache.put(id, obj);
+    /**
+     * Garante que a tabela da classe exista e tenha as colunas de controle de
+     * concorrência. Executa uma vez por classe, por execução.
+     */
+    private static void prepare(Class<?> type) {
+        if (PREPARED_TABLES.contains(type)) return;
+        synchronized (PREPARE_LOCK) {
+            if (PREPARED_TABLES.contains(type)) return;
+
+            String table = tableName(type);
+            Connection running = CURRENT_TRANSACTION.get();
+            try {
+                if (running != null) {
+                    createAndMigrate(running, table);
+                } else {
+                    try (Connection conn = dataSource().getConnection()) {
+                        createAndMigrate(conn, table);
+                    }
+                }
+                PREPARED_TABLES.add(type);
+            } catch (SQLException e) {
+                throw new IllegalStateException("Erro ao preparar a tabela " + table, e);
+            }
+        }
     }
 
-    private static String getTableName(Class<?> clazz) {
-        String name = clazz.getSimpleName().toLowerCase();
+    /** Cria a tabela e acrescenta as colunas que faltarem (bancos antigos). */
+    private static void createAndMigrate(Connection conn, String table) throws SQLException {
+        try (Statement st = conn.createStatement()) {
+            st.execute("CREATE TABLE IF NOT EXISTS " + table + " ("
+                    + "id TEXT PRIMARY KEY, "
+                    + "data TEXT NOT NULL, "
+                    + "version INTEGER NOT NULL DEFAULT 0, "
+                    + "updated_at INTEGER NOT NULL DEFAULT 0)");
+        }
+        Set<String> columns = new java.util.HashSet<>();
+        try (Statement st = conn.createStatement();
+             ResultSet rs = st.executeQuery("PRAGMA table_info(" + table + ")")) {
+            while (rs.next()) columns.add(rs.getString("name").toLowerCase(Locale.ROOT));
+        }
+        try (Statement st = conn.createStatement()) {
+            if (!columns.contains("version"))
+                st.execute("ALTER TABLE " + table + " ADD COLUMN version INTEGER NOT NULL DEFAULT 0");
+            if (!columns.contains("updated_at"))
+                st.execute("ALTER TABLE " + table + " ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0");
+        }
+    }
+
+    /** Grava o registro criando ou substituindo, sempre incrementando a versão. */
+    private static void upsert(Connection conn, String table, String id, String json) throws SQLException {
+        String sql = "INSERT INTO " + table + " (id, data, version, updated_at) VALUES (?, ?, 1, ?)"
+                + " ON CONFLICT(id) DO UPDATE SET data = excluded.data,"
+                + " version = " + table + ".version + 1, updated_at = excluded.updated_at";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, id);
+            ps.setString(2, json);
+            ps.setLong(3, Instant.now().getEpochSecond());
+            ps.executeUpdate();
+        }
+    }
+
+    /** Lê a linha crua (JSON + versão) de um registro. */
+    private static Row selectRow(Connection conn, String table, String id) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement("SELECT data, version FROM " + table + " WHERE id = ?")) {
+            ps.setString(1, id);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? new Row(rs.getString("data"), rs.getLong("version")) : null;
+            }
+        }
+    }
+
+    /** Lê a versão atual de um registro (após a gravação). */
+    private static long currentVersion(Connection conn, String table, String id) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement("SELECT version FROM " + table + " WHERE id = ?")) {
+            ps.setString(1, id);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getLong(1) : UNKNOWN_VERSION;
+            }
+        }
+    }
+
+    /** Desserializa o JSON e registra a versão lida na instância. */
+    private static <T> T materialize(Class<T> clazz, String json, long version) {
+        Gson gson = GsonAPI.get();
+        T obj = gson.fromJson(json, clazz);
+        if (obj instanceof Saveable saveable) saveable.persistedVersion = version;
+        return obj;
+    }
+
+    /** Índice da coluna pelo nome, ou {@code 0} se ela não estiver no resultado. */
+    private static int columnIndex(ResultSetMetaData meta, String name) throws SQLException {
+        for (int i = 1; i <= meta.getColumnCount(); i++) {
+            if (name.equalsIgnoreCase(meta.getColumnLabel(i)) || name.equalsIgnoreCase(meta.getColumnName(i))) return i;
+        }
+        return 0;
+    }
+
+    /**
+     * Trava a faixa do registro para serializar alterações do mesmo ID dentro do
+     * processo.
+     *
+     * <p>Dentro de uma transação já aberta não trava nada: a transação de
+     * escrita é exclusiva por si só, e pegar a trava depois da trava do banco
+     * inverteria a ordem de aquisição entre threads — o caminho conhecido para
+     * um impasse.</p>
+     *
+     * @return Trava adquirida, ou {@code null} quando já se está em transação
+     */
+    private static ReentrantLock acquireRowLock(Class<?> type, String id) {
+        if (CURRENT_TRANSACTION.get() != null) return null;
+        int hash = (type.getName() + '|' + id).hashCode();
+        ReentrantLock lock = ROW_LOCKS[Math.floorMod(hash, LOCK_STRIPES)];
+        lock.lock();
+        return lock;
+    }
+
+    /** Libera a trava obtida por {@link #acquireRowLock(Class, String)}. */
+    private static void releaseRowLock(ReentrantLock lock) {
+        if (lock != null) lock.unlock();
+    }
+
+    /** Nome da tabela: classe em minúsculas, com 's' final. */
+    private static String tableName(Class<?> clazz) {
+        String name = clazz.getSimpleName().toLowerCase(Locale.ROOT);
         return name.endsWith("s") ? name : name + "s";
     }
 
+    /** Só vai ao SQL quando o campo é seguro e o valor é comparável em JSON. */
+    private static boolean isIndexableField(String fieldName, Object value) {
+        return fieldName != null && SAFE_FIELD.matcher(fieldName).matches()
+                && (value instanceof String || value instanceof Number || value instanceof Boolean);
+    }
+
+    /** Lê um campo por reflexão (fallback do filtro por campo). */
+    private static Object fieldValue(Object obj, String fieldName) {
+        Class<?> type = obj.getClass();
+        while (type != null && type != Object.class) {
+            try {
+                java.lang.reflect.Field field = type.getDeclaredField(fieldName);
+                field.setAccessible(true);
+                return field.get(obj);
+            } catch (NoSuchFieldException e) {
+                type = type.getSuperclass();
+            } catch (Exception e) {
+                return null;
+            }
+        }
+        return null;
+    }
+
+    /** Garante um ID para o objeto, gerando e injetando um UUID se necessário. */
+    private String ensureId() {
+        String id = getId();
+        if (id != null && !id.isEmpty()) return id;
+        String generated = UUID.randomUUID().toString();
+        try {
+            injectIdField(this, generated);
+            return generated;
+        } catch (Exception e) {
+            Console.error("Falha ao injetar ID em " + getClass().getSimpleName(), e);
+            return null;
+        }
+    }
+
+    /** Injeta o ID gerado no campo {@code id} (ou no primeiro campo terminado em "id"). */
     private static void injectIdField(Object obj, String id) throws Exception {
         java.lang.reflect.Field idField = null;
         for (java.lang.reflect.Field f : obj.getClass().getDeclaredFields()) {
-            if (f.getName().equals("id") || f.getName().toLowerCase().endsWith("id")) {
+            if (f.getName().equals("id") || f.getName().toLowerCase(Locale.ROOT).endsWith("id")) {
                 idField = f;
                 break;
             }
@@ -812,27 +1094,42 @@ public abstract class Saveable {
         }
     }
 
+    /** Copia os campos de uma instância recém-lida para a instância atual. */
     private static void copyFields(Object from, Object to) {
         for (java.lang.reflect.Field field : from.getClass().getDeclaredFields()) {
             try {
+                if (java.lang.reflect.Modifier.isStatic(field.getModifiers())) continue;
                 field.setAccessible(true);
                 field.set(to, field.get(from));
-            } catch (IllegalAccessException ignored) {}
+            } catch (IllegalAccessException ignored) {
+                // Campo inacessível (ex: final): mantém o valor atual
+            }
         }
     }
 
-    private static String extractId(Object obj) {
-        if (obj instanceof Saveable) {
-            return ((Saveable) obj).getId();
-        }
-        // Fallback: tentar ler campo 'id' via reflexão
+    /** Desfaz a transação sem deixar a falha original ser encoberta. */
+    private static void rollbackQuietly(Connection conn) {
+        if (conn == null) return;
         try {
-            java.lang.reflect.Field idField = obj.getClass().getDeclaredField("id");
-            idField.setAccessible(true);
-            Object idValue = idField.get(obj);
-            return idValue != null ? idValue.toString() : null;
-        } catch (Exception e) {
-            return null;
+            if (!conn.getAutoCommit()) conn.rollback();
+        } catch (SQLException e) {
+            Console.error("Falha ao desfazer a transação do Saveable", e);
         }
     }
+
+    /** Devolve a conexão ao pool em autocommit, como ela foi emprestada. */
+    private static void restoreAndClose(Connection conn) {
+        if (conn == null) return;
+        try {
+            if (!conn.getAutoCommit()) conn.setAutoCommit(true);
+        } catch (SQLException ignored) {
+            // Conexão será descartada pelo pool
+        }
+        try {
+            conn.close();
+        } catch (SQLException e) {
+            Console.error("Falha ao devolver conexão ao pool", e);
+        }
+    }
+
 }
