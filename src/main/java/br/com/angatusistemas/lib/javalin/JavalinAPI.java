@@ -3,7 +3,9 @@ package br.com.angatusistemas.lib.javalin;
 import java.io.File;
 import java.security.MessageDigest;
 import java.time.Instant;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedList;
@@ -13,7 +15,6 @@ import java.util.Map;
 import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Pattern;
 
 import org.reflections.Reflections;
@@ -106,14 +107,50 @@ public final class JavalinAPI {
     private static final int DEFAULT_REQ_SEC = 5;
     /** Requisições máximas por minuto (padrão global) */
     private static final int DEFAULT_REQ_MIN = 30;
-    /** Número de violações antes do bloqueio permanente */
-    private static final int PERM_BLOCK_THRESHOLD = 3;
+
+    /**
+     * Violações necessárias para o bloqueio longo, <b>dentro</b> de
+     * {@link #VIOLATION_WINDOW_SEC}.
+     *
+     * <p>Era 3, e sem janela: o contador só crescia, então três tropeços
+     * espalhados por meses somavam igual a três seguidos. Quem abre o site
+     * duas vezes por semana chegava lá sozinho, e a punição para isso era
+     * 403 em tudo por 30 dias.</p>
+     *
+     * <p>Abuso de verdade não produz três violações e para — produz dezenas
+     * por minuto. Contar dez dentro de uma hora separa os dois casos sem
+     * precisar adivinhar intenção.</p>
+     */
+    private static final int PERM_BLOCK_THRESHOLD = 10;
+
+    /**
+     * Janela em que as violações somam (1 hora).
+     *
+     * <p>Violação precisa prescrever. Sem prazo, o contador vira ficha
+     * criminal: a pessoa que esbarrou no limite em janeiro carrega isso para
+     * sempre e é banida em março por causa de um pico que não tem relação
+     * nenhuma com o primeiro.</p>
+     */
+    private static final long VIOLATION_WINDOW_SEC = 3600L;
+
     /** Duração padrão de bloqueio em segundos (5 minutos) */
     private static final long DEFAULT_BLOCK_SEC = 300L;
     /** Duração de bloqueio pesado em segundos para burst attacks (1 hora) */
     private static final long HEAVY_BLOCK_SEC = 3600L;
-    /** Máximo de requisições em burst (1 segundo) antes de bloquear */
-    private static final int BURST_THRESHOLD = 10;
+
+    /**
+     * Máximo de requisições em 1 segundo, por IP, antes de bloquear.
+     *
+     * <p>Era 10, e 10 é o número de uma tela normal: uma página logada dispara
+     * a checagem de sessão, meia dúzia de chamadas de dados e as duas de push
+     * ao mesmo tempo — o navegador manda tudo em paralelo, de propósito. Com o
+     * limite em 10, abrir o próprio perfil já contava como ataque de rajada.</p>
+     *
+     * <p>Estático e path sem limite não chegam aqui, então o que sobra é
+     * chamada de API. Trinta em um segundo continua sendo muito acima do que
+     * qualquer tela precisa, e bem abaixo do que uma ferramenta de abuso faz.</p>
+     */
+    private static final int BURST_THRESHOLD = 30;
 
     /**
      * Extensões de recurso estático que <b>não</b> entram no rate limit.
@@ -164,8 +201,17 @@ public final class JavalinAPI {
     private static final Map<String, Queue<Long>> BURST_TRACKER = new ConcurrentHashMap<>();
     /** IPs/chaves atualmente bloqueados com tempo de desbloqueio */
     private static final Map<String, BlockInfo> BLOCKED_CACHE = new ConcurrentHashMap<>();
-    /** Contagem de violações por IP hash */
-    private static final Map<String, AtomicInteger> VIOLATION_CACHE = new ConcurrentHashMap<>();
+
+    /**
+     * Instantes das violações recentes de cada IP, em segundos.
+     *
+     * <p>Guarda os momentos, e não um total, porque a decisão de bloquear
+     * depende de <i>quando</i> as violações aconteceram. Era um contador que
+     * só subia, e por isso o total de uma vida inteira decidia o banimento de
+     * hoje. A fila é podada por {@link #VIOLATION_WINDOW_SEC} a cada
+     * violação.</p>
+     */
+    private static final Map<String, Deque<Long>> VIOLATION_CACHE = new ConcurrentHashMap<>();
 
     // ==================== HEADERS DE SEGURANÇA ====================
 
@@ -370,13 +416,36 @@ public final class JavalinAPI {
      */
     public static void configureRateLimit(String pathPattern, RateLimitConfig config) {
         RATE_LIMIT_CONFIGS.put(pathPattern, config);
-        new RouteRateLimitConfig(
-                pathPattern,
-                config.requestsPerSecond,
-                config.requestsPerMinute,
-                config.blockSeconds,
-                config.perIp
-        ).save();
+
+        /* Atualiza a linha existente em vez de inserir outra. Como isto é
+           chamado na subida, cada deploy gravava um registro novo (UUID novo)
+           para o mesmo path — a tabela crescia sem parar e loadPersistedConfigs
+           relia tudo aquilo toda vez. */
+        List<RouteRateLimitConfig> existentes = Saveable.query(RouteRateLimitConfig.class,
+                "SELECT data FROM routeratelimitconfigs WHERE json_extract(data, '$.pathPattern') = ?",
+                pathPattern);
+
+        if (existentes.isEmpty()) {
+            new RouteRateLimitConfig(
+                    pathPattern,
+                    config.requestsPerSecond,
+                    config.requestsPerMinute,
+                    config.blockSeconds,
+                    config.perIp
+            ).save();
+        } else {
+            RouteRateLimitConfig atual = existentes.get(0);
+            atual.setRequestsPerSecond(config.requestsPerSecond);
+            atual.setRequestsPerMinute(config.requestsPerMinute);
+            atual.setBlockSeconds(config.blockSeconds);
+            atual.setPerIp(config.perIp);
+            atual.setEnabled(true);
+            atual.save();
+
+            // Duplicatas deixadas pelas subidas anteriores
+            for (int i = 1; i < existentes.size(); i++) existentes.get(i).delete();
+        }
+
         Console.log("Rate limit configurado: %s → %d req/s, %d req/min", pathPattern,
                 config.requestsPerSecond, config.requestsPerMinute);
     }
@@ -448,13 +517,27 @@ public final class JavalinAPI {
     public static boolean unblockPermanently(String ipHash) {
         List<PermanentBlock> blocks = Saveable.query(PermanentBlock.class,
                 "SELECT data FROM permanentblocks WHERE json_extract(data, '$.ipHash') = ?", ipHash);
-        for (PermanentBlock block : blocks) {
-            if (block.delete()) {
-                BLOCKED_CACHE.remove(ipHash);
-                return true;
-            }
+
+        boolean removeu = false;
+        for (PermanentBlock block : blocks)
+            if (block.delete()) removeu = true;
+
+        if (!removeu) return false;
+
+        BLOCKED_CACHE.remove(ipHash);
+
+        /* Desbloquear tem que desbloquear de verdade. Apagando só a linha de
+           permanentblocks, a janela de violações continuava cheia e a próxima
+           requisição fora do limite bloqueava de novo na hora — e a flag em
+           SuspectIp seguia ligada, marcando como banido quem acabou de ser
+           perdoado. */
+        VIOLATION_CACHE.remove(ipHash);
+        for (SuspectIp s : Saveable.query(SuspectIp.class,
+                "SELECT data FROM suspectips WHERE json_extract(data, '$.ipHash') = ?", ipHash)) {
+            s.setPermanentlyBlocked(false);
+            s.save();
         }
-        return false;
+        return true;
     }
 
     /**
@@ -474,6 +557,9 @@ public final class JavalinAPI {
         for (SuspectIp s : Saveable.findAll(SuspectIp.class)) s.delete();
         BLOCKED_CACHE.clear();
         BURST_TRACKER.clear();
+        /* Sem isto o perdão durava um pedido: a janela de violações continuava
+           cheia e o primeiro tropeço recriava o bloqueio. */
+        VIOLATION_CACHE.clear();
         return n;
     }
 
@@ -550,6 +636,18 @@ public final class JavalinAPI {
 
             if (!rateLimitingEnabled) return;
 
+            // Recurso estático e paths sem limite não passam pelo rate limit.
+            // Um <img> a mais numa vitrine não pode virar bloqueio de cliente.
+            //
+            // Esta checagem vem ANTES do bloqueio, e a ordem é o conserto de um
+            // estrago real: com ela depois, um IP bloqueado levava 403 no CSS,
+            // no JS e na página pública. Quem estava na lista não via "acesso
+            // bloqueado" — via o site quebrado, e o robô do buscador que caísse
+            // ali tirava o site inteiro do índice. Bloqueio existe para conter
+            // operação (login, escrita, pagamento); arquivo estático e conteúdo
+            // público não custam nada e não mudam estado.
+            if (isStaticResource(path) || isUnlimitedPath(path)) return;
+
             String ip = getClientIp(ctx);
             String ipHash = hashIp(ip);
 
@@ -558,10 +656,6 @@ public final class JavalinAPI {
                 sendPermanentBlockPage(ctx);
                 return;
             }
-
-            // Recurso estático e paths sem limite não passam pelo rate limit.
-            // Um <img> a mais numa vitrine não pode virar bloqueio de cliente.
-            if (isStaticResource(path) || isUnlimitedPath(path)) return;
 
             RateLimitConfig cfg = getRateLimitConfig(path);
 
@@ -594,12 +688,15 @@ public final class JavalinAPI {
      * trecho que mais dói errar: cada cópia é uma chance de uma delas esquecer
      * de encerrar a requisição ou de escalar cedo demais.</p>
      *
-     * <p>O bloqueio permanente é a única punição que não passa sozinha, então
-     * exige um IP em que dê para confiar. Se o valor resolvido é loopback ou
-     * rede privada, ou o proxy não está repassando a origem — e aí todo mundo
-     * chega com o mesmo IP — ou é tráfego interno. Banir para sempre nesse
-     * caso derruba a aplicação inteira. Continua valendo o bloqueio temporário,
-     * que contém o abuso e expira.</p>
+     * <p>O bloqueio longo é a punição mais cara, então exige duas coisas:
+     * {@link #PERM_BLOCK_THRESHOLD} violações <b>dentro</b> de
+     * {@link #VIOLATION_WINDOW_SEC} — repetição concentrada, não soma de uma
+     * vida — e um IP em que dê para confiar. Se o valor resolvido é loopback,
+     * rede privada ou CGNAT, ou o proxy não está repassando a origem — e aí
+     * todo mundo chega com o mesmo IP — ou é tráfego compartilhado por
+     * milhares de pessoas. Bloquear nesse caso derruba a aplicação inteira ou
+     * uma operadora de celular inteira. Continua valendo o bloqueio
+     * temporário, que contém o abuso e expira.</p>
      *
      * @param ctx     Contexto da requisição
      * @param ip      IP resolvido do cliente
@@ -634,15 +731,25 @@ public final class JavalinAPI {
                             c.getRequestsPerSecond(), c.getRequestsPerMinute(),
                             c.getBlockSeconds(), c.isPerIp()));
 
+            /* Long.MAX_VALUE é o sentinela que isPermanentlyBlocked() exige
+               para sequer consultar o banco. Gravando aqui o expiresAt real, o
+               bloqueio simplesmente não valia depois de um restart — só
+               voltava a valer de carona no laço de SuspectIp abaixo, que era
+               outra fonte de verdade para o mesmo fato. A validade continua
+               sendo do banco: quem decide é a linha em permanentblocks. */
             for (PermanentBlock b : Saveable.findAll(PermanentBlock.class))
                 if (!b.isExpired())
-                    BLOCKED_CACHE.put(b.getIpHash(), new BlockInfo(b.getExpiresAt(), "Permanent"));
+                    BLOCKED_CACHE.put(b.getIpHash(), new BlockInfo(Long.MAX_VALUE, "Permanent"));
 
-            for (SuspectIp s : Saveable.findAll(SuspectIp.class)) {
-                VIOLATION_CACHE.put(s.getIpHash(), new AtomicInteger(s.getTotalViolations()));
-                if (s.isPermanentlyBlocked())
-                    BLOCKED_CACHE.put(s.getIpHash(), new BlockInfo(Long.MAX_VALUE, "Permanent"));
-            }
+            /* O total de violações de SuspectIp NÃO volta para o cache. Ele é
+               o acumulado de sempre; o cache conta só a janela de
+               VIOLATION_WINDOW_SEC. Semeando um com o outro, quem tivesse
+               histórico antigo já subia o servidor acima do limiar e era
+               banido na primeira requisição depois do deploy.
+
+               SuspectIp.isPermanentlyBlocked também não entra: é estado
+               derivado, fica velho quando o bloqueio expira ou é desfeito, e
+               ressuscitava bloqueio já removido a cada reinicialização. */
 
             /* Bloqueio permanente é invisível para quem administra: quem foi
              * banido simplesmente não volta para reclamar, e quem olha o site
@@ -651,8 +758,9 @@ public final class JavalinAPI {
             long permanentes = BLOCKED_CACHE.values().stream()
                     .filter(b -> b.getUnblockTime() == Long.MAX_VALUE).count();
             if (permanentes > 0)
-                Console.warn("Há %d IP(s) com bloqueio PERMANENTE. Quem estiver na lista "
-                        + "recebe 403 em tudo. Para zerar: JavalinAPI.unblockAll().", permanentes);
+                Console.warn("Há %d IP(s) com bloqueio longo. Quem estiver na lista recebe 403 "
+                        + "em rota limitada (API, login, escrita); conteúdo público e arquivo "
+                        + "estático continuam abrindo. Para zerar: JavalinAPI.unblockAll().", permanentes);
         } catch (Exception e) {
             Console.error("Erro ao carregar configurações persistidas", e);
         }
@@ -783,21 +891,41 @@ public final class JavalinAPI {
     }
 
     /**
-     * Registra uma violação de segurança para o IP e persiste de forma assíncrona.
+     * Registra uma violação e devolve quantas houve na janela recente.
+     *
+     * <p>O retorno é o que decide o bloqueio longo, e por isso conta apenas o
+     * que está dentro de {@link #VIOLATION_WINDOW_SEC}. O total de sempre
+     * continua sendo gravado no {@link SuspectIp}, mas como histórico para
+     * quem administra — não como sentença.</p>
      *
      * @param ipHash Hash SHA-256 do IP
-     * @return Número total de violações acumuladas
+     * @return Violações dentro da janela de {@link #VIOLATION_WINDOW_SEC}
      */
     private static int registerViolation(String ipHash) {
-        int violations = VIOLATION_CACHE.computeIfAbsent(ipHash, k -> new AtomicInteger(0)).incrementAndGet();
+        long now = Instant.now().getEpochSecond();
+        Deque<Long> recentes = VIOLATION_CACHE.computeIfAbsent(ipHash, k -> new ArrayDeque<>());
+
+        int naJanela;
+        synchronized (recentes) {
+            while (!recentes.isEmpty() && recentes.peekFirst() < now - VIOLATION_WINDOW_SEC)
+                recentes.pollFirst();
+            recentes.addLast(now);
+            naJanela = recentes.size();
+        }
+
         Task.runLater(() -> {
             List<SuspectIp> suspects = Saveable.query(SuspectIp.class,
                     "SELECT data FROM suspectips WHERE json_extract(data, '$.ipHash') = ?", ipHash);
             SuspectIp suspect = suspects.isEmpty() ? new SuspectIp(ipHash) : suspects.get(0);
-            suspect.setTotalViolations(violations);
+            /* incrementViolations() em vez de setTotalViolations(n): o total é
+               histórico acumulado, e n aqui é só a janela. Ele também é quem
+               atualiza lastViolationAt — sem isso o campo ficava parado na
+               criação e a limpeza de 30 dias apagava suspeito ativo. */
+            suspect.incrementViolations();
             suspect.save();
         }, 0);
-        return violations;
+
+        return naJanela;
     }
 
     /**
@@ -945,8 +1073,14 @@ public final class JavalinAPI {
      * limite bloqueia a loja inteira, para sempre. Um IP assim continua sendo
      * limitado por rajada, mas nunca vira bloqueio permanente.</p>
      *
+     * <p>A faixa {@code 100.64.0.0/10} (CGNAT) entra pelo mesmo motivo, e é o
+     * caso que mais aparece no Brasil: operadora de celular não tem IPv4 para
+     * cada assinante, então coloca milhares de pessoas atrás do mesmo
+     * endereço. Banir esse IP não pune ninguém em particular — tira a cidade
+     * inteira do ar, e ela nem descobre por quê.</p>
+     *
      * @param ip IP resolvido por {@link #getClientIp(Context)}
-     * @return {@code true} se for loopback ou rede privada
+     * @return {@code true} se for loopback, rede privada ou CGNAT
      */
     private static boolean isSharedOrLocalIp(String ip) {
         if (ip == null || ip.isBlank()) return true;
@@ -955,7 +1089,8 @@ public final class JavalinAPI {
         return v.startsWith("127.") || v.equals("::1") || v.startsWith("0:0:0:0:0:0:0:1")
                 || v.startsWith("10.") || v.startsWith("192.168.")
                 || v.startsWith("169.254.") || v.startsWith("fc") || v.startsWith("fd")
-                || v.matches("^172\\.(1[6-9]|2\\d|3[01])\\..*");
+                || v.matches("^172\\.(1[6-9]|2\\d|3[01])\\..*")
+                || v.matches("^100\\.(6[4-9]|[7-9]\\d|1[01]\\d|12[0-7])\\..*");
     }
 
     /**
@@ -1096,8 +1231,13 @@ public final class JavalinAPI {
      * @param ctx Contexto da requisição
      */
     private static void sendPermanentBlockPage(Context ctx) {
+        /* Dizer que passa em 24 horas não é detalhe de texto: sem prazo, a
+           página soa definitiva e quem foi bloqueado por engano simplesmente
+           desiste do site — nunca aparece para reclamar, e o erro nunca é
+           descoberto. */
         sendDenyPage(ctx, StatusCode.FORBIDDEN.code(), "Acesso bloqueado",
-                "Este acesso foi bloqueado por atividade fora do normal. "
+                "Este acesso foi bloqueado por atividade fora do normal e "
+                + "volta ao normal em até <strong>24 horas</strong>. "
                 + "Se você acha que houve engano, fale com o suporte.");
     }
 

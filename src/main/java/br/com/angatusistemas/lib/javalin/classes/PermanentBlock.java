@@ -13,7 +13,7 @@ import lombok.Setter;
  * de um IP na tabela {@code permanentblocks}.
  *
  * <p>Cada bloqueio possui hash do IP, motivo, contagem de violações que o
- * causaram e expiração (30 dias por padrão). Bloqueios expirados são removidos
+ * causaram e expiração (24 horas por padrão). Bloqueios expirados são removidos
  * automaticamente pela limpeza periódica do {@code JavalinAPI}.</p>
  *
  * @author Angatu Sistemas
@@ -24,8 +24,19 @@ import lombok.Setter;
 @NoArgsConstructor
 public class PermanentBlock extends Saveable {
 
-    /** Duração padrão do bloqueio permanente em segundos (30 dias). */
-    public static final long DEFAULT_DURATION_SEC = 30L * 24 * 60 * 60;
+    /**
+     * Duração padrão do bloqueio em segundos (24 horas).
+     *
+     * <p>Eram 30 dias. Bloqueio automático erra — e quando erra, ninguém
+     * reclama: a pessoa apenas conclui que o site não funciona e não volta.
+     * Um mês de punição sem recurso é caro demais para uma decisão tomada por
+     * heurística.</p>
+     *
+     * <p>Vinte e quatro horas continuam inviabilizando quem está abusando (o
+     * bloqueio se renova enquanto o abuso continuar) e devolvem sozinhas o
+     * acesso de quem caiu ali por engano.</p>
+     */
+    public static final long DEFAULT_DURATION_SEC = 24L * 60 * 60;
 
     private String id;
     private String ipHash;
@@ -36,7 +47,7 @@ public class PermanentBlock extends Saveable {
     private String blockedBy;
 
     /**
-     * Cria um bloqueio permanente com duração padrão de 30 dias.
+     * Cria um bloqueio com duração padrão de 24 horas.
      *
      * @param ipHash         Hash SHA-256 do IP bloqueado
      * @param reason         Motivo do bloqueio
