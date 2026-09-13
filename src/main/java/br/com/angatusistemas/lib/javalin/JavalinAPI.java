@@ -8,7 +8,6 @@ import java.util.ArrayList;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -193,12 +192,50 @@ public final class JavalinAPI {
 
     // ==================== CACHES IN-MEMORY ====================
 
+    /**
+     * Intervalo da varredura que devolve memória dos mapas de rate limiting.
+     *
+     * <p>Um minuto: o custo é percorrer mapas que, entre duas varreduras, só podem ter crescido
+     * o que o tráfego de um minuto produziu.</p>
+     */
+    private static final long SWEEP_INTERVAL_MS = 60_000L;
+
+    /**
+     * Tempo parado depois do qual uma entrada sai do mapa, por mapa.
+     *
+     * <p>Cada número é a janela do próprio mapa com folga, e é isso que torna a remoção
+     * <strong>sem efeito sobre a decisão</strong>: o que é removido aqui é exatamente o que o
+     * código descartaria sozinho no próximo toque daquela chave. Reduzir qualquer um deles
+     * abaixo da janela correspondente enfraqueceria a proteção — o de violações, em especial,
+     * precisa cobrir {@link #VIOLATION_WINDOW_SEC} inteiro.</p>
+     */
+    private static final long IDLE_COUNTER_SEC = 120L;
+    private static final long IDLE_MINUTE_SEC = 300L;
+    private static final long IDLE_BURST_MS = 120_000L;
+    private static final long IDLE_VIOLATION_SEC = VIOLATION_WINDOW_SEC + 300L;
+
+    /**
+     * Teto declarado de chaves por mapa. Passar disto não é tráfego, é ataque ou defeito.
+     *
+     * <p>Nada é apagado à força ao ultrapassá-lo — apagar bloqueio ativo soltaria justamente
+     * quem está atacando. O teto existe para <strong>aparecer no console</strong>: sem essa
+     * linha, o sintoma chegaria como "o contêiner morreu de madrugada" e não como "um cliente
+     * abriu cem mil rotas distintas".</p>
+     */
+    private static final int MAX_KEYS_POR_MAPA = 50_000;
+
     /** Contador de janela deslizante por segundo, chaveado por IP+path */
     private static final Map<String, SlidingWindowCounter> SECOND_COUNTERS = new ConcurrentHashMap<>();
     /** Contador de janela deslizante por minuto, chaveado por IP+path */
     private static final Map<String, SlidingWindowCounter> MINUTE_COUNTERS = new ConcurrentHashMap<>();
-    /** Timestamps recentes para detecção de burst attack, chaveado por IP hash */
-    private static final Map<String, Queue<Long>> BURST_TRACKER = new ConcurrentHashMap<>();
+    /**
+     * Timestamps recentes para detecção de burst attack, chaveado por IP hash.
+     *
+     * <p>É {@link Deque} e não {@link Queue} para a varredura periódica conseguir ler o
+     * <strong>último</strong> instante sem consumir a fila — é assim que ela sabe que a entrada
+     * está parada e pode sair do mapa.</p>
+     */
+    private static final Map<String, Deque<Long>> BURST_TRACKER = new ConcurrentHashMap<>();
     /** IPs/chaves atualmente bloqueados com tempo de desbloqueio */
     private static final Map<String, BlockInfo> BLOCKED_CACHE = new ConcurrentHashMap<>();
 
@@ -357,6 +394,8 @@ public final class JavalinAPI {
 
         // Limpa dados antigos diariamente
         Task.runTimerWithFixedDelay(JavalinAPI::cleanupOldData, 0, 24 * 60 * 60 * 1000L);
+        // E o estado em memória do rate limiting de minuto em minuto (ver sweepRateLimitState).
+        Task.runTimerWithFixedDelay(JavalinAPI::sweepRateLimitState, SWEEP_INTERVAL_MS, SWEEP_INTERVAL_MS);
 
         try {
             Javalin javalin = Javalin.create(config -> {
@@ -573,6 +612,76 @@ public final class JavalinAPI {
         for (PermanentBlock block : Saveable.findAll(PermanentBlock.class))
             if (!block.isExpired()) active.add(block);
         return active;
+    }
+
+    /**
+     * Devolve a memória dos mapas em memória do rate limiting. Roda a cada minuto.
+     *
+     * <h3>O que estava acontecendo</h3>
+     * <p>As cinco estruturas de rate limiting ganhavam uma entrada por
+     * {@code computeIfAbsent} a <strong>cada requisição</strong>, e só perdiam entrada quando a
+     * chave era efetivamente <strong>bloqueada</strong>. Tráfego bem-comportado — que é a
+     * imensa maioria — nunca saía. As chaves dos contadores são {@code ipHash + "|" + path},
+     * então uma pessoa navegando por trinta telas deixava sessenta entradas permanentes, e um
+     * varredor de URLs pedindo quinhentos endereços deixava mil. A limpeza diária que existia
+     * ({@link #cleanupOldData}) mexe só no banco.</p>
+     *
+     * <p>Num processo que fica meses no ar, isso é um vazamento: cresce com o tráfego total
+     * acumulado, nunca recua, e não aparece como defeito em lugar nenhum — só como um consumo
+     * de memória que sobe devagar até o contêiner ser morto pelo sistema.</p>
+     *
+     * <h3>Por que remover não enfraquece a proteção</h3>
+     * <p>Toda estrutura aqui é uma <strong>janela</strong>: o contador de segundo guarda 1 s, o
+     * de minuto 60 s, o de burst 1 s e o de violações {@link #VIOLATION_WINDOW_SEC}. Passada a
+     * janela, o próprio código joga os instantes fora no toque seguinte daquela chave. Esta
+     * varredura remove apenas entradas cuja janela <strong>já está inteiramente vencida</strong>,
+     * com folga: recriar a entrada do zero produz exatamente o mesmo estado.</p>
+     *
+     * <p>Bloqueio é a exceção e por isso tem tratamento próprio: só sai do mapa o que já
+     * expirou (o mesmo que {@code isBlocked} faria), e bloqueio permanente
+     * ({@link Long#MAX_VALUE}) nunca sai.</p>
+     */
+    public static void sweepRateLimitState() {
+        try {
+            long agoraSec = Instant.now().getEpochSecond();
+            long agoraMs = System.currentTimeMillis();
+
+            SECOND_COUNTERS.values().removeIf(c -> c.lastSeenSeconds() < agoraSec - IDLE_COUNTER_SEC);
+            MINUTE_COUNTERS.values().removeIf(c -> c.lastSeenSeconds() < agoraSec - IDLE_MINUTE_SEC);
+            BURST_TRACKER.values().removeIf(f -> ultimoDe(f) < agoraMs - IDLE_BURST_MS);
+            VIOLATION_CACHE.values().removeIf(f -> ultimoDe(f) < agoraSec - IDLE_VIOLATION_SEC);
+            BLOCKED_CACHE.values().removeIf(b -> b.getUnblockTime() < agoraSec);
+
+            avisarSeGigante("contadores por segundo", SECOND_COUNTERS.size());
+            avisarSeGigante("contadores por minuto", MINUTE_COUNTERS.size());
+            avisarSeGigante("rastreio de burst", BURST_TRACKER.size());
+            avisarSeGigante("violações recentes", VIOLATION_CACHE.size());
+            avisarSeGigante("bloqueios ativos", BLOCKED_CACHE.size());
+        } catch (Throwable t) {
+            // Uma varredura que falha não pode derrubar o agendador: ela roda de novo em 1 min.
+            Console.warn("[JavalinAPI] varredura do rate limit: %s", t.getMessage());
+        }
+    }
+
+    /**
+     * Último instante da fila, lido sob a mesma trava que quem escreve nela usa.
+     *
+     * <p>Fila vazia devolve {@link Long#MAX_VALUE}: é uma entrada recém-criada, e removê-la no
+     * intervalo entre o {@code computeIfAbsent} e o primeiro registro seria uma corrida.</p>
+     */
+    private static long ultimoDe(Deque<Long> fila) {
+        synchronized (fila) {
+            Long ultimo = fila.peekLast();
+            return ultimo == null ? Long.MAX_VALUE : ultimo.longValue();
+        }
+    }
+
+    private static void avisarSeGigante(String nome, int tamanho) {
+        if (tamanho > MAX_KEYS_POR_MAPA) {
+            Console.warn("[JavalinAPI] rate limit: %s com %d chaves (teto declarado: %d). "
+                    + "Isso não é tráfego normal — investigue a origem.",
+                    nome, Integer.valueOf(tamanho), Integer.valueOf(MAX_KEYS_POR_MAPA));
+        }
     }
 
     /**
@@ -936,7 +1045,7 @@ public final class JavalinAPI {
      */
     private static boolean isBurstAttack(String ipHash) {
         long now = System.currentTimeMillis();
-        Queue<Long> timestamps = BURST_TRACKER.computeIfAbsent(ipHash, k -> new LinkedList<>());
+        Deque<Long> timestamps = BURST_TRACKER.computeIfAbsent(ipHash, k -> new ArrayDeque<>());
         synchronized (timestamps) {
             // Remove timestamps fora da janela de 1 segundo
             while (!timestamps.isEmpty() && timestamps.peek() < now - 1_000) timestamps.poll();

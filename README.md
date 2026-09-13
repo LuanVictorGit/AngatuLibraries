@@ -512,6 +512,20 @@ banco vive dentro do contêiner e some no deploy seguinte.
 > Consultas frequentes por campo pedem `createIndex(...)`; `findAll`/`findByPredicate`
 > percorrem a tabela.
 
+**Memória do banco, em contêiner apertado.** Cada conexão do pool carrega o próprio cache
+de páginas do SQLite, que é memória **nativa**: não aparece no gráfico de heap e é contada
+inteira pelo limite do contêiner. Dois ajustes existem para isso, ambos por variável de
+ambiente e ambos com padrão seguro:
+
+| Variável | Padrão | O que é |
+|---|---|---|
+| `ANGATU_DB_CACHE_KIB` | `8192` (8 MiB por conexão) | Cache de páginas do SQLite, em **KiB** |
+| `ANGATU_DB_POOL_SIZE` | `12` | Conexões do pool |
+
+Com os padrões, o teto é ~96 MiB nativos. Num contêiner de 1 GB rodando com folga, algo como
+`ANGATU_DB_CACHE_KIB=4096` e `ANGATU_DB_POOL_SIZE=6` corta isso para ~24 MiB sem efeito
+perceptível em consultas indexadas.
+
 ### 📨 E-mail (EmailAPI)
 
 ```java

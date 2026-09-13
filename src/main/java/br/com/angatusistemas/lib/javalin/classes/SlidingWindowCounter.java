@@ -67,4 +67,33 @@ public final class SlidingWindowCounter {
         timestamps.addLast(now);
         return true;
     }
+
+    /**
+     * Instante da última requisição registrada, em segundos (epoch).
+     *
+     * <p>Existe para a varredura que <strong>remove</strong> contadores parados dos mapas de
+     * rate limiting. Sem ela não havia como saber se uma chave ainda estava em uso, e o mapa
+     * só crescia: uma entrada por IP e por rota, para sempre, mesmo para quem passou uma vez
+     * e nunca mais voltou. Um varredor de URLs deixava mil entradas permanentes atrás de si.</p>
+     *
+     * <p>Devolver {@link Long#MAX_VALUE} quando o contador está vazio é deliberado: significa
+     * "acabou de ser criado e ainda não registrou nada", e mantém a entrada viva até a
+     * varredura seguinte, em vez de removê-la no exato instante entre o
+     * {@code computeIfAbsent} e o {@code checkAndIncrement}.</p>
+     *
+     * @return Segundos (epoch) da última requisição, ou {@link Long#MAX_VALUE} se vazio
+     */
+    public synchronized long lastSeenSeconds() {
+        Long ultimo = timestamps.peekLast();
+        return ultimo == null ? Long.MAX_VALUE : ultimo.longValue();
+    }
+
+    /**
+     * Quantas requisições estão dentro da janela neste momento, sem registrar nada.
+     *
+     * @return Tamanho atual da janela
+     */
+    public synchronized int size() {
+        return timestamps.size();
+    }
 }

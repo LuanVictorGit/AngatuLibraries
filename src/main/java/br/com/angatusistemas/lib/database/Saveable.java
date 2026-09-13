@@ -129,8 +129,34 @@ public abstract class Saveable {
 
     /** Arquivo padrão do banco, relativo ao diretório de trabalho da aplicação. */
     private static final String DEFAULT_DATABASE = "database.db";
-    /** Conexões do pool: leitores concorrentes; a escrita é serializada pelo SQLite. */
-    private static final int POOL_SIZE = 12;
+    /**
+     * Conexões do pool: leitores concorrentes; a escrita é serializada pelo SQLite.
+     *
+     * <p>Configurável por {@code ANGATU_DB_POOL_SIZE}. Cada conexão carrega o próprio cache de
+     * páginas do SQLite (ver {@link #CACHE_SIZE_KIB}), que é memória <strong>nativa</strong>:
+     * ela não aparece no gráfico de heap e é contada inteira pelo limite do contêiner. Num
+     * contêiner apertado, o número de conexões é uma decisão de memória, não só de
+     * concorrência — e precisa poder ser mudado sem recompilar a biblioteca.</p>
+     */
+    private static final int POOL_SIZE = intDoAmbiente("ANGATU_DB_POOL_SIZE", 12, 1, 64);
+
+    /**
+     * Cache de páginas do SQLite por conexão, em <strong>KiB</strong>. Configurável por
+     * {@code ANGATU_DB_CACHE_KIB}.
+     *
+     * <h3>Por que o número virou negativo</h3>
+     * <p>O {@code PRAGMA cache_size} tem duas unidades, decididas pelo sinal: positivo conta
+     * <strong>páginas</strong>, negativo conta <strong>KiB</strong>. O valor que estava aqui era
+     * {@code 10000} — positivo, portanto dez mil páginas. Com página de 4 KiB são cerca de
+     * <strong>40 MB por conexão</strong>, e com o pool cheio, até 480 MB de memória nativa.
+     * Dentro de um contêiner de 1 GB isso sozinho basta para o processo ser morto pelo sistema,
+     * e sem nenhum sinal no heap que explique por quê.</p>
+     *
+     * <p>Em KiB o número passa a dizer o que parecia dizer. O padrão de 8 MB por conexão dá
+     * até 96 MB com o pool cheio — folgado para consultas indexadas, que é o que a biblioteca
+     * faz, e recuperável: o SQLite só chega perto do teto quando precisa.</p>
+     */
+    private static final int CACHE_SIZE_KIB = intDoAmbiente("ANGATU_DB_CACHE_KIB", 8_192, 64, 1_048_576);
     /** Tempo que uma conexão espera pela trava de escrita antes de desistir (ms). */
     private static final String BUSY_TIMEOUT_MS = "5000";
     /** Quantidade de travas por faixa (striped locks) — limita a disputa sem crescer sem fim. */
@@ -764,6 +790,29 @@ public abstract class Saveable {
      * garante que toda transação de escrita pegue a trava logo no início — é
      * isso que impede duas alterações concorrentes de se sobreporem.</p>
      */
+    /**
+     * Lê um inteiro do ambiente, preso entre um mínimo e um máximo.
+     *
+     * <p>Valor ausente, vazio ou ilegível volta ao padrão em silêncio: uma variável de ambiente
+     * escrita errada não pode impedir a aplicação de subir — ela subiria sem banco, que é pior
+     * do que subir com o padrão.</p>
+     *
+     * <p>É {@code System.getenv} e não o {@code Env} da biblioteca de propósito: isto roda na
+     * inicialização estática desta classe, antes de qualquer coisa do projeto existir, e
+     * depender de outra classe da biblioteca aqui criaria um ciclo de carregamento. Na
+     * hospedagem os dois leem a mesma coisa.</p>
+     */
+    private static int intDoAmbiente(String chave, int padrao, int minimo, int maximo) {
+        try {
+            String v = System.getenv(chave);
+            if (v == null || v.isBlank()) return padrao;
+            int n = Integer.parseInt(v.trim());
+            return Math.max(minimo, Math.min(maximo, n));
+        } catch (Throwable t) {
+            return padrao;
+        }
+    }
+
     private static HikariDataSource dataSource() {
         HikariDataSource current = dataSource;
         if (current != null && !current.isClosed()) return current;
@@ -786,11 +835,14 @@ public abstract class Saveable {
             config.addDataSourceProperty("synchronous", "NORMAL");
             config.addDataSourceProperty("busy_timeout", BUSY_TIMEOUT_MS);
             config.addDataSourceProperty("transaction_mode", "IMMEDIATE");
-            config.addDataSourceProperty("cache_size", 10000);
+            // Negativo = KiB. Positivo seria PÁGINAS, e é essa troca de unidade que fazia o
+            // valor anterior reservar dez vezes mais memória nativa do que parecia.
+            config.addDataSourceProperty("cache_size", -CACHE_SIZE_KIB);
             config.addDataSourceProperty("temp_store", "MEMORY");
 
             dataSource = new HikariDataSource(config);
-            Console.log("&7Banco SQLite: &f%s &7(WAL, %d conexões, escrita serializada)", path, POOL_SIZE);
+            Console.log("&7Banco SQLite: &f%s &7(WAL, %d conexões, cache de %d MiB por conexão, escrita serializada)",
+                    path, POOL_SIZE, Integer.valueOf(CACHE_SIZE_KIB / 1024));
             return dataSource;
         }
     }
