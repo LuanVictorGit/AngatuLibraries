@@ -157,8 +157,18 @@ public abstract class Saveable {
      * faz, e recuperável: o SQLite só chega perto do teto quando precisa.</p>
      */
     private static final int CACHE_SIZE_KIB = intDoAmbiente("ANGATU_DB_CACHE_KIB", 8_192, 64, 1_048_576);
-    /** Tempo que uma conexão espera pela trava de escrita antes de desistir (ms). */
-    private static final String BUSY_TIMEOUT_MS = "5000";
+    /**
+     * Tempo que uma conexão espera pela trava de escrita antes de desistir (ms). Configurável por
+     * {@code ANGATU_DB_BUSY_TIMEOUT_MS}.
+     *
+     * <p>Dentro do processo a espera passou a ser desnecessária: a trava de escritor único do
+     * {@link #write(String, SqlWork)} garante uma transação de escrita por vez. Este tempo existe
+     * para os escritores que a biblioteca <strong>não</strong> controla — comando de manutenção
+     * numa conexão própria, rotina de backup, outro processo com o mesmo arquivo aberto. Cinco
+     * segundos era pouco para um checkpoint ou um backup de banco grande.</p>
+     */
+    private static final String BUSY_TIMEOUT_MS =
+            String.valueOf(intDoAmbiente("ANGATU_DB_BUSY_TIMEOUT_MS", 30_000, 1_000, 300_000));
     /** Quantidade de travas por faixa (striped locks) — limita a disputa sem crescer sem fim. */
     private static final int LOCK_STRIPES = 64;
     /** Nomes de campo aceitos no SQL de índice/consulta por campo. */
@@ -177,8 +187,40 @@ public abstract class Saveable {
     /** Conexão presa à thread enquanto durar uma transação explícita. */
     private static final ThreadLocal<Connection> CURRENT_TRANSACTION = new ThreadLocal<>();
 
+    /**
+     * Conexão de leitura presa à thread enquanto durar uma leitura — para que uma leitura
+     * <strong>dentro</strong> de outra não peça uma segunda conexão ao pool.
+     *
+     * <h3>O impasse que isto evita</h3>
+     * <p>Desserializar uma entidade pode disparar uma consulta: basta o construtor da classe
+     * consultar alguma coisa — gerar um identificador que ainda não exista, por exemplo. Isso
+     * acontece <strong>dentro</strong> da leitura que já tem uma conexão emprestada, e em
+     * {@link #query(Class, String, Object...)} acontece com o cursor aberto, uma vez por linha
+     * lida.</p>
+     *
+     * <p>O resultado é cada thread segurando uma conexão e pedindo outra. Com N threads e um pool
+     * de N conexões, todas seguram a primeira e esperam pela segunda: <strong>ninguém solta, e
+     * ninguém anda</strong>. O pool estoura o tempo de espera e devolve erro em <em>toda</em>
+     * leitura — e uma leitura que falha era o começo da pior sequência deste sistema: registro
+     * único "não encontrado", seguido de gravação dos valores de fábrica por cima do real.</p>
+     *
+     * <p>Reaproveitando a conexão, uma thread nunca segura duas. O impasse deixa de ser possível,
+     * em vez de ficar dependendo de o pool ser maior que a concorrência do momento.</p>
+     */
+    private static final ThreadLocal<Connection> CURRENT_READ = new ThreadLocal<>();
+
     /** Travas por faixa: serializam leitura-alteração-gravação do mesmo registro. */
     private static final ReentrantLock[] ROW_LOCKS = new ReentrantLock[LOCK_STRIPES];
+
+    /**
+     * Escritor único do processo. O SQLite aceita uma escrita por vez no arquivo; esta trava faz
+     * a fila <strong>aqui</strong>, onde esperar é barato e ordenado, em vez de deixar as conexões
+     * disputarem a trava do arquivo e uma delas estourar {@code SQLITE_BUSY}.
+     *
+     * <p>Justa ({@code true}) de propósito: sem isso, sob rajada de rastreamento, a gravação
+     * ocasional de uma tela poderia esperar indefinidamente atrás das gravações de GPS.</p>
+     */
+    private static final ReentrantLock WRITE_LOCK = new ReentrantLock(true);
 
     static {
         for (int i = 0; i < LOCK_STRIPES; i++) ROW_LOCKS[i] = new ReentrantLock();
@@ -251,7 +293,7 @@ public abstract class Saveable {
 
         ReentrantLock lock = acquireRowLock(type, id);
         try {
-            Boolean saved = write(Boolean.FALSE, "salvar " + type.getSimpleName() + " id=" + id,
+            Boolean saved = write("salvar " + type.getSimpleName() + " id=" + id,
                     conn -> writeRow(conn, table, id, json));
             return Boolean.TRUE.equals(saved);
         } finally {
@@ -287,7 +329,7 @@ public abstract class Saveable {
         prepare(type);
         String table = tableName(type);
 
-        return read(null, "recarregar " + type.getSimpleName() + " id=" + id, conn -> {
+        return read("recarregar " + type.getSimpleName() + " id=" + id, conn -> {
             String json = selectJson(conn, table, id);
             if (json == null) return null;
             Object fresh = GsonAPI.get().fromJson(json, type);
@@ -313,7 +355,7 @@ public abstract class Saveable {
         if (id == null) return null;
         prepare(clazz);
         String table = tableName(clazz);
-        return read(null, "buscar " + clazz.getSimpleName() + " id=" + id, conn -> {
+        return read("buscar " + clazz.getSimpleName() + " id=" + id, conn -> {
             String json = selectJson(conn, table, id);
             return json == null ? null : GsonAPI.get().fromJson(json, clazz);
         });
@@ -413,7 +455,7 @@ public abstract class Saveable {
         if (id == null) return false;
         prepare(clazz);
         String table = tableName(clazz);
-        Boolean found = read(Boolean.FALSE, "verificar " + clazz.getSimpleName() + " id=" + id, conn -> {
+        Boolean found = read("verificar " + clazz.getSimpleName() + " id=" + id, conn -> {
             try (PreparedStatement ps = conn.prepareStatement("SELECT 1 FROM " + table + " WHERE id = ? LIMIT 1")) {
                 ps.setString(1, id);
                 try (ResultSet rs = ps.executeQuery()) {
@@ -433,7 +475,7 @@ public abstract class Saveable {
     public static long count(Class<?> clazz) {
         prepare(clazz);
         String table = tableName(clazz);
-        Long total = read(0L, "contar " + clazz.getSimpleName(), conn -> {
+        Long total = read("contar " + clazz.getSimpleName(), conn -> {
             try (Statement st = conn.createStatement();
                  ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM " + table)) {
                 return rs.next() ? rs.getLong(1) : 0L;
@@ -471,7 +513,7 @@ public abstract class Saveable {
      */
     public static <T> List<T> query(Class<T> clazz, String sql, Object... params) {
         prepare(clazz);
-        List<T> list = read(new ArrayList<>(), "consultar " + clazz.getSimpleName(), conn -> {
+        List<T> list = read("consultar " + clazz.getSimpleName(), conn -> {
             List<T> found = new ArrayList<>();
             try (PreparedStatement ps = conn.prepareStatement(sql)) {
                 for (int i = 0; i < params.length; i++) ps.setObject(i + 1, params[i]);
@@ -512,7 +554,7 @@ public abstract class Saveable {
         prepare(clazz);
         String table = tableName(clazz);
         String index = "idx_" + table + "_" + fieldName.toLowerCase(Locale.ROOT);
-        Boolean created = write(Boolean.FALSE, "criar índice " + index, conn -> {
+        Boolean created = write("criar índice " + index, conn -> {
             try (Statement st = conn.createStatement()) {
                 st.execute("CREATE INDEX IF NOT EXISTS " + index + " ON " + table
                         + "(json_extract(data, '$." + jsonKey(clazz, fieldName) + "'))");
@@ -550,7 +592,7 @@ public abstract class Saveable {
 
         ReentrantLock lock = acquireRowLock(clazz, id);
         try {
-            return write(null, "alterar " + clazz.getSimpleName() + " id=" + id, conn -> {
+            return write("alterar " + clazz.getSimpleName() + " id=" + id, conn -> {
                 String json = selectJson(conn, table, id);
                 if (json == null) return null;
 
@@ -594,7 +636,7 @@ public abstract class Saveable {
         String table = tableName(clazz);
         ReentrantLock lock = acquireRowLock(clazz, id);
         try {
-            Boolean deleted = write(Boolean.FALSE, "excluir " + clazz.getSimpleName() + " id=" + id, conn -> {
+            Boolean deleted = write("excluir " + clazz.getSimpleName() + " id=" + id, conn -> {
                 try (PreparedStatement ps = conn.prepareStatement("DELETE FROM " + table + " WHERE id = ?")) {
                     ps.setString(1, id);
                     return ps.executeUpdate() > 0;
@@ -615,7 +657,7 @@ public abstract class Saveable {
     public static int deleteAll(Class<?> clazz) {
         prepare(clazz);
         String table = tableName(clazz);
-        Integer deleted = write(0, "excluir todos os " + clazz.getSimpleName(), conn -> {
+        Integer deleted = write("excluir todos os " + clazz.getSimpleName(), conn -> {
             try (Statement st = conn.createStatement()) {
                 return st.executeUpdate("DELETE FROM " + table);
             }
@@ -665,24 +707,31 @@ public abstract class Saveable {
         Connection running = CURRENT_TRANSACTION.get();
         if (running != null) return actions.get(); // já existe transação nesta thread
 
-        Connection conn = null;
-        boolean committed = false;
+        // Mesma trava de escritor único do write(): uma transação explícita é uma escrita como
+        // qualquer outra, e deixá-la de fora traria de volta a disputa que aquela trava remove.
+        WRITE_LOCK.lock();
         try {
-            conn = dataSource().getConnection();
-            conn.setAutoCommit(false); // dispara BEGIN IMMEDIATE: trava de escrita desde o início
-            CURRENT_TRANSACTION.set(conn);
-            T result = actions.get();
-            conn.commit();
-            committed = true;
-            return result;
-        } catch (SQLException e) {
-            throw new IllegalStateException("Falha ao abrir/confirmar transação do Saveable", e);
-        } finally {
-            CURRENT_TRANSACTION.remove();
-            if (conn != null) {
-                if (!committed) rollbackQuietly(conn);
-                restoreAndClose(conn);
+            Connection conn = null;
+            boolean committed = false;
+            try {
+                conn = dataSource().getConnection();
+                conn.setAutoCommit(false); // dispara BEGIN IMMEDIATE: trava de escrita desde o início
+                CURRENT_TRANSACTION.set(conn);
+                T result = actions.get();
+                conn.commit();
+                committed = true;
+                return result;
+            } catch (SQLException e) {
+                throw new IllegalStateException("Falha ao abrir/confirmar transação do Saveable", e);
+            } finally {
+                CURRENT_TRANSACTION.remove();
+                if (conn != null) {
+                    boolean desfeita = committed || rollbackQuietly(conn);
+                    restoreAndClose(conn, desfeita);
+                }
             }
+        } finally {
+            WRITE_LOCK.unlock();
         }
     }
 
@@ -727,8 +776,12 @@ public abstract class Saveable {
     /**
      * Executa uma leitura. Fora de transação, a conexão vem do pool em
      * autocommit — leitores não bloqueiam nem são bloqueados no modo WAL.
+     *
+     * <p>Falha de banco <strong>sobe</strong> como {@link PersistenceException}. Devolver um valor
+     * de recuo aqui era o que fazia "o banco falhou" chegar ao chamador disfarçado de "não há
+     * nada" — ver o Javadoc daquela classe.</p>
      */
-    private static <R> R read(R fallback, String what, SqlWork<R> work) {
+    private static <R> R read(String what, SqlWork<R> work) {
         Connection running = CURRENT_TRANSACTION.get();
         if (running != null) {
             try {
@@ -737,19 +790,49 @@ public abstract class Saveable {
                 throw new IllegalStateException("Erro ao " + what, e);
             }
         }
+
+        // LEITURA DENTRO DE LEITURA REAPROVEITA A CONEXÃO. Ver o Javadoc de CURRENT_READ: pegar
+        // uma segunda conexão aqui é o caminho direto para o pool secar e o sistema parar.
+        Connection aberta = CURRENT_READ.get();
+        if (aberta != null) {
+            try {
+                return work.apply(aberta);
+            } catch (SQLException e) {
+                Console.error("Erro ao " + what, e);
+                throw new PersistenceException("Erro ao " + what, e);
+            }
+        }
+
         try (Connection conn = dataSource().getConnection()) {
+            CURRENT_READ.set(conn);
             return work.apply(conn);
         } catch (SQLException e) {
             Console.error("Erro ao " + what, e);
-            return fallback;
+            throw new PersistenceException("Erro ao " + what, e);
+        } finally {
+            CURRENT_READ.remove();
         }
     }
 
     /**
      * Executa uma escrita dentro de uma transação. Se já houver transação na
      * thread, a operação entra nela — o commit fica com quem abriu.
+     *
+     * <h3>Escritor único</h3>
+     * <p>O SQLite aceita <strong>um escritor por arquivo</strong>. Sem esta trava, as conexões do
+     * pool disputavam essa exclusividade no {@code BEGIN IMMEDIATE} logo abaixo: a perdedora
+     * esperava o {@code busy_timeout} e estourava {@code SQLITE_BUSY} — um erro de disputa que a
+     * aplicação recebia como "não consegui", e que em alguns caminhos virava perda de dado.</p>
+     *
+     * <p>Serializando aqui, dentro do processo, nunca há duas transações de escrita ao mesmo
+     * tempo e a disputa <strong>deixa de existir</strong> — em vez de ser escondida por um tempo
+     * de espera maior. As leituras seguem concorrentes: é para isso que serve o WAL.</p>
+     *
+     * <p>A ordem de aquisição é sempre {@code faixa do registro → trava de escrita}: a trava de
+     * faixa não é tomada dentro de transação (ver {@link #acquireRowLock(Class, String)}), então
+     * não existe caminho que as pegue na ordem inversa.</p>
      */
-    private static <R> R write(R fallback, String what, SqlWork<R> work) {
+    private static <R> R write(String what, SqlWork<R> work) {
         Connection running = CURRENT_TRANSACTION.get();
         if (running != null) {
             try {
@@ -760,22 +843,33 @@ public abstract class Saveable {
             }
         }
 
-        Connection conn = null;
+        WRITE_LOCK.lock();
         try {
-            conn = dataSource().getConnection();
-            conn.setAutoCommit(false);
-            R result = work.apply(conn);
-            conn.commit();
-            return result;
-        } catch (SQLException e) {
-            rollbackQuietly(conn);
-            Console.error("Erro ao " + what, e);
-            return fallback;
-        } catch (RuntimeException e) {
-            rollbackQuietly(conn);
-            throw e;
+            Connection conn = null;
+            boolean committed = false;
+            try {
+                conn = dataSource().getConnection();
+                conn.setAutoCommit(false);
+                // A desserialização feita aqui dentro pode disparar consulta (ver CURRENT_READ).
+                // Sem esta linha ela pediria uma SEGUNDA conexão — e pediria segurando a trava de
+                // escrita, que é o pior lugar possível para esperar.
+                CURRENT_READ.set(conn);
+                R result = work.apply(conn);
+                conn.commit();
+                committed = true;
+                return result;
+            } catch (SQLException e) {
+                Console.error("Erro ao " + what, e);
+                throw new PersistenceException("Erro ao " + what, e);
+            } finally {
+                CURRENT_READ.remove();
+                if (conn != null) {
+                    boolean desfeita = committed || rollbackQuietly(conn);
+                    restoreAndClose(conn, desfeita);
+                }
+            }
         } finally {
-            restoreAndClose(conn);
+            WRITE_LOCK.unlock();
         }
     }
 
@@ -861,7 +955,11 @@ public abstract class Saveable {
 
             String table = tableName(type);
             String sql = "CREATE TABLE IF NOT EXISTS " + table + " (id TEXT PRIMARY KEY, data TEXT NOT NULL)";
+            // Mesma regra do CURRENT_READ: se a thread já tem conexão emprestada, use aquela.
+            // Preparar a tabela de uma classe que aparece pela primeira vez durante uma leitura
+            // pediria a segunda conexão exatamente como o resto pedia.
             Connection running = CURRENT_TRANSACTION.get();
+            if (running == null) running = CURRENT_READ.get();
             try {
                 if (running != null) {
                     createTable(running, sql);
@@ -1033,19 +1131,60 @@ public abstract class Saveable {
         }
     }
 
-    /** Desfaz a transação sem deixar a falha original ser encoberta. */
-    private static void rollbackQuietly(Connection conn) {
-        if (conn == null) return;
+    /**
+     * Desfaz a transação sem deixar a falha original ser encoberta.
+     *
+     * @return {@code true} se a transação foi mesmo desfeita (ou não havia nenhuma aberta)
+     */
+    private static boolean rollbackQuietly(Connection conn) {
+        if (conn == null) return true;
         try {
             if (!conn.getAutoCommit()) conn.rollback();
+            return true;
         } catch (SQLException e) {
             Console.error("Falha ao desfazer a transação do Saveable", e);
+            return false;
         }
     }
 
-    /** Devolve a conexão ao pool em autocommit, como ela foi emprestada. */
-    private static void restoreAndClose(Connection conn) {
+    /**
+     * Devolve a conexão ao pool em autocommit, como ela foi emprestada.
+     *
+     * <h3>Conexão com transação em estado desconhecido não volta ao pool</h3>
+     * <p>Quando o {@code rollback} falha — e ele falha, tipicamente por disputa de trava — a
+     * conexão continua com uma transação aberta e parcialmente escrita. Devolvê-la assim era
+     * <strong>pior do que perdê-la</strong>: o {@code setAutoCommit(true)} logo abaixo emite
+     * {@code commit} no driver do SQLite, ou seja, <strong>confirmaria</strong> exatamente o que
+     * deveria ter sido desfeito. E a conexão seguinte a pegar essa conexão emprestada herdaria o
+     * que sobrou.</p>
+     *
+     * <p>Por isso, transação não desfeita significa conexão <strong>descartada</strong>: o pool
+     * abre outra, limpa. Uma conexão custa milissegundos; uma gravação parcial confirmada custa
+     * o dado.</p>
+     *
+     * @param desfeita {@code false} quando o {@code rollback} não pôde ser concluído
+     */
+    private static void restoreAndClose(Connection conn, boolean desfeita) {
         if (conn == null) return;
+
+        if (!desfeita) {
+            // evictConnection MARCA a conexão para ser descartada; quem a devolve ao pool ainda é
+            // o close(). Sem os dois, a conexão fica emprestada para sempre e o pool seca — o
+            // efeito é indistinguível de um travamento do sistema inteiro.
+            try {
+                HikariDataSource ds = dataSource;
+                if (ds != null && !ds.isClosed()) ds.evictConnection(conn);
+            } catch (Throwable t) {
+                Console.error("Falha ao marcar conexão para descarte", t);
+            }
+            try {
+                conn.close();
+            } catch (Throwable t) {
+                Console.error("Falha ao descartar conexão com transação pendente", t);
+            }
+            return;
+        }
+
         try {
             if (!conn.getAutoCommit()) conn.setAutoCommit(true);
         } catch (SQLException ignored) {
