@@ -31,6 +31,8 @@ package br.com.angatusistemas.lib.database;
  * <p>É {@code RuntimeException} de propósito: a persistência aparece em praticamente toda
  * assinatura da biblioteca, e obrigar {@code throws} em cada uma delas só produziria
  * {@code catch} vazio — que é exatamente o comportamento que esta classe veio corrigir.</p>
+ *
+ * @author Angatu Sistemas
  */
 public class PersistenceException extends RuntimeException {
 
