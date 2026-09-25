@@ -11,16 +11,18 @@ bin/
 .gitignore
 .github/
 
-# Banco e dados locais — o volume do Coolify é a fonte da verdade em produção
-*.db
-*.db-shm
-*.db-wal
+# Banco e dados locais — o volume do Coolify é a fonte da verdade em produção.
+# "**/" pega em qualquer pasta: sem ele, só a raiz era excluída, e um banco ou .env
+# dentro de src/main/resources entrava na imagem (e o dotenv lê .env do classpath).
+**/*.db
+**/*.db-shm
+**/*.db-wal
 data/
 uploads/
 
 # Segredos: variáveis de ambiente são configuradas no painel do Coolify
-.env
-.env.*
+**/.env
+**/.env.*
 
 # Ferramentas de desenvolvimento (o CSS do Tailwind vai versionado, gerado antes do commit)
 tools/

@@ -14,20 +14,14 @@
 		<maven.compiler.source>21</maven.compiler.source>
 		<maven.compiler.target>21</maven.compiler.target>
 		<maven.compiler.release>21</maven.compiler.release>
+		<lombok.version>1.18.44</lombok.version>
 	</properties>
 
-	<!-- Repositórios -->
+	<!-- Repositórios: todas as dependências vêm do Maven Central -->
 	<repositories>
-		<!-- Maven Central -->
 		<repository>
 			<id>central</id>
 			<url>https://repo.maven.apache.org/maven2</url>
-		</repository>
-
-		<!-- JitPack (para libs do GitHub) -->
-		<repository>
-			<id>jitpack.io</id>
-			<url>https://jitpack.io</url>
 		</repository>
 	</repositories>
 
@@ -45,13 +39,44 @@
 						<path>
 							<groupId>org.projectlombok</groupId>
 							<artifactId>lombok</artifactId>
-							<version>1.18.44</version>
+							<version>${lombok.version}</version>
 						</path>
 					</annotationProcessorPaths>
 				</configuration>
 			</plugin>
+
+			<!-- Testes (JUnit 5). O JitPack publica com -DskipTests: os testes rodam
+			     aqui, antes do push, e nunca atrasam nem quebram a publicação. -->
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-surefire-plugin</artifactId>
+				<version>3.5.4</version>
+				<configuration>
+					<!-- Uma JVM nova por classe de teste: a biblioteca guarda estado estático
+					     (servidor, pools do banco, bloqueios) e um teste não pode herdar o do outro. -->
+					<forkCount>1</forkCount>
+					<reuseForks>false</reuseForks>
+					<!-- O Selector do NIO (Jetty, HttpClient) abre um socket de domínio Unix na pasta
+					     temporária. No Windows com TEMP em nome curto (C:\Users\NOME~1\...), o connect
+					     falha com "Invalid argument" e nenhum servidor sobe no teste. -->
+					<argLine>"-Djdk.net.unixdomain.tmpdir=${project.build.directory}"</argLine>
+				</configuration>
+			</plugin>
 		</plugins>
 	</build>
+
+	<!-- Versões do JUnit alinhadas por BOM: um número só para todos os módulos dele -->
+	<dependencyManagement>
+		<dependencies>
+			<dependency>
+				<groupId>org.junit</groupId>
+				<artifactId>junit-bom</artifactId>
+				<version>5.14.4</version>
+				<type>pom</type>
+				<scope>import</scope>
+			</dependency>
+		</dependencies>
+	</dependencyManagement>
 
 	<!--
 		ESTRATÉGIA DE DEPENDÊNCIAS
@@ -79,7 +104,7 @@
 		<dependency>
 			<groupId>org.projectlombok</groupId>
 			<artifactId>lombok</artifactId>
-			<version>1.18.44</version>
+			<version>${lombok.version}</version>
 			<scope>provided</scope>
 		</dependency>
 
@@ -91,7 +116,7 @@
 		<dependency>
 			<groupId>io.javalin</groupId>
 			<artifactId>javalin</artifactId>
-			<version>7.2.2</version>
+			<version>7.2.3</version>
 			<optional>true</optional>
 		</dependency>
 
@@ -99,7 +124,7 @@
 		<dependency>
 			<groupId>io.javalin.community.ssl</groupId>
 			<artifactId>javalin-ssl</artifactId>
-			<version>7.2.2</version>
+			<version>7.2.3</version>
 			<optional>true</optional>
 		</dependency>
 
@@ -175,7 +200,7 @@
 		<dependency>
 			<groupId>org.bouncycastle</groupId>
 			<artifactId>bcprov-jdk18on</artifactId>
-			<version>1.83</version>
+			<version>1.86</version>
 			<optional>true</optional>
 		</dependency>
 
@@ -203,7 +228,7 @@
 		<dependency>
 			<groupId>com.sun.mail</groupId>
 			<artifactId>jakarta.mail</artifactId>
-			<version>2.0.1</version>
+			<version>2.0.2</version>
 			<optional>true</optional>
 		</dependency>
 
@@ -282,6 +307,17 @@
 			<artifactId>javase</artifactId>
 			<version>3.5.3</version>
 			<optional>true</optional>
+		</dependency>
+
+		<!-- ============================================================= -->
+		<!-- TESTES (test)                                                  -->
+		<!-- ============================================================= -->
+
+		<!-- JUnit 5: só no escopo de teste — não entra no JAR nem chega ao consumidor -->
+		<dependency>
+			<groupId>org.junit.jupiter</groupId>
+			<artifactId>junit-jupiter</artifactId>
+			<scope>test</scope>
 		</dependency>
 
 	</dependencies>

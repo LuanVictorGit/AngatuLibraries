@@ -33,5 +33,8 @@ Thumbs.db
 *.swp
 *.swo
 *.env
+.env
+.env.*
+!.env.example
 /.apt_generated/
 /.apt_generated_tests/

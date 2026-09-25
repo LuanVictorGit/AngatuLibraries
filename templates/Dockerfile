@@ -17,6 +17,8 @@ WORKDIR /build
 COPY pom.xml .
 RUN mvn -B -q dependency:go-offline
 
+# Só pom.xml e src/ entram no build. Se o projeto tiver outro arquivo de build na
+# raiz (lombok.config, .mvn/), acrescente um COPY para ele aqui.
 COPY src ./src
 RUN mvn -B -q clean package -DskipTests \
  && mkdir -p /out \
@@ -28,11 +30,19 @@ FROM eclipse-temurin:21-jre
 # ANGATU_ENV=production faz a lib tratar a execução como produção (cookie Secure,
 # nada de atalho de desenvolvimento). ANGATU_DB_PATH aponta o SQLite para o
 # volume — sem isso o banco vive dentro do contêiner e some no próximo deploy.
+#
+# Memória: MaxRAMPercentage é relativo ao limite de memória do contêiner, que se
+# define no Coolify (Resource Limits → Memory) — sem limite, a conta é sobre a RAM
+# inteira do servidor. Nunca -Xmx. ExitOnOutOfMemoryError derruba o processo no
+# primeiro OutOfMemoryError: sem ele, a JVM seguia viva com threads mortas, o
+# /health continuava respondendo e o contêiner quebrado nunca era reiniciado.
+# LANG=C.UTF-8: sem ele a saída padrão da JVM é ASCII e todo acento do log vira "?".
 ENV TZ=America/Sao_Paulo \
+    LANG=C.UTF-8 \
     ANGATU_ENV=production \
     ANGATU_DB_PATH=/data/database.db \
     PORT=8080 \
-    JAVA_OPTS="-XX:MaxRAMPercentage=75 -Djava.awt.headless=true"
+    JAVA_OPTS="-XX:MaxRAMPercentage=75 -XX:+ExitOnOutOfMemoryError -Djava.awt.headless=true"
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends curl tzdata \
@@ -52,4 +62,8 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \
   CMD curl -fsS "http://127.0.0.1:${PORT}/health" || exit 1
 
+# O "exec" deixa o Java como processo principal do contêiner: o SIGTERM de um deploy
+# chega a ele, e os ganchos de desligamento da biblioteca rodam — param o servidor,
+# esperam as tarefas, os e-mails e as notificações da fila, e fecham o banco. Sem o
+# "exec", o sinal fica no shell e o Docker mata o Java 10 s depois, sem nada disso.
 ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar /opt/app/app.jar"]
