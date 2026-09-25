@@ -9,37 +9,54 @@ Arquivos prontos para copiar na raiz de qualquer projeto que usa a AngatuLibrari
 
 ## 1. Inicialização da aplicação
 
-O `AngatuLib` sobe em **HTTP** e o Coolify cuida do certificado. A porta vem do ambiente:
+O `AngatuLib` sobe só em **HTTP**: certificado, renovação e redirecionamento para HTTPS são
+do Coolify, e a biblioteca não tem modo HTTPS próprio. A porta vem do ambiente.
+Toda configuração do servidor vem **antes** do `new AngatuLib(...)`, para valer desde a
+primeira requisição:
 
 ```java
+import br.com.angatusistemas.lib.AngatuLib;
+import br.com.angatusistemas.lib.javalin.JavalinAPI;
+
 public class Main {
     public static void main(String[] args) {
         int port = Integer.parseInt(System.getenv().getOrDefault("PORT", "8080"));
 
-        JavalinAPI.setTrustedProxyHops(1); // o proxy do Coolify está na frente
-        new AngatuLib("meusite.com.br", port, true);
-
+        JavalinAPI.setTrustedProxyHops(1);    // o proxy do Coolify está na frente (2 com Cloudflare)
         JavalinAPI.addIgnoredPath("/health"); // usado pelo HEALTHCHECK do contêiner
+
+        new AngatuLib("meusite.com.br", port, true);
     }
 }
 ```
 
-Só peça HTTPS ao Javalin fora do Coolify, quando o próprio servidor tiver os certificados:
+A rota `/health` é do projeto — a biblioteca não registra nenhuma:
 
 ```java
-new AngatuLib("meusite.com.br", 443, true, true); // exige /etc/letsencrypt/live/meusite.com.br
+import br.com.angatusistemas.lib.javalin.routes.Route;
+import br.com.angatusistemas.lib.javalin.routes.RouteType;
+
+public class HealthRoute extends Route {
+    public HealthRoute() {
+        super("/health", RouteType.GET, ctx -> ctx.json("{\"status\":\"ok\"}"));
+    }
+}
 ```
 
 ## 2. Configuração no Coolify
 
-1. **Application → Docker­file** como build pack, apontando para o repositório.
+1. **Application → Dockerfile** como build pack, apontando para o repositório.
 2. **Port**: `8080` (mesma do `EXPOSE`/`PORT`).
 3. **Domain**: o domínio do projeto — o Coolify emite e renova o certificado.
 4. **Persistent Storage**: volume nomeado montado em `/data` — um por projeto. É
    onde ficam o `database.db` daquele projeto (SQLite do `Saveable`), `.env` e
    uploads. Sem isso, os dados somem a cada deploy. Cada aplicação tem o seu banco;
    nada é compartilhado entre projetos.
-5. **Environment Variables**: as chaves do `.env` (`EMAIL_KEY`, `MP_ACCESS_TOKEN`, …).
+5. **Resource Limits → Memory**: defina o limite. O `-XX:MaxRAMPercentage=75` do
+   Dockerfile é uma porcentagem **desse limite**; sem limite, a conta é sobre a RAM do
+   servidor inteiro. Em contêiner de 1 GB ou menos, ou com Playwright, baixe para 50–60:
+   o cache do SQLite, as threads e o Chromium usam memória fora do heap.
+6. **Environment Variables**: as chaves do `.env` do projeto (ex.: `EMAIL_KEY`).
    A biblioteca lê variáveis de ambiente pelo mesmo `Env.get()`.
 
 > Prefira **volume nomeado** a caminho do host: o volume herda o dono de `/data`
@@ -49,8 +66,12 @@ new AngatuLib("meusite.com.br", 443, true, true); // exige /etc/letsencrypt/live
 
 - `public/styles/tailwind.css` **versionado** — o Coolify constrói a partir do
   repositório, não da sua máquina; CSS gerado e não commitado gera site sem estilo.
-- Rota `GET /health` respondendo 200 e fora do rate limit.
-- `Saveable.shutdown()` e `Task.shutdown()` em `Runtime.getRuntime().addShutdownHook(...)`.
+- Rota `GET /health` respondendo 200 e fora da verificação de segurança (seção 1).
+- Nenhum gancho de desligamento próprio para o banco e as tarefas: o `AngatuLib` registra
+  o dele, que para o servidor, espera a fila do `Task` e fecha o `Saveable` quando o Coolify
+  para o contêiner. Um `Task.shutdown()` num gancho do projeto descartaria a fila.
+- Se o projeto tiver `lombok.config` ou `.mvn/` na raiz, acrescente o `COPY` deles no
+  Dockerfile (ele só copia `pom.xml` e `src/`).
 - Teste local do mesmo Dockerfile:
 
 ```bash
@@ -61,4 +82,5 @@ docker build -t meuprojeto . && docker run --rm -p 8080:8080 -v meuprojeto-data:
 
 A imagem `eclipse-temurin:21-jre` não traz as dependências do Chromium. Nesses
 projetos, troque a etapa de execução por `mcr.microsoft.com/playwright/java:v1.58.0-jammy`
-e mantenha o resto do arquivo.
+e mantenha o resto do arquivo. A versão da imagem precisa ser a mesma da dependência
+`com.microsoft.playwright:playwright` do `pom.xml`.
