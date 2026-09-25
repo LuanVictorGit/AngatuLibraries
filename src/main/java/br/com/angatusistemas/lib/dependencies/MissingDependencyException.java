@@ -5,17 +5,17 @@ package br.com.angatusistemas.lib.dependencies;
  * biblioteca de terceiros que não está presente no classpath.
  *
  * <p>A mensagem desta exceção contém instruções padronizadas de como adicionar
- * a dependência ausente via Maven e Gradle, geradas por {@link Dependencies}.</p>
+ * a dependência ausente via Maven e Gradle, geradas por {@link Dependencies}. A exceção é
+ * lançada a cada chamada sem a dependência; a mesma mensagem vai para o console só na primeira.</p>
  *
- * <p>Exemplo de tratamento:
+ * <p>Exemplo de tratamento:</p>
  * <pre>
  * try {
  *     Dependencies.require(...);
  * } catch (MissingDependencyException e) {
- *     // A mensagem já foi exibida no console; encerre graciosamente.
+ *     // Na primeira falha, a mensagem já foi exibida no console; encerre graciosamente.
  * }
  * </pre>
- * </p>
  *
  * @author Angatu Sistemas
  * @see Dependencies

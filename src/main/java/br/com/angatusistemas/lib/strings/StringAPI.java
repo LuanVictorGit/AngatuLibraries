@@ -1,6 +1,7 @@
 package br.com.angatusistemas.lib.strings;
 
-import java.util.concurrent.ThreadLocalRandom;
+import java.security.SecureRandom;
+import java.util.Locale;
 import java.util.regex.Pattern;
 
 /**
@@ -15,10 +16,10 @@ import java.util.regex.Pattern;
  * inicialização prévia da biblioteca.</p>
  *
  * <p><strong>Quando NÃO usar:</strong> para parsing/transformações complexas
- * (regex avançadas, HTML, JSON) — use {@link BrowserAPI} (HTML) ou Gson
- * (JSON); para geração de senhas/segredos, use {@link Password} e
- * {@link java.security.SecureRandom} (o {@link #randomCode(int)} não é seguro
- * criptograficamente).</p>
+ * (regex avançadas, HTML, JSON) — use
+ * {@link br.com.angatusistemas.lib.browser.BrowserAPI} (HTML) ou Gson (JSON); para
+ * guardar senhas, use o hash de {@link br.com.angatusistemas.lib.criptografy.Password} —
+ * {@link #randomCode(int)} gera códigos e tokens, não protege senhas.</p>
  *
  * <p><strong>Integração:</strong> usada por {@code EmailAPI} (código anti-spam
  * no assunto), {@code HtmlRouteAPI} (capitalização de nomes de página) e outros
@@ -27,73 +28,79 @@ import java.util.regex.Pattern;
  * <p><strong>Fluxo de utilização:</strong> chamadas estáticas diretas
  * ({@code StringAPI.capitalize("joão")} → {@code "João"}). Métodos que recebem
  * {@code null} retornam valores seguros (vazio ou {@code null}) — consulte o
- * JavaDoc de cada método.</p>
+ * Javadoc de cada método.</p>
  *
- * <p><strong>Exemplo:</strong>
+ * <p><strong>Exemplo:</strong></p>
  * <pre>
  * String nome = StringAPI.capitalize("joão");            // "João"
  * String codigo = StringAPI.randomCode(6);               // "aZ3kP9"
  * boolean numerico = StringAPI.containsOnlyDigits("123"); // true
  * String mascarado = StringAPI.maskString("1234-5678", 0, 4, '*'); // "****-5678"
  * </pre>
- * </p>
  *
  * <p><strong>Boas práticas:</strong> use {@link #isNullOrBlank(String)} para
  * validações de entrada; regex internas são pré-compiladas (sem custo por
  * chamada).</p>
  *
- * <p><strong>Limitações:</strong> {@code randomCode} usa
- * {@link java.util.concurrent.ThreadLocalRandom} — adequado para códigos de
- * verificação, NÃO para tokens de segurança. {@code toCamelCase}/
- * {@code toSnakeCase} tratam espaços como separadores (não convertem hífens).</p>
+ * <p><strong>Limitações:</strong> {@code toCamelCase}/{@code toSnakeCase} tratam
+ * espaços como separadores (não convertem hífens); as conversões de caixa seguem as regras
+ * gerais do Unicode ({@link Locale#ROOT}), iguais às do português, qualquer que seja o idioma
+ * da JVM.</p>
  *
  * <p><strong>Extensões futuras:</strong> novos utilitários (slugify, diffs,
  * normalização Unicode) podem ser adicionados como métodos estáticos sem
  * quebrar a API.</p>
  *
  * @author Angatu Sistemas
- * @see Password
+ * @see br.com.angatusistemas.lib.criptografy.Password
  */
 public final class StringAPI {
 
-    // Caracteres permitidos para geração de código aleatório (a-z, A-Z, 0-9)
-    // Allowed characters for random code generation (a-z, A-Z, 0-9)
+    /** Caracteres permitidos na geração de código aleatório (a-z, A-Z, 0-9). */
     private static final char[] ALLOWED_CHARS =
             "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".toCharArray();
 
-    /** Regex pré-compilada para separar palavras (usada em toCamelCase). */
+    /** Regex pré-compilada para separar palavras (usada em toCamelCase e toSnakeCase). */
     private static final Pattern WORD_SEPARATOR_PATTERN = Pattern.compile("\\s+");
 
+    /**
+     * Maior resultado aceito por {@link #repeat(String, int)}. Metade do teto de um array na JVM,
+     * porque uma String com caracteres fora do Latin-1 ocupa dois bytes por caractere — acima
+     * disso o {@link String#repeat(int)} lança {@link OutOfMemoryError}.
+     */
+    private static final long MAX_REPEAT_LENGTH = (Integer.MAX_VALUE - 8) / 2;
+
     private StringAPI() {
-        // Impede instanciação / Prevents instantiation
+        // Impede instanciação
     }
 
     /**
-     * [PT] Remove o último caractere da string fornecida.
-     * [EN] Removes the last character of the given string.
+     * Gerador criptográfico, criado só no primeiro {@link #randomCode(int)}: quem usa apenas as
+     * outras operações não paga a inicialização do {@link SecureRandom}.
+     */
+    private static final class RandomHolder {
+        static final SecureRandom RANDOM = new SecureRandom();
+    }
+
+    /**
+     * Remove o último caractere da string fornecida.
      *
-     * @param input [PT] string de entrada (não pode ser nula ou vazia)
-     *              [EN] the input string (must not be null or empty)
-     * @return [PT] a string sem o último caractere
-     *         [EN] the string without its last character
-     * @throws IllegalArgumentException [PT] se a entrada for nula ou vazia
-     *                                   [EN] if input is null or empty
+     * @param input String de entrada (não pode ser nula nem vazia)
+     * @return A string sem o último caractere
+     * @throws IllegalArgumentException se a entrada for nula ou vazia
      */
     public static String removeLastChar(String input) {
         if (input == null || input.isEmpty()) {
-            throw new IllegalArgumentException("Input string cannot be null or empty");
+            throw new IllegalArgumentException("A string de entrada não pode ser nula nem vazia");
         }
         return input.substring(0, input.length() - 1);
     }
 
     /**
-     * [PT] Capitaliza a primeira letra da string e converte o restante para minúsculas.
-     * [EN] Capitalizes the first letter of the input string and converts the rest to lowercase.
+     * Capitaliza a primeira letra da string e converte o restante para minúsculas.
      *
-     * @param input [PT] string de entrada (pode ser nula ou vazia)
-     *              [EN] the input string (may be null or empty)
-     * @return [PT] a string capitalizada, ou a original se nula/vazia
-     *         [EN] the capitalized string, or the original if null/empty
+     * @param input String de entrada (pode ser nula ou vazia)
+     * @return A string capitalizada, ou a original se nula/vazia
      */
     public static String capitalize(String input) {
         if (input == null || input.isEmpty()) {
@@ -103,92 +110,87 @@ public final class StringAPI {
         if (input.length() == 1) {
             return String.valueOf(firstChar);
         }
-        String remaining = input.substring(1).toLowerCase();
+        // Locale.ROOT: com a JVM em turco, "ITAPIRA" virava "Itapıra" (i sem ponto).
+        String remaining = input.substring(1).toLowerCase(Locale.ROOT);
         return firstChar + remaining;
     }
 
     /**
-     * [PT] Gera um código alfanumérico aleatório com o comprimento especificado.
-     * [EN] Generates a random alphanumeric code of the specified length.
+     * Gera um código alfanumérico aleatório com o comprimento especificado.
      *
-     * @param length [PT] comprimento desejado (deve ser > 0)
-     *               [EN] the desired length (must be > 0)
-     * @return [PT] string aleatória contendo letras (A-Z, a-z) e dígitos (0-9)
-     *         [EN] a random string containing letters (A-Z, a-z) and digits (0-9)
+     * <p>Usa {@link SecureRandom} (gerador criptográfico): serve para códigos de verificação
+     * enviados por e-mail ou SMS e, com comprimento suficiente, para tokens. Cada caractere
+     * carrega cerca de 5,95 bits de entropia (62 símbolos): 6 caracteres dão cerca de 36 bits —
+     * bastante para um código de uso único com limite de tentativas; para um token de sessão ou
+     * de redefinição de senha, use 32 caracteres ou mais (cerca de 190 bits).</p>
+     *
+     * @param length Comprimento desejado (se menor ou igual a zero, retorna vazio)
+     * @return String aleatória contendo letras (A-Z, a-z) e dígitos (0-9)
      */
     public static String randomCode(int length) {
         if (length <= 0) {
             return "";
         }
-        StringBuilder codeBuilder = new StringBuilder(length);
-        ThreadLocalRandom random = ThreadLocalRandom.current();
+        // Antes era ThreadLocalRandom, que não é criptográfico: quem viu alguns códigos podia
+        // prever os próximos — e este método é o recomendado para códigos de verificação.
+        SecureRandom random = RandomHolder.RANDOM;
+        char[] code = new char[length];
         for (int i = 0; i < length; i++) {
-            int randomIndex = random.nextInt(ALLOWED_CHARS.length);
-            codeBuilder.append(ALLOWED_CHARS[randomIndex]);
+            code[i] = ALLOWED_CHARS[random.nextInt(ALLOWED_CHARS.length)];
         }
-        return codeBuilder.toString();
+        return new String(code);
     }
 
     /**
-     * [PT] Verifica se a string é nula ou vazia.
-     * [EN] Checks if a string is null or empty.
+     * Verifica se a string é nula ou vazia.
      *
-     * @param input [PT] string de entrada
-     *              [EN] the input string
-     * @return [PT] true se nula ou vazia, false caso contrário
-     *         [EN] true if null or empty, false otherwise
+     * @param input String de entrada
+     * @return {@code true} se nula ou vazia, {@code false} caso contrário
      */
     public static boolean isNullOrEmpty(String input) {
         return input == null || input.isEmpty();
     }
 
     /**
-     * [PT] Verifica se a string é nula, vazia ou contém apenas espaços em branco.
-     * [EN] Checks if a string is null, empty, or contains only whitespace.
+     * Verifica se a string é nula, vazia ou contém apenas espaços em branco.
      *
-     * @param input [PT] string de entrada
-     *              [EN] the input string
-     * @return [PT] true se nula, vazia ou apenas espaços, false caso contrário
-     *         [EN] true if null, empty, or whitespace-only, false otherwise
+     * @param input String de entrada
+     * @return {@code true} se nula, vazia ou só com espaços, {@code false} caso contrário
      */
     public static boolean isNullOrBlank(String input) {
         return input == null || input.isBlank();
     }
 
     /**
-     * [PT] Repete uma string um determinado número de vezes.
-     * [EN] Repeats a string a given number of times.
+     * Repete uma string um determinado número de vezes.
      *
-     * @param input [PT] string a ser repetida (se nula, tratada como vazia)
-     *              [EN] the string to repeat (if null, treated as empty)
-     * @param times [PT] número de repetições (se <= 0, retorna vazio)
-     *              [EN] the number of repetitions (if <= 0, returns empty string)
-     * @return [PT] a string repetida
-     *         [EN] the repeated string
+     * @param input String a ser repetida (se nula, tratada como vazia)
+     * @param times Número de repetições (se {@code times <= 0}, retorna vazio)
+     * @return A string repetida
+     * @throws IllegalArgumentException se o resultado passar de 1.073.741.819 caracteres, o
+     *         maior tamanho que uma String comporta com segurança
      */
     public static String repeat(String input, int times) {
         if (input == null || times <= 0) {
             return "";
         }
-        StringBuilder result = new StringBuilder(input.length() * times);
-        for (int i = 0; i < times; i++) {
-            result.append(input);
+        // Validado antes: o cálculo antigo (input.length() * times) estourava o int e lançava
+        // NegativeArraySizeException; o String.repeat, acima do limite, lança OutOfMemoryError.
+        long length = (long) input.length() * times;
+        if (length > MAX_REPEAT_LENGTH) {
+            throw new IllegalArgumentException("O resultado de repeat teria " + length
+                    + " caracteres, acima do máximo de " + MAX_REPEAT_LENGTH + ".");
         }
-        return result.toString();
+        return input.repeat(times);
     }
 
     /**
-     * [PT] Trunca a string para o comprimento máximo especificado.
-     *     Se a string for mais curta, retorna-a inalterada.
-     * [EN] Truncates a string to the specified maximum length.
-     *     If the string is shorter, it is returned unchanged.
+     * Trunca a string para o comprimento máximo especificado. Se a string for mais curta,
+     * retorna-a inalterada.
      *
-     * @param input     [PT] string de entrada (se nula, tratada como vazia)
-     *                  [EN] the input string (if null, treated as empty)
-     * @param maxLength [PT] comprimento máximo permitido
-     *                  [EN] the maximum allowed length
-     * @return [PT] a string truncada, ou a original se mais curta
-     *         [EN] the truncated string, or the original if shorter
+     * @param input     String de entrada (se nula, retorna vazio)
+     * @param maxLength Comprimento máximo permitido (se negativo, retorna vazio)
+     * @return A string truncada, ou a original se mais curta
      */
     public static String truncate(String input, int maxLength) {
         if (input == null || maxLength < 0) {
@@ -201,13 +203,10 @@ public final class StringAPI {
     }
 
     /**
-     * [PT] Inverte os caracteres de uma string.
-     * [EN] Reverses the characters of a string.
+     * Inverte os caracteres de uma string.
      *
-     * @param input [PT] string de entrada (se nula, retorna vazio)
-     *              [EN] the input string (if null, returns empty)
-     * @return [PT] a string invertida, ou vazia se nula
-     *         [EN] the reversed string, or empty if null
+     * @param input String de entrada (se nula, retorna vazio)
+     * @return A string invertida, ou vazia se nula
      */
     public static String reverse(String input) {
         if (input == null) {
@@ -217,15 +216,10 @@ public final class StringAPI {
     }
 
     /**
-     * [PT] Converte uma string para camelCase.
-     *     Exemplo: "hello world" -> "helloWorld"
-     * [EN] Converts a string to camelCase.
-     *     Example: "hello world" -> "helloWorld"
+     * Converte uma string para camelCase. Exemplo: {@code "hello world"} → {@code "helloWorld"}.
      *
-     * @param input [PT] string de entrada (pode ser nula ou vazia)
-     *              [EN] the input string (may be null or empty)
-     * @return [PT] a versão em camelCase, ou a original se nula/vazia
-     *         [EN] the camelCase version, or the original if null/empty
+     * @param input String de entrada (pode ser nula ou vazia)
+     * @return A versão em camelCase, ou a original se nula/vazia/em branco
      */
     public static String toCamelCase(String input) {
         if (isNullOrBlank(input)) {
@@ -234,52 +228,47 @@ public final class StringAPI {
         String[] words = WORD_SEPARATOR_PATTERN.split(input.trim());
         StringBuilder result = new StringBuilder();
         for (int i = 0; i < words.length; i++) {
-            String word = words[i].toLowerCase();
+            String word = words[i].toLowerCase(Locale.ROOT);
             if (i == 0) {
                 result.append(word);
-            } else {
-                if (word.length() > 0) {
-                    result.append(Character.toUpperCase(word.charAt(0)))
-                          .append(word.substring(1));
-                }
+            } else if (!word.isEmpty()) {
+                result.append(Character.toUpperCase(word.charAt(0)))
+                      .append(word.substring(1));
             }
         }
         return result.toString();
     }
 
     /**
-     * [PT] Converte uma string para snake_case.
-     *     Exemplo: "hello world" -> "hello_world"
-     * [EN] Converts a string to snake_case.
-     *     Example: "hello world" -> "hello_world"
+     * Converte uma string para snake_case. Exemplo: {@code "hello world"} → {@code "hello_world"}.
      *
-     * @param input [PT] string de entrada (pode ser nula ou vazia)
-     *              [EN] the input string (may be null or empty)
-     * @return [PT] a versão em snake_case, ou a original se nula/vazia
-     *         [EN] the snake_case version, or the original if null/empty
+     * @param input String de entrada (pode ser nula ou vazia)
+     * @return A versão em snake_case, ou a original se nula/vazia/em branco
      */
     public static String toSnakeCase(String input) {
         if (isNullOrBlank(input)) {
             return input;
         }
-        return WORD_SEPARATOR_PATTERN.matcher(input.trim().toLowerCase()).replaceAll("_");
+        return WORD_SEPARATOR_PATTERN.matcher(input.trim().toLowerCase(Locale.ROOT)).replaceAll("_");
     }
 
     /**
-     * [PT] Verifica se a string contém apenas dígitos (0-9).
-     * [EN] Checks if the string contains only digits (0-9).
+     * Verifica se a string contém apenas os dígitos ASCII de 0 a 9.
      *
-     * @param input [PT] string de entrada (null retorna false)
-     *              [EN] the input string (null returns false)
-     * @return [PT] true se não nula e todos os caracteres forem dígitos
-     *         [EN] true if non-null and all characters are digits
+     * <p>Dígitos de outros sistemas de escrita (ex.: {@code "１２３"} de largura total ou os
+     * arábico-índicos {@code "١٢٣"}) não contam: um CPF ou CEP com eles passaria na validação e
+     * quebraria adiante, no {@code Long.parseLong} ou na busca no banco.</p>
+     *
+     * @param input String de entrada ({@code null} ou vazia retorna {@code false})
+     * @return {@code true} se não vazia e todos os caracteres estiverem entre {@code '0'} e {@code '9'}
      */
     public static boolean containsOnlyDigits(String input) {
         if (input == null || input.isEmpty()) {
             return false;
         }
         for (int i = 0; i < input.length(); i++) {
-            if (!Character.isDigit(input.charAt(i))) {
+            char c = input.charAt(i);
+            if (c < '0' || c > '9') {
                 return false;
             }
         }
@@ -287,13 +276,12 @@ public final class StringAPI {
     }
 
     /**
-     * [PT] Verifica se a string contém apenas letras (A-Z, a-z).
-     * [EN] Checks if the string contains only letters (A-Z, a-z).
+     * Verifica se a string contém apenas letras — de qualquer alfabeto, inclusive as acentuadas
+     * ({@code "João"} e {@code "Conceição"} passam); espaços, dígitos e pontuação não passam.
      *
-     * @param input [PT] string de entrada (null retorna false)
-     *              [EN] the input string (null returns false)
-     * @return [PT] true se não nula e todos os caracteres forem letras
-     *         [EN] true if non-null and all characters are letters
+     * @param input String de entrada ({@code null} ou vazia retorna {@code false})
+     * @return {@code true} se não vazia e todos os caracteres forem letras
+     *         ({@link Character#isLetter(char)})
      */
     public static boolean containsOnlyLetters(String input) {
         if (input == null || input.isEmpty()) {
@@ -308,15 +296,13 @@ public final class StringAPI {
     }
 
     /**
-     * [PT] Extrai todos os dígitos numéricos de uma string.
-     *     Exemplo: "a1b2c3" -> "123"
-     * [EN] Extracts all numeric digits from a string.
-     *     Example: "a1b2c3" -> "123"
+     * Extrai os dígitos ASCII (0 a 9) de uma string. Exemplo: {@code "a1b2c3"} → {@code "123"}.
      *
-     * @param input [PT] string de entrada (se nula, retorna vazio)
-     *              [EN] the input string (if null, returns empty string)
-     * @return [PT] string contendo apenas os dígitos
-     *         [EN] a string containing only digits
+     * <p>Dígitos de outros sistemas de escrita são descartados, pelo mesmo motivo de
+     * {@link #containsOnlyDigits(String)}.</p>
+     *
+     * @param input String de entrada (se nula, retorna vazio)
+     * @return String contendo apenas os dígitos de 0 a 9, na ordem em que aparecem
      */
     public static String extractNumbers(String input) {
         if (input == null) {
@@ -325,7 +311,7 @@ public final class StringAPI {
         StringBuilder digits = new StringBuilder();
         for (int i = 0; i < input.length(); i++) {
             char c = input.charAt(i);
-            if (Character.isDigit(c)) {
+            if (c >= '0' && c <= '9') {
                 digits.append(c);
             }
         }
@@ -333,43 +319,43 @@ public final class StringAPI {
     }
 
     /**
-     * [PT] Mascara uma parte da string com um caractere substituto.
-     *     Útil para ocultar dados sensíveis, como números de cartão de crédito.
-     * [EN] Masks a portion of the string with a placeholder character.
-     *     Useful for hiding sensitive data like credit card numbers.
+     * Mascara uma parte da string com um caractere substituto. Útil para ocultar dados
+     * sensíveis, como números de cartão de crédito.
      *
-     * @param input      [PT] string original (pode ser nula)
-     *                   [EN] the original string (may be null)
-     * @param startIndex [PT] índice inicial (inclusivo) para mascarar
-     *                   [EN] the starting index (inclusive) to mask
-     * @param endIndex   [PT] índice final (exclusivo) para mascarar
-     *                   [EN] the ending index (exclusive) to mask
-     * @param maskChar   [PT] caractere a ser usado como máscara
-     *                   [EN] the character to use for masking
-     * @return [PT] a string mascarada, ou vazia se entrada for nula
-     *         [EN] the masked string, or empty if input is null
+     * <p>O intervalo é ajustado aos limites da string: um fim além do comprimento mascara até o
+     * último caractere e um início negativo começa do primeiro. Antes, um índice fora da string
+     * devolvia o texto inteiro <em>sem máscara</em> — o dado sensível ia aberto para a tela ou
+     * para o log.</p>
+     *
+     * @param input      String original (pode ser nula)
+     * @param startIndex Índice inicial (inclusivo) para mascarar
+     * @param endIndex   Índice final (exclusivo) para mascarar
+     * @param maskChar   Caractere a ser usado como máscara
+     * @return A string mascarada; vazia se a entrada for nula; a original se o intervalo, já
+     *         ajustado, ficar vazio
      */
     public static String maskString(String input, int startIndex, int endIndex, char maskChar) {
-        if (input == null || startIndex < 0 || endIndex > input.length() || startIndex >= endIndex) {
-            return input == null ? "" : input;
+        if (input == null) {
+            return "";
+        }
+        int start = Math.max(0, startIndex);
+        int end = Math.min(endIndex, input.length());
+        if (start >= end) {
+            return input;
         }
         StringBuilder masked = new StringBuilder(input);
-        for (int i = startIndex; i < endIndex; i++) {
+        for (int i = start; i < end; i++) {
             masked.setCharAt(i, maskChar);
         }
         return masked.toString();
     }
 
     /**
-     * [PT] Conta quantas vezes uma substring aparece em uma string (não sobrepostas).
-     * [EN] Counts how many times a substring appears in a string (non-overlapping).
+     * Conta quantas vezes uma substring aparece em uma string (sem sobreposição).
      *
-     * @param source [PT] string fonte (pode ser nula)
-     *               [EN] the source string (may be null)
-     * @param target [PT] substring a ser contada (não pode ser nula ou vazia)
-     *               [EN] the substring to count (must not be null or empty)
-     * @return [PT] número de ocorrências, ou 0 se source for nula ou target inválida
-     *         [EN] the number of occurrences, or 0 if source is null or target invalid
+     * @param source String fonte (pode ser nula)
+     * @param target Substring a ser contada (não pode ser nula nem vazia)
+     * @return Número de ocorrências, ou 0 se {@code source} for nula ou {@code target} inválida
      */
     public static int countOccurrences(String source, String target) {
         if (source == null || target == null || target.isEmpty()) {
@@ -385,15 +371,11 @@ public final class StringAPI {
     }
 
     /**
-     * [PT] Compara duas strings ignorando maiúsculas/minúsculas, tratando nulos de forma segura.
-     * [EN] Compares two strings ignoring case, handling nulls safely.
+     * Compara duas strings ignorando maiúsculas/minúsculas, tratando nulos de forma segura.
      *
-     * @param str1 [PT] primeira string (pode ser nula)
-     *             [EN] first string (may be null)
-     * @param str2 [PT] segunda string (pode ser nula)
-     *             [EN] second string (may be null)
-     * @return [PT] true se ambas forem nulas, ou ambas não nulas e iguais ignorando caso
-     *         [EN] true if both are null, or both non-null and equal ignoring case
+     * @param str1 Primeira string (pode ser nula)
+     * @param str2 Segunda string (pode ser nula)
+     * @return {@code true} se ambas forem nulas, ou ambas não nulas e iguais ignorando a caixa
      */
     public static boolean equalsIgnoreCaseNullSafe(String str1, String str2) {
         if (str1 == null) {

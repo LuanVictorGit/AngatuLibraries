@@ -1,14 +1,22 @@
 package br.com.angatusistemas.lib.task;
 
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Supplier;
 
 import br.com.angatusistemas.lib.console.Console;
 
@@ -17,62 +25,68 @@ import br.com.angatusistemas.lib.console.Console;
  * delay e repetição.
  *
  * <p><strong>Propósito:</strong> gerenciar execução concorrente sem que o
- * consumidor crie threads manualmente. Mantém dois pools:</p>
+ * consumidor crie threads manualmente. Mantém três grupos de threads, cada um com um papel:</p>
  * <ul>
- * <li><b>ASYNC_EXECUTOR</b> — {@link ScheduledExecutorService} com 4 threads
- * nomeadas ({@code Angatu-Async-N}) para tarefas assíncronas, atrasadas e
- * periódicas.</li>
- * <li><b>SYNC_EXECUTOR</b> — {@link ExecutorService} de thread única (FIFO)
- * para operações serializadas (ex: escrita em arquivo) sem bloquear o chamador.</li>
+ * <li><b>Trabalhadores</b> ({@code Angatu-Async-N}) — executam {@link #runAsync} e as tarefas de
+ * {@link #runLater} quando o prazo delas vence. São {@code ANGATU_TASK_THREADS} threads (padrão
+ * 16), com fila sem limite.</li>
+ * <li><b>Relógio</b> ({@code Angatu-Timer-N}) — dispara os prazos e executa as tarefas
+ * periódicas ({@link #runTimer}, {@link #runTimerWithFixedDelay}). Não recebe trabalho avulso:
+ * uma rajada de mil tarefas avulsas não atrasa a limpeza periódica do servidor.</li>
+ * <li><b>Fila única</b> ({@code Angatu-Sync-N}) — {@link #runSync}, uma tarefa por vez, em
+ * ordem FIFO, sem bloquear o chamador.</li>
  * </ul>
- * <p>Cada tarefa recebe um ID único para cancelamento posterior
- * ({@link #cancelTask(int)}).</p>
+ * <p>Cada tarefa recebe um ID positivo para cancelamento posterior ({@link #cancelTask(int)}),
+ * que nunca é entregue a outra enquanto ela estiver registrada — nem quando o contador dá a
+ * volta.</p>
+ *
+ * <h2>Por que o relógio é separado</h2>
+ * <p>Antes, um único pool de 4 threads fazia tudo. Quatro tarefas lentas — chamadas de rede de
+ * um processamento em massa, por exemplo — ocupavam as quatro threads, e a varredura periódica do
+ * rate limit parava de rodar enquanto a fila não esvaziasse (medido: um timer de 100 ms rodou
+ * zero vezes em 2,9 s). Sem a varredura, a memória do rate limit cresce sem recuar.</p>
  *
  * <p><strong>Quando usar:</strong> qualquer operação que não deva bloquear a
  * thread atual (envios, persistência assíncrona, timers) e operações que
  * precisam de serialização (fila FIFO via {@link #runSync}).</p>
  *
  * <p><strong>Quando NÃO usar:</strong> para tarefas críticas que exigem
- * garantia de execução imediata (o pool tem 4 threads e o agendamento é
- * best-effort); para tarefas de longa duração com paralelismo massivo
- * (considere um executor próprio). {@code runSync} NÃO bloqueia o chamador —
- * apenas serializa a execução em thread única.</p>
+ * garantia de execução imediata (o agendamento é best-effort); para tarefas periódicas lentas
+ * — elas ocupam uma thread do relógio enquanto rodam; dentro delas, mande o trabalho pesado para
+ * {@link #runAsync}. {@code runSync} NÃO bloqueia o chamador — apenas serializa a execução em
+ * thread única.</p>
  *
- * <p><strong>Integração:</strong> usado internamente por toda a biblioteca
- * (envio assíncrono de e-mail, Web Push, limpeza periódica do JavalinAPI).
- * A maioria dos módulos assíncronos retorna {@code CompletableFuture} que
- * completa quando a tarefa termina.</p>
+ * <p><strong>Integração:</strong> usado internamente pela limpeza periódica do
+ * {@code JavalinAPI}. E-mail e Web Push têm fila própria: um servidor lento do outro lado não
+ * ocupa estas threads.</p>
  *
  * <p><strong>Fluxo de utilização:</strong></p>
  * <ol>
  *   <li>Chame o método adequado ({@link #runAsync}, {@link #runLater},
  *       {@link #runTimer}, {@link #runTimerWithFixedDelay}, {@link #runSync});</li>
  *   <li>Guarde o ID retornado se precisar cancelar;</li>
- *   <li>Ao encerrar a aplicação, chame {@link #shutdown()}.</li>
+ *   <li>Ao encerrar a aplicação, chame {@link #drain(long)} (espera o que está na fila) ou
+ *       {@link #shutdown()} (cancela o que está pendente). Com o {@code AngatuLib}, o gancho de
+ *       desligamento da biblioteca já chama {@link #drain(long)}.</li>
  * </ol>
  *
- * <p><strong>Exemplo:</strong>
+ * <p><strong>Exemplo:</strong></p>
  * <pre>
  * Task.runAsync(() -&gt; System.out.println("assíncrono"));
  * int id = Task.runLater(() -&gt; System.out.println("daqui a 5s"), 5000);
  * Task.runTimerWithFixedDelay(() -&gt; System.out.println("a cada hora"), 0, 3600_000);
  * Task.cancelTask(id);
- * Task.shutdown(); // ao encerrar a aplicação
  * </pre>
- * </p>
  *
- * <p><strong>Boas práticas:</strong> sempre chame {@link #shutdown()} ao final
- * da aplicação; exceções lançadas dentro das tarefas são capturadas e logadas
- * (não propagam); tarefas periódicas ficam registradas até
- * {@link #cancelTask(int)} ou {@link #cancelAll()}.</p>
+ * <p><strong>Boas práticas:</strong> qualquer falha lançada dentro de uma tarefa — inclusive
+ * {@link Error}, como {@code StackOverflowError} — é capturada e registrada no log, e uma tarefa
+ * periódica continua agendada depois dela. Antes, só {@link Exception} era capturada: um
+ * {@code Error} matava o timer em silêncio, sem uma linha no log.</p>
  *
- * <p><strong>Limitações:</strong> o pool fixo de 4 threads pode enfileirar
- * tarefas sob carga; após {@link #shutdown()} nenhuma nova tarefa pode ser
- * submetida (exceção {@code RejectedExecutionException}).</p>
- *
- * <p><strong>Extensões futuras:</strong> a configuração do tamanho do pool e a
- * criação de {@code CompletableFuture} retornáveis diretamente pelos métodos
- * são evoluções naturais, sem quebra da API atual.</p>
+ * <p><strong>Limitações:</strong> a fila dos trabalhadores não tem limite — sob sobrecarga, as
+ * tarefas esperam, não são recusadas; após {@link #shutdown()} ou {@link #drain(long)} nenhuma
+ * nova tarefa pode ser submetida ({@code RejectedExecutionException}). As threads não são
+ * daemon: uma aplicação que só usa {@code Task} continua viva enquanto houver tarefa.</p>
  *
  * @author Angatu Sistemas
  * @see ScheduledExecutorService
@@ -80,244 +94,149 @@ import br.com.angatusistemas.lib.console.Console;
  */
 public final class Task {
 
-	// Pool para tarefas assíncronas com agendamento (delay, repetição)
-	// Pool for asynchronous scheduled tasks (delay, repetition)
-	private static final ScheduledExecutorService ASYNC_EXECUTOR =
-			Executors.newScheduledThreadPool(4, namedThreadFactory("Angatu-Async-%d"));
+	/** Trabalhadores: {@code ANGATU_TASK_THREADS} (1 a 256), padrão 16. */
+	private static final int WORKER_THREADS = intFromEnvironment("ANGATU_TASK_THREADS", 16, 1, 256);
 
-	// Pool para tarefas síncronas (única thread, ordem FIFO)
-	// Pool for synchronous tasks (single thread, FIFO order)
+	/** Threads do relógio: poucas bastam, porque só disparam prazos e rodam as periódicas. */
+	private static final int TIMER_THREADS = 4;
+
+	/** Relógio: dispara os prazos e executa as tarefas periódicas. */
+	private static final ScheduledThreadPoolExecutor TIMERS = newTimers();
+
+	/** Trabalhadores: {@link #runAsync} e as tarefas de {@link #runLater} já vencidas. */
+	private static final ThreadPoolExecutor WORKERS = newWorkers();
+
+	/** Fila única (ordem FIFO) de {@link #runSync}. */
 	private static final ExecutorService SYNC_EXECUTOR =
 			Executors.newSingleThreadExecutor(namedThreadFactory("Angatu-Sync-%d"));
 
-	// Gerador de IDs únicos para cada tarefa
-	// Unique ID generator for each task
+	/** Contador dos IDs das tarefas; o ID de cada uma sai de {@link #reserveId()}. */
 	private static final AtomicInteger TASK_ID_COUNTER = new AtomicInteger(0);
 
-	// Mapa que associa cada ID à sua Future correspondente (permite cancelamento)
-	// Map that associates each ID to its corresponding Future (allows cancellation)
-	private static final Map<Integer, ScheduledFuture<?>> TASKS = new ConcurrentHashMap<>();
+	/**
+	 * ID → tarefa, para cancelar e contar. A tarefa entra aqui <strong>antes</strong> de ser
+	 * agendada: registrada depois, uma tarefa rápida podia terminar — e se remover do mapa —
+	 * antes do registro, e a entrada ficava para sempre (medido: ~0,1% de todas as tarefas). A de
+	 * uma execução sai sozinha ao terminar ou ser cancelada (ver {@link OneShot#done()}).
+	 */
+	private static final Map<Integer, Future<?>> TASKS = new ConcurrentHashMap<>();
+
+	/** Ocupa o ID no mapa enquanto a tarefa dele é criada (ver {@link #reserveId()}). */
+	private static final Future<?> RESERVED = CompletableFuture.completedFuture(null);
 
 	private Task() {
-		throw new UnsupportedOperationException("Utility class cannot be instantiated");
+		throw new UnsupportedOperationException("Classe utilitária não pode ser instanciada");
 	}
 
 	// ==================== MÉTODOS PÚBLICOS ====================
-	// ==================== PUBLIC METHODS ====================
 
 	/**
-	 * [PT] Executa uma tarefa imediatamente de forma assíncrona (em uma das threads
-	 * do pool).
-	 * <p>
-	 * A tarefa não bloqueia a thread chamadora. O ID retornado pode ser usado para
-	 * cancelar a tarefa se ela ainda não tiver sido executada.
-	 * </p>
+	 * Executa uma tarefa imediatamente, de forma assíncrona, numa thread trabalhadora.
 	 *
-	 * [EN] Executes a task immediately asynchronously (in one of the pool threads).
-	 * <p>
-	 * The task does not block the calling thread. The returned ID can be used to
-	 * cancel the task if it hasn't run yet.
-	 * </p>
+	 * <p>A tarefa não bloqueia a thread chamadora. O ID retornado pode ser usado para cancelar a
+	 * tarefa se ela ainda não tiver começado.</p>
 	 *
-	 * @param runnable [PT] tarefa a ser executada [EN] task to be executed
-	 * @return [PT] ID único da tarefa (pode ser usado em {@link #cancelTask(int)})
-	 *         [EN] unique task ID (can be used in {@link #cancelTask(int)})
+	 * @param runnable Tarefa a ser executada
+	 * @return ID único da tarefa (pode ser usado em {@link #cancelTask(int)})
 	 */
 	public static int runAsync(Runnable runnable) {
-		int taskId = TASK_ID_COUNTER.incrementAndGet();
-
-		ScheduledFuture<?> future = ASYNC_EXECUTOR.schedule(() -> {
-			try {
-				runnable.run();
-			} catch (Exception e) {
-				Console.error("Erro na tarefa assíncrona ID=%d", taskId, e);
-			} finally {
-				TASKS.remove(taskId);
-			}
-		}, 0, TimeUnit.MILLISECONDS);
-
-		TASKS.put(taskId, future);
-		Console.debug("Tarefa assíncrona iniciada. ID=%d", taskId);
-		return taskId;
+		return runLater(runnable, 0);
 	}
 
 	/**
-	 * [PT] Executa uma tarefa de forma "síncrona" (sequencial, em thread única).
-	 * <p>
-	 * As tarefas enviadas a este método são executadas uma após a outra, em ordem
-	 * FIFO, em uma thread dedicada. Isso é útil para operações que devem ser
-	 * serializadas, mas sem bloquear a thread principal (ex: escrita em arquivo,
-	 * atualização de recurso compartilhado).
-	 * </p>
+	 * Executa uma tarefa de forma "síncrona": sequencial, em thread única.
 	 *
-	 * [EN] Executes a task in a "synchronous" manner (sequential, single thread).
-	 * <p>
-	 * Tasks submitted to this method run one after another, in FIFO order, on a
-	 * dedicated thread. Useful for operations that must be serialized without
-	 * blocking the main thread (e.g., file writing, shared resource update).
-	 * </p>
+	 * <p>As tarefas enviadas a este método são executadas uma após a outra, em ordem FIFO, numa
+	 * thread dedicada. Útil para operações que devem ser serializadas sem bloquear a thread
+	 * principal (escrita em arquivo, atualização de recurso compartilhado). O ID pode ser usado
+	 * em {@link #cancelTask(int)} enquanto a tarefa ainda não começou.</p>
 	 *
-	 * @param runnable [PT] tarefa a ser executada [EN] task to be executed
-	 * @return [PT] ID único da tarefa [EN] unique task ID
+	 * @param runnable Tarefa a ser executada
+	 * @return ID único da tarefa
 	 */
 	public static int runSync(Runnable runnable) {
-		int taskId = TASK_ID_COUNTER.incrementAndGet();
-
-		SYNC_EXECUTOR.submit(() -> {
-			try {
-				runnable.run();
-			} catch (Exception e) {
-				Console.error("Erro na tarefa síncrona ID=%d", taskId, e);
-			} finally {
-				TASKS.remove(taskId);
-			}
-		});
-
+		int taskId = reserveId();
+		OneShot task = new OneShot(taskId, guarded("tarefa síncrona", taskId, runnable));
+		start(task, () -> SYNC_EXECUTOR.execute(task));
 		Console.debug("Tarefa síncrona enfileirada. ID=%d", taskId);
 		return taskId;
 	}
 
 	/**
-	 * [PT] Executa uma tarefa após um atraso (delay) em milissegundos.
-	 * <p>
-	 * A tarefa será executada uma única vez, após o tempo especificado.
-	 * </p>
+	 * Executa uma tarefa uma única vez, depois de um atraso em milissegundos.
 	 *
-	 * [EN] Executes a task after a delay (in milliseconds).
-	 * <p>
-	 * The task will be executed once, after the specified delay.
-	 * </p>
+	 * <p>O relógio só dispara o prazo; a tarefa roda numa thread trabalhadora.</p>
 	 *
-	 * @param runnable    [PT] tarefa a ser executada [EN] task to be executed
-	 * @param delayMillis [PT] atraso em milissegundos antes da execução [EN] delay
-	 *                    in milliseconds before execution
-	 * @return [PT] ID único da tarefa [EN] unique task ID
+	 * @param runnable    Tarefa a ser executada
+	 * @param delayMillis Atraso em milissegundos antes da execução ({@code 0} ou menos = já)
+	 * @return ID único da tarefa
 	 */
 	public static int runLater(Runnable runnable, long delayMillis) {
-		int taskId = TASK_ID_COUNTER.incrementAndGet();
-
-		ScheduledFuture<?> future = ASYNC_EXECUTOR.schedule(() -> {
-			try {
-				runnable.run();
-			} catch (Exception e) {
-				Console.error("Erro na tarefa com delay ID=%d", taskId, e);
-			} finally {
-				TASKS.remove(taskId);
+		int taskId = reserveId();
+		OneShot task = new OneShot(taskId, guarded("tarefa assíncrona", taskId, runnable));
+		start(task, () -> {
+			if (delayMillis <= 0) {
+				WORKERS.execute(task);
+			} else {
+				task.trigger = TIMERS.schedule(() -> dispatch(task), delayMillis, TimeUnit.MILLISECONDS);
 			}
-		}, delayMillis, TimeUnit.MILLISECONDS);
-
-		TASKS.put(taskId, future);
-		Console.debug("Tarefa com delay agendada. ID=%d, delay=%dms", taskId, delayMillis);
+		});
+		Console.debug("Tarefa agendada. ID=%d, delay=%dms", taskId, delayMillis);
 		return taskId;
 	}
 
 	/**
-	 * [PT] Executa uma tarefa repetidamente a cada período fixo.
-	 * <p>
-	 * A primeira execução ocorre após {@code delayMillis}, e depois repetidamente a
-	 * cada {@code periodMillis}. O intervalo é medido entre o início de cada
-	 * execução.
-	 * </p>
-	 * <p>
-	 * <b>Cuidado:</b> Se a tarefa demorar mais que o período, as execuções podem se
-	 * sobrepor. Para evitar isso, considere usar
-	 * {@link #runTimerWithFixedDelay(Runnable, long, long)}.
-	 * </p>
+	 * Executa uma tarefa repetidamente, a cada período fixo, numa thread do relógio.
 	 *
-	 * [EN] Executes a task repeatedly at a fixed rate.
-	 * <p>
-	 * The first execution occurs after {@code delayMillis}, then repeatedly every
-	 * {@code periodMillis}. The interval is measured between the start of each
-	 * execution.
-	 * </p>
-	 * <p>
-	 * <b>Caution:</b> If the task takes longer than the period, executions may
-	 * overlap. To avoid that, consider using
-	 * {@link #runTimerWithFixedDelay(Runnable, long, long)}.
-	 * </p>
+	 * <p>A primeira execução ocorre após {@code delayMillis}, e depois a cada
+	 * {@code periodMillis}, medidos entre os inícios. Duas execuções da mesma tarefa nunca rodam
+	 * ao mesmo tempo: se uma demorar mais que o período, a seguinte começa atrasada.</p>
 	 *
-	 * @param runnable     [PT] tarefa a ser executada [EN] task to be executed
-	 * @param delayMillis  [PT] atraso inicial antes da primeira execução [EN]
-	 *                     initial delay before first execution
-	 * @param periodMillis [PT] intervalo entre o início de cada execução [EN]
-	 *                     interval between the start of each execution
-	 * @return [PT] ID único da tarefa [EN] unique task ID
+	 * @param runnable     Tarefa a ser executada
+	 * @param delayMillis  Atraso inicial antes da primeira execução
+	 * @param periodMillis Intervalo entre o início de cada execução
+	 * @return ID único da tarefa
 	 */
 	public static int runTimer(Runnable runnable, long delayMillis, long periodMillis) {
-		int taskId = TASK_ID_COUNTER.incrementAndGet();
-
-		ScheduledFuture<?> future = ASYNC_EXECUTOR.scheduleAtFixedRate(() -> {
-			try {
-				runnable.run();
-			} catch (Exception e) {
-				Console.error("Erro na tarefa periódica (fixed rate) ID=%d", taskId, e);
-			}
-		}, delayMillis, periodMillis, TimeUnit.MILLISECONDS);
-
-		TASKS.put(taskId, future);
+		int taskId = reserveId();
+		// Periódica nunca sai do mapa sozinha, então registrar depois de agendar não tem corrida.
+		startPeriodic(taskId, () -> TIMERS.scheduleAtFixedRate(guarded("tarefa periódica", taskId, runnable),
+				delayMillis, periodMillis, TimeUnit.MILLISECONDS));
 		Console.debug("Timer (fixed rate) agendado. ID=%d, delay=%dms, period=%dms", taskId, delayMillis, periodMillis);
 		return taskId;
 	}
 
 	/**
-	 * [PT] Executa uma tarefa repetidamente com atraso fixo entre o término de uma
-	 * execução e o início da próxima.
-	 * <p>
-	 * Útil quando a tarefa pode ter duração variável e você quer garantir um
-	 * intervalo entre execuções.
-	 * </p>
+	 * Executa uma tarefa repetidamente, com atraso fixo entre o fim de uma execução e o início
+	 * da próxima, numa thread do relógio.
 	 *
-	 * [EN] Executes a task repeatedly with a fixed delay between the end of one
-	 * execution and the start of the next.
-	 * <p>
-	 * Useful when the task may have variable duration and you want to guarantee a
-	 * pause between executions.
-	 * </p>
+	 * <p>Útil quando a tarefa pode ter duração variável e você quer garantir um intervalo entre
+	 * execuções.</p>
 	 *
-	 * @param runnable       [PT] tarefa a ser executada [EN] task to be executed
-	 * @param initialDelayMs [PT] atraso inicial antes da primeira execução [EN]
-	 *                       initial delay before first execution
-	 * @param delayBetweenMs [PT] atraso entre o fim de uma execução e o início da
-	 *                       próxima [EN] delay between the end of one execution and
-	 *                       the start of the next
-	 * @return [PT] ID único da tarefa [EN] unique task ID
+	 * @param runnable       Tarefa a ser executada
+	 * @param initialDelayMs Atraso inicial antes da primeira execução
+	 * @param delayBetweenMs Atraso entre o fim de uma execução e o início da próxima
+	 * @return ID único da tarefa
 	 */
 	public static int runTimerWithFixedDelay(Runnable runnable, long initialDelayMs, long delayBetweenMs) {
-		int taskId = TASK_ID_COUNTER.incrementAndGet();
-
-		ScheduledFuture<?> future = ASYNC_EXECUTOR.scheduleWithFixedDelay(() -> {
-			try {
-				runnable.run();
-			} catch (Exception e) {
-				Console.error("Erro na tarefa periódica (fixed delay) ID=%d", taskId, e);
-			}
-		}, initialDelayMs, delayBetweenMs, TimeUnit.MILLISECONDS);
-
-		TASKS.put(taskId, future);
+		int taskId = reserveId();
+		startPeriodic(taskId, () -> TIMERS.scheduleWithFixedDelay(guarded("tarefa periódica", taskId, runnable),
+				initialDelayMs, delayBetweenMs, TimeUnit.MILLISECONDS));
 		Console.debug("Timer (fixed delay) agendado. ID=%d, initialDelay=%dms, delayBetween=%dms", taskId,
 				initialDelayMs, delayBetweenMs);
 		return taskId;
 	}
 
 	/**
-	 * [PT] Cancela uma tarefa específica pelo seu ID.
-	 * <p>
-	 * Se a tarefa já tiver sido executada ou estiver em andamento, o cancelamento
-	 * pode não ter efeito (depende do estado). Tarefas periódicas são
-	 * interrompidas.
-	 * </p>
+	 * Cancela uma tarefa específica pelo seu ID.
 	 *
-	 * [EN] Cancels a specific task by its ID.
-	 * <p>
-	 * If the task has already been executed or is in progress, cancellation may
-	 * have no effect (depends on state). Periodic tasks are interrupted.
-	 * </p>
+	 * <p>Tarefa que ainda não começou não roda mais; tarefa em execução recebe interrupção;
+	 * tarefa periódica não volta a ser agendada. Tarefa já terminada não é afetada.</p>
 	 *
-	 * @param taskId [PT] ID da tarefa retornado por um dos métodos de criação [EN]
-	 *               task ID returned by one of the creation methods
+	 * @param taskId ID da tarefa retornado por um dos métodos de criação
 	 */
 	public static void cancelTask(int taskId) {
-		ScheduledFuture<?> future = TASKS.remove(taskId);
+		Future<?> future = TASKS.remove(taskId);
 		if (future != null) {
 			boolean cancelled = future.cancel(true);
 			Console.debug("Cancelamento da tarefa ID=%d: %s", taskId,
@@ -328,77 +247,243 @@ public final class Task {
 	}
 
 	/**
-	 * [PT] Cancela todas as tarefas atualmente registradas.
-	 * <p>
-	 * Útil durante o desligamento da aplicação ou para limpeza forçada.
-	 * </p>
+	 * Cancela todas as tarefas atualmente registradas.
 	 *
-	 * [EN] Cancels all currently registered tasks.
-	 * <p>
-	 * Useful during application shutdown or for forced cleanup.
-	 * </p>
+	 * <p>Cada tarefa sai do mapa e é cancelada individualmente: esvaziar o mapa inteiro depois do
+	 * laço tirava dele, sem cancelar, a tarefa registrada no meio do caminho.</p>
 	 */
 	public static void cancelAll() {
-		for (Map.Entry<Integer, ScheduledFuture<?>> entry : TASKS.entrySet()) {
-			entry.getValue().cancel(true);
-		}
-		TASKS.clear();
+		cancelRegistered(true);
 		Console.log("Todas as tarefas foram canceladas.");
 	}
 
 	/**
-	 * [PT] Encerra os pools de threads e cancela todas as tarefas pendentes.
-	 * <p>
-	 * Este método deve ser chamado ao final da aplicação para liberar recursos.
-	 * Após o shutdown, nenhuma nova tarefa pode ser submetida.
-	 * </p>
+	 * Encerra os pools de threads e cancela todas as tarefas pendentes.
 	 *
-	 * [EN] Shuts down the thread pools and cancels all pending tasks.
-	 * <p>
-	 * This method should be called at application termination to release resources.
-	 * After shutdown, no new tasks can be submitted.
-	 * </p>
+	 * <p>O que está na fila é descartado. Para deixar terminar o que já foi pedido, use
+	 * {@link #drain(long)}. Depois do encerramento, nenhuma nova
+	 * tarefa pode ser submetida.</p>
 	 */
 	public static void shutdown() {
 		Console.log("Iniciando shutdown do Task...");
 		cancelAll();
-		ASYNC_EXECUTOR.shutdown();
-		SYNC_EXECUTOR.shutdown();
-		try {
-			// Aguarda até 5 segundos para as tarefas terminarem
-			if (!ASYNC_EXECUTOR.awaitTermination(5, TimeUnit.SECONDS)) {
-				ASYNC_EXECUTOR.shutdownNow();
-			}
-			if (!SYNC_EXECUTOR.awaitTermination(5, TimeUnit.SECONDS)) {
-				SYNC_EXECUTOR.shutdownNow();
-			}
-		} catch (InterruptedException e) {
-			ASYNC_EXECUTOR.shutdownNow();
-			SYNC_EXECUTOR.shutdownNow();
-			Thread.currentThread().interrupt();
-		}
+		stopAccepting();
+		awaitOrForce(5_000);
+		cancelRegistered(false);
 		Console.log("Task finalizado.");
 	}
 
 	/**
-	 * [PT] Retorna o número de tarefas atualmente ativas (agendadas ou em
-	 * execução). [EN] Returns the number of currently active tasks (scheduled or
-	 * running).
+	 * Encerra os pools <strong>deixando terminar</strong> o trabalho já pedido, até o prazo.
 	 *
-	 * @return [PT] quantidade de tarefas no mapa [EN] number of tasks in the map
+	 * <p>Para de aceitar tarefas, cancela as periódicas (elas nunca terminam) e os prazos ainda
+	 * não vencidos, e espera as tarefas em execução ou na fila dos trabalhadores e da fila única —
+	 * inclusive a de prazo já vencido que o relógio, ocupado, ainda não tinha disparado (ver
+	 * {@link #dispatch(OneShot)}). Passado o prazo, interrompe o que sobrou. É o que o gancho de
+	 * desligamento do {@code AngatuLib} chama: num redeploy, o {@link #shutdown()} descartava os
+	 * envios que estavam na fila.</p>
+	 *
+	 * @param timeoutMillis Prazo total de espera
+	 * @return {@code true} se tudo terminou dentro do prazo
+	 */
+	public static boolean drain(long timeoutMillis) {
+		stopAccepting();
+		boolean finished = awaitOrForce(timeoutMillis);
+		cancelRegistered(false); // o que sobrou no mapa não roda mais: periódicas e prazos cancelados
+		return finished;
+	}
+
+	/**
+	 * Retorna o número de tarefas atualmente ativas (agendadas, na fila ou em execução).
+	 *
+	 * @return Quantidade de tarefas registradas
 	 */
 	public static int activeTaskCount() {
 		return TASKS.size();
 	}
 
+	// ==================== INFRAESTRUTURA ====================
+
 	/**
-	 * [PT] Cria uma {@link ThreadFactory} com nomes descritivos para as threads dos pools.
-	 * [EN] Creates a {@link ThreadFactory} with descriptive names for pool threads.
+	 * Tarefa de uma execução: a mesma instância é agendada no relógio e executada pelos
+	 * trabalhadores (ou pela fila única). Cancelar cancela os dois — o prazo e a execução.
+	 */
+	private static final class OneShot extends FutureTask<Void> {
+
+		/** ID da tarefa no mapa. */
+		final int id;
+
+		/** Prazo no relógio, quando houver atraso. */
+		volatile ScheduledFuture<?> trigger;
+
+		OneShot(int id, Runnable work) {
+			super(work, null);
+			this.id = id;
+		}
+
+		@Override
+		public boolean cancel(boolean mayInterruptIfRunning) {
+			ScheduledFuture<?> scheduled = trigger;
+			if (scheduled != null) scheduled.cancel(false);
+			return super.cancel(mayInterruptIfRunning);
+		}
+
+		/**
+		 * Terminou, falhou ou foi cancelada: sai do mapa. Só esta instância — o ID já pode ter
+		 * sido reservado para outra tarefa, que não pode sair junto.
+		 */
+		@Override
+		protected void done() {
+			TASKS.remove(id, this);
+		}
+	}
+
+	/**
+	 * Reserva um ID livre e positivo para uma tarefa nova.
 	 *
-	 * @param pattern [PT] padrão de nome com um placeholder %d (ex: "Angatu-Async-%d")
-	 *                [EN] name pattern with a %d placeholder (e.g., "Angatu-Async-%d")
-	 * @return [PT] factory que gera threads nomeadas e não-daemon
-	 *         [EN] factory that produces named non-daemon threads
+	 * <p>O contador dá a volta: depois de 2^31 tarefas ele recomeça do 1 — numa aplicação que
+	 * agenda mil tarefas por segundo, menos de um mês no ar. O ID de uma tarefa ainda registrada
+	 * é pulado: entregue a outra, ele sobrescrevia o registro de um timer criado na subida, a
+	 * tarefa nova o apagava ao terminar, e o {@link #cancelTask(int)} daquele timer deixava de
+	 * pará-lo.</p>
+	 */
+	private static int reserveId() {
+		while (true) {
+			int id = TASK_ID_COUNTER.updateAndGet(last -> last <= 0 || last == Integer.MAX_VALUE ? 1 : last + 1);
+			if (TASKS.putIfAbsent(id, RESERVED) == null) return id;
+		}
+	}
+
+	/**
+	 * Registra a tarefa de uma execução e a entrega ao executor. Recusada — depois do
+	 * desligamento —, ela sai do mapa e a recusa sobe: não fica contada como ativa para sempre.
+	 */
+	private static void start(OneShot task, Runnable schedule) {
+		TASKS.put(task.id, task);
+		try {
+			schedule.run();
+		} catch (RuntimeException refused) {
+			TASKS.remove(task.id, task);
+			throw refused;
+		}
+	}
+
+	/** Agenda a periódica e a registra no ID reservado; recusada, libera o ID e a recusa sobe. */
+	private static void startPeriodic(int taskId, Supplier<ScheduledFuture<?>> schedule) {
+		try {
+			TASKS.put(taskId, schedule.get());
+		} catch (RuntimeException refused) {
+			TASKS.remove(taskId, RESERVED);
+			throw refused;
+		}
+	}
+
+	/**
+	 * Entrega aos trabalhadores a tarefa cujo prazo venceu.
+	 *
+	 * <p>No {@link #drain(long)}, os trabalhadores param de aceitar tarefa antes de o relógio
+	 * terminar. Um prazo que já tinha vencido, mas que o relógio ainda não disparara — as threads
+	 * dele ocupadas com uma periódica lenta —, era recusado ao disparar, e a tarefa sumia sem
+	 * rodar: pedida antes do desligamento, perdida nele. Recusada, ela roda aqui mesmo, na thread
+	 * do relógio, e o {@code drain} espera por ela. Tarefa cancelada não roda: o {@code run} de
+	 * um {@link FutureTask} cancelado não faz nada.</p>
+	 */
+	private static void dispatch(OneShot task) {
+		try {
+			WORKERS.execute(task);
+		} catch (RejectedExecutionException closed) {
+			task.run();
+		}
+	}
+
+	/** Para de aceitar tarefas: prazos ainda não vencidos e periódicas são cancelados no relógio. */
+	private static void stopAccepting() {
+		TIMERS.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
+		TIMERS.setContinueExistingPeriodicTasksAfterShutdownPolicy(false);
+		TIMERS.shutdown();
+		WORKERS.shutdown();
+		SYNC_EXECUTOR.shutdown();
+	}
+
+	/**
+	 * Tira cada tarefa do mapa e a cancela, uma a uma: esvaziar o mapa inteiro depois do laço
+	 * tirava dele, sem cancelar, a tarefa registrada no meio do caminho.
+	 */
+	private static void cancelRegistered(boolean interrupt) {
+		for (Integer taskId : TASKS.keySet()) {
+			Future<?> future = TASKS.remove(taskId);
+			if (future != null) future.cancel(interrupt);
+		}
+	}
+
+	/** Envolve a tarefa: registra no log qualquer falha — {@link Throwable}, não só {@link Exception}. */
+	private static Runnable guarded(String kind, int taskId, Runnable runnable) {
+		return () -> {
+			try {
+				runnable.run();
+			} catch (Throwable t) {
+				Console.error("Erro na " + kind + " ID=" + taskId, t);
+			}
+		};
+	}
+
+	/** Espera os três pools terminarem dentro do prazo; o que sobrar é interrompido. */
+	private static boolean awaitOrForce(long timeoutMillis) {
+		long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(Math.max(0, timeoutMillis));
+		boolean finished = true;
+		try {
+			for (ExecutorService pool : new ExecutorService[] {WORKERS, SYNC_EXECUTOR, TIMERS}) {
+				long remaining = Math.max(0, deadline - System.nanoTime());
+				if (!pool.awaitTermination(remaining, TimeUnit.NANOSECONDS)) {
+					pool.shutdownNow();
+					finished = false;
+				}
+			}
+		} catch (InterruptedException e) {
+			WORKERS.shutdownNow();
+			SYNC_EXECUTOR.shutdownNow();
+			TIMERS.shutdownNow();
+			Thread.currentThread().interrupt();
+			return false;
+		}
+		return finished;
+	}
+
+	private static ScheduledThreadPoolExecutor newTimers() {
+		ScheduledThreadPoolExecutor timers =
+				new ScheduledThreadPoolExecutor(TIMER_THREADS, namedThreadFactory("Angatu-Timer-%d"));
+		// Tarefa cancelada sai da fila na hora, em vez de esperar o prazo dela vencer.
+		timers.setRemoveOnCancelPolicy(true);
+		return timers;
+	}
+
+	private static ThreadPoolExecutor newWorkers() {
+		ThreadPoolExecutor workers = new ThreadPoolExecutor(WORKER_THREADS, WORKER_THREADS, 60L, TimeUnit.SECONDS,
+				new LinkedBlockingQueue<>(), namedThreadFactory("Angatu-Async-%d"));
+		// Sem trabalho, as threads encerram depois de um minuto: nada fica parado ocupando memória.
+		workers.allowCoreThreadTimeOut(true);
+		return workers;
+	}
+
+	/**
+	 * Lê um inteiro do ambiente, preso entre um mínimo e um máximo; valor ausente ou ilegível
+	 * volta ao padrão.
+	 */
+	private static int intFromEnvironment(String key, int fallback, int min, int max) {
+		try {
+			String value = System.getenv(key);
+			if (value == null || value.isBlank()) return fallback;
+			return Math.max(min, Math.min(max, Integer.parseInt(value.trim())));
+		} catch (RuntimeException e) {
+			return fallback;
+		}
+	}
+
+	/**
+	 * Cria uma {@link ThreadFactory} com nomes descritivos para as threads dos pools.
+	 *
+	 * @param pattern Padrão de nome com um placeholder {@code %d} (ex: {@code "Angatu-Async-%d"})
+	 * @return Factory que gera threads nomeadas e não-daemon
 	 */
 	private static ThreadFactory namedThreadFactory(String pattern) {
 		AtomicInteger counter = new AtomicInteger(1);

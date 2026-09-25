@@ -1,18 +1,18 @@
 package br.com.angatusistemas.lib;
 
 /**
- * Classe de ponto de entrada para testes manuais da biblioteca.
+ * Ponto de entrada informativo da biblioteca.
  *
- * <p><strong>Propósito:</strong> servir de harness de execução local — o
- * método {@link #main(String[])} é usado para testar componentes da biblioteca
- * durante o desenvolvimento.</p>
+ * <p><strong>Propósito:</strong> a AngatuLibraries não tem nada para executar sozinha. Rodar
+ * esta classe ({@code java -cp ... br.com.angatusistemas.lib.Core}) só mostra no console como
+ * iniciar uma aplicação e como rodar os testes.</p>
  *
- * <p><strong>Quando usar:</strong> apenas em desenvolvimento interno, rodando
- * via {@code java -cp ... br.com.angatusistemas.lib.Core}.</p>
+ * <p><strong>Testes:</strong> os testes da biblioteca são automatizados, em JUnit 5, em
+ * {@code src/test/java}, e rodam com {@code mvn test} — não por esta classe, que antes era um
+ * esboço de teste manual sem conteúdo.</p>
  *
- * <p><strong>Quando NÃO usar:</strong> não faz parte da API pública da
- * biblioteca; aplicações reais devem usar {@link AngatuLib} como ponto de
- * entrada.</p>
+ * <p><strong>Quando NÃO usar:</strong> não faz parte da API de uso da biblioteca;
+ * aplicações reais usam {@link AngatuLib} como ponto de entrada.</p>
  *
  * <p><strong>Restrição:</strong> classe {@code final} com construtor privado —
  * não deve ser instanciada nem estendida.</p>
@@ -27,12 +27,19 @@ public final class Core {
     }
 
     /**
-     * Ponto de entrada para testes manuais.
+     * Mostra no console como iniciar uma aplicação com a biblioteca e como rodar os testes.
      *
      * @param args Argumentos da linha de comando (não utilizados)
      */
     public static void main(String[] args) {
-        // TODO aqui roda os testes da biblioteca, testar componentes.
-    }
+        System.out.println("""
+                AngatuLibraries é uma biblioteca: não há nada para executar sozinha.
 
+                Para iniciar uma aplicação, crie o servidor no método main do projeto
+                (o terceiro argumento liga o bloqueio por excesso de requisições):
+                    new AngatuLib("localhost", 8080, true);
+
+                Para testar a biblioteca, rode os testes automatizados (JUnit 5, em src/test/java):
+                    mvn test""");
+    }
 }

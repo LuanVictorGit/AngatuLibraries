@@ -8,9 +8,12 @@ import java.time.Period;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
+import java.time.format.ResolverStyle;
 import java.time.temporal.ChronoUnit;
 import java.time.temporal.TemporalAdjusters;
 import java.util.Date;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -19,7 +22,8 @@ import java.util.concurrent.ConcurrentHashMap;
  *
  * <p><strong>Propósito:</strong> operações de data/hora com a API
  * {@code java.time} (imutável e thread-safe), fuso padrão
- * {@code America/Sao_Paulo} e formatos brasileiros (dd/MM/yyyy).</p>
+ * {@code America/Sao_Paulo}, formatos brasileiros (dd/MM/yyyy) e nomes de mês e de dia da
+ * semana em português do Brasil.</p>
  *
  * <p><strong>Quando usar:</strong> formatação, parsing, aritmética, diferenças,
  * extrações e conversões de data/hora em qualquer ponto da aplicação; também é
@@ -40,23 +44,28 @@ import java.util.concurrent.ConcurrentHashMap;
  * timestamp epoch ({@code getCurrentTimestamp}, {@code fromTimestamp},
  * {@code toTimestamp}).</p>
  *
- * <p><strong>Exemplo:</strong>
+ * <p><strong>Exemplo:</strong></p>
  * <pre>
  * LocalDate hoje = DataTime.getCurrentDate();
  * String br = DataTime.formatDate(hoje);                 // "03/08/2026"
  * LocalDate parsed = DataTime.parseDate("25/12/2026");
+ * boolean valida = DataTime.isValidDate("31/02/2026");   // false: fevereiro não tem 31
  * int idade = DataTime.calculateAge(LocalDate.of(1990, 5, 10));
  * </pre>
- * </p>
  *
  * <p><strong>Boas práticas:</strong> prefira os métodos desta classe ao invés
  * de {@code SimpleDateFormat} (não thread-safe); use
- * {@code isValidDate/isValidDateTime} para validar entrada do usuário.</p>
+ * {@code isValidDate/isValidDateTime} para validar entrada do usuário — eles rejeitam datas
+ * que não existem, como 31/02 ou 29/02 em ano não bissexto.</p>
  *
- * <p><strong>Limitações:</strong> fuso fixo em São Paulo; métodos {@code custom}
- * aceitam qualquer padrão — padrões inválidos lançam
- * {@link java.time.format.DateTimeParseException} ou
- * {@link java.time.DateTimeException}.</p>
+ * <p><strong>Limitações:</strong> fuso fixo em São Paulo e idioma fixo em português do Brasil
+ * (independentes do fuso e do idioma da JVM — num contêiner em {@code en_US}, os nomes antes
+ * saíam em inglês); métodos {@code custom} aceitam qualquer padrão — padrões inválidos lançam
+ * {@link IllegalArgumentException} e textos fora do padrão lançam
+ * {@link java.time.format.DateTimeParseException}.</p>
+ *
+ * <p><strong>Nome da classe e de {@link #getData()}:</strong> mantidos por compatibilidade;
+ * renomeá-los quebraria todo projeto que já os usa.</p>
  *
  * <p><strong>Extensões futuras:</strong> suporte a fuso configurável e
  * duração humana (ex: "há 3 dias") são evoluções naturais sem quebrar a API.</p>
@@ -68,547 +77,531 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public final class DataTime {
 
-    // Fuso horário padrão: Brasil (São Paulo)
-    // Default timezone: Brazil (Sao Paulo)
+    /** Idioma dos nomes de mês e de dia da semana: português do Brasil, qualquer que seja o da JVM. */
+    private static final Locale PT_BR = Locale.of("pt", "BR");
+
+    /** Fuso horário padrão: Brasil (São Paulo). */
     public static final ZoneId DEFAULT_ZONE = ZoneId.of("America/Sao_Paulo");
 
-    // Formatadores comuns (thread-safe e reutilizáveis)
-    // Common formatters (thread-safe and reusable)
-    public static final DateTimeFormatter DATETIME_BR_FORMATTER = DateTimeFormatter.ofPattern("dd/MM/yyyy - HH:mm");
-    public static final DateTimeFormatter DATE_BR_FORMATTER = DateTimeFormatter.ofPattern("dd/MM/yyyy");
-    public static final DateTimeFormatter TIME_BR_FORMATTER = DateTimeFormatter.ofPattern("HH:mm:ss");
+    /**
+     * Formatador de saída de data e hora no padrão brasileiro {@code dd/MM/yyyy - HH:mm}.
+     *
+     * <p>Serve para <em>escrever</em>. Para ler texto digitado, use {@link #parseDateTime(String)}
+     * ou {@link #isValidDateTime(String)}: este formatador resolve no modo SMART do JDK, que
+     * aceita 31/02 e o transforma em 28/02.</p>
+     */
+    public static final DateTimeFormatter DATETIME_BR_FORMATTER = DateTimeFormatter.ofPattern("dd/MM/yyyy - HH:mm", PT_BR);
+
+    /**
+     * Formatador de saída de data no padrão brasileiro {@code dd/MM/yyyy}.
+     *
+     * <p>Serve para <em>escrever</em>. Para ler texto digitado, use {@link #parseDate(String)} ou
+     * {@link #isValidDate(String)}: este formatador resolve no modo SMART do JDK, que aceita
+     * 31/02 e o transforma em 28/02.</p>
+     */
+    public static final DateTimeFormatter DATE_BR_FORMATTER = DateTimeFormatter.ofPattern("dd/MM/yyyy", PT_BR);
+
+    /** Formatador de hora no padrão {@code HH:mm:ss}. */
+    public static final DateTimeFormatter TIME_BR_FORMATTER = DateTimeFormatter.ofPattern("HH:mm:ss", PT_BR);
+
+    /** Formatador ISO-8601 de data e hora local ({@code 2025-04-03T10:30:00}), com validação estrita. */
     public static final DateTimeFormatter ISO_DATETIME_FORMATTER = DateTimeFormatter.ISO_LOCAL_DATE_TIME;
+
+    /** Formatador ISO-8601 de data local ({@code 2025-04-03}), com validação estrita. */
     public static final DateTimeFormatter ISO_DATE_FORMATTER = DateTimeFormatter.ISO_LOCAL_DATE;
 
-    /** Cache de formatadores para padrões personalizados (thread-safe). */
+    /**
+     * Leitor estrito de {@code dd/MM/uuuu}: rejeita datas que não existem. Tem de ser
+     * {@code uuuu} (ano proléptico): com {@code yyyy} (ano da era), o modo STRICT exige a era no
+     * texto e rejeita toda data.
+     */
+    private static final DateTimeFormatter DATE_BR_PARSER =
+            DateTimeFormatter.ofPattern("dd/MM/uuuu", PT_BR).withResolverStyle(ResolverStyle.STRICT);
+
+    /** Leitor estrito de {@code dd/MM/uuuu - HH:mm}, pelo mesmo motivo de {@link #DATE_BR_PARSER}. */
+    private static final DateTimeFormatter DATETIME_BR_PARSER =
+            DateTimeFormatter.ofPattern("dd/MM/uuuu - HH:mm", PT_BR).withResolverStyle(ResolverStyle.STRICT);
+
+    /**
+     * Quantos padrões personalizados ficam guardados, no máximo. Um projeto usa poucos; o teto
+     * existe para que padrões montados em tempo de execução não façam o mapa crescer sem fim.
+     */
+    private static final int MAX_CACHED_PATTERNS = 256;
+
+    /** Formatadores já compilados para padrões personalizados (thread-safe, limitado). */
     private static final Map<String, DateTimeFormatter> CUSTOM_FORMATTER_CACHE = new ConcurrentHashMap<>();
 
     private DataTime() {
-        throw new UnsupportedOperationException("Utility class cannot be instantiated");
+        throw new UnsupportedOperationException("Classe utilitária não pode ser instanciada");
     }
 
     // ==================== MÉTODOS LEGADOS (COMPATIBILIDADE) ====================
-    // ==================== LEGACY METHODS (COMPATIBILITY) ====================
 
     /**
-     * [PT] Retorna a data e hora atual no formato "dd/MM/yyyy - HH:mm" com fuso de São Paulo.
-     * <p>
-     * Método legado mantido para compatibilidade. A implementação atual usa
-     * {@link DateTimeFormatter} (thread-safe e sem alocação por chamada).
-     * Prefira {@link #getCurrentDateTime()} para código novo.
-     * </p>
+     * Retorna a data e hora atual no formato {@code "dd/MM/yyyy - HH:mm"} com fuso de São Paulo.
      *
-     * [EN] Returns current date and time in "dd/MM/yyyy - HH:mm" format with Sao Paulo timezone.
-     * <p>
-     * Legacy method kept for compatibility. The current implementation uses
-     * {@link DateTimeFormatter} (thread-safe, no per-call allocation).
-     * Prefer {@link #getCurrentDateTime()} for new code.
-     * </p>
+     * <p>Método legado mantido para compatibilidade. O formatador é reutilizado (thread-safe);
+     * cada chamada ainda cria a data atual e a String do resultado. Prefira
+     * {@link #getCurrentDateTime()} para código novo.</p>
      *
-     * @return [PT] string formatada com data e hora atuais
-     *         [EN] formatted string with current date and time
+     * @return String formatada com data e hora atuais
      */
     public static String getData() {
         return LocalDateTime.now(DEFAULT_ZONE).format(DATETIME_BR_FORMATTER);
     }
 
     // ==================== OBTENÇÃO DE DATA/HORA ATUAL ====================
-    // ==================== GET CURRENT DATE/TIME ====================
 
     /**
-     * [PT] Obtém a data atual no fuso horário padrão (São Paulo).
-     * [EN] Gets current date in the default timezone (Sao Paulo).
+     * Obtém a data atual no fuso horário padrão (São Paulo).
      *
-     * @return [PT] data atual
-     *         [EN] current date
+     * @return Data atual
      */
     public static LocalDate getCurrentDate() {
         return LocalDate.now(DEFAULT_ZONE);
     }
 
     /**
-     * [PT] Obtém a data e hora atual no fuso horário padrão (São Paulo).
-     * [EN] Gets current date and time in the default timezone (Sao Paulo).
+     * Obtém a data e hora atual no fuso horário padrão (São Paulo).
      *
-     * @return [PT] data e hora atuais
-     *         [EN] current date and time
+     * @return Data e hora atuais
      */
     public static LocalDateTime getCurrentDateTime() {
         return LocalDateTime.now(DEFAULT_ZONE);
     }
 
     /**
-     * [PT] Obtém a data e hora atual com fuso horário completo (São Paulo).
-     * [EN] Gets current date and time with full timezone (Sao Paulo).
+     * Obtém a data e hora atual com fuso horário completo (São Paulo).
      *
-     * @return [PT] data, hora e fuso atuais
-     *         [EN] current date, time and timezone
+     * @return Data, hora e fuso atuais
      */
     public static ZonedDateTime getCurrentZonedDateTime() {
         return ZonedDateTime.now(DEFAULT_ZONE);
     }
 
     /**
-     * [PT] Obtém o timestamp Unix (segundos desde 1970-01-01T00:00:00Z).
-     * [EN] Gets the Unix timestamp (seconds since 1970-01-01T00:00:00Z).
+     * Obtém o timestamp Unix (segundos desde 1970-01-01T00:00:00Z).
      *
-     * @return [PT] timestamp atual em segundos
-     *         [EN] current timestamp in seconds
+     * @return Timestamp atual em segundos
      */
     public static long getCurrentTimestamp() {
         return Instant.now().getEpochSecond();
     }
 
     // ==================== FORMATAÇÃO ====================
-    // ==================== FORMATTING ====================
 
     /**
-     * [PT] Formata uma data no padrão brasileiro "dd/MM/yyyy".
-     * [EN] Formats a date in Brazilian pattern "dd/MM/yyyy".
+     * Formata uma data no padrão brasileiro {@code "dd/MM/yyyy"}.
      *
-     * @param date [PT] data a ser formatada (não nula)
-     *            [EN] date to format (non-null)
-     * @return [PT] string formatada
-     *         [EN] formatted string
+     * @param date Data a ser formatada (não nula)
+     * @return String formatada
      */
     public static String formatDate(LocalDate date) {
         return date.format(DATE_BR_FORMATTER);
     }
 
     /**
-     * [PT] Formata uma data/hora no padrão brasileiro "dd/MM/yyyy - HH:mm".
-     * [EN] Formats a date/time in Brazilian pattern "dd/MM/yyyy - HH:mm".
+     * Formata uma data/hora no padrão brasileiro {@code "dd/MM/yyyy - HH:mm"}.
      *
-     * @param dateTime [PT] data/hora a ser formatada (não nula)
-     *                 [EN] date/time to format (non-null)
-     * @return [PT] string formatada
-     *         [EN] formatted string
+     * @param dateTime Data/hora a ser formatada (não nula)
+     * @return String formatada
      */
     public static String formatDateTime(LocalDateTime dateTime) {
         return dateTime.format(DATETIME_BR_FORMATTER);
     }
 
     /**
-     * [PT] Formata uma data/hora com fuso horário no padrão ISO.
-     * [EN] Formats a zoned date/time in ISO pattern.
+     * Formata uma data/hora com fuso horário no padrão ISO-8601.
      *
-     * @param zonedDateTime [PT] data/hora com fuso (não nula)
-     *                      [EN] zoned date/time (non-null)
-     * @return [PT] string no formato ISO (ex: 2025-04-03T10:30:00-03:00)
-     *         [EN] string in ISO format (e.g., 2025-04-03T10:30:00-03:00)
+     * @param zonedDateTime Data/hora com fuso (não nula)
+     * @return String no formato ISO (ex: {@code 2025-04-03T10:30:00-03:00})
      */
     public static String formatIso(ZonedDateTime zonedDateTime) {
         return zonedDateTime.format(DateTimeFormatter.ISO_OFFSET_DATE_TIME);
     }
 
     /**
-     * [PT] Formata uma data/hora usando um padrão personalizado.
-     * [EN] Formats a date/time using a custom pattern.
+     * Formata uma data/hora usando um padrão personalizado, com nomes de mês e de dia da semana
+     * em português do Brasil ({@code "EEEE, dd 'de' MMMM"} → {@code "quarta-feira, 23 de setembro"}).
      *
-     * @param dateTime [PT] data/hora (não nula)
-     *                 [EN] date/time (non-null)
-     * @param pattern  [PT] padrão de formatação (ex: "yyyy-MM-dd HH:mm:ss")
-     *                 [EN] formatting pattern (e.g., "yyyy-MM-dd HH:mm:ss")
-     * @return [PT] string formatada
-     *         [EN] formatted string
+     * @param dateTime Data/hora (não nula)
+     * @param pattern  Padrão de formatação (ex: {@code "yyyy-MM-dd HH:mm:ss"})
+     * @return String formatada
+     * @throws IllegalArgumentException se o padrão for inválido
      */
     public static String formatCustom(LocalDateTime dateTime, String pattern) {
         return dateTime.format(formatterFor(pattern));
     }
 
     // ==================== PARSING (CONVERSÃO DE STRING PARA DATA) ====================
-    // ==================== PARSING (STRING TO DATE) ====================
 
     /**
-     * [PT] Converte uma string no formato "dd/MM/yyyy" para LocalDate.
-     * [EN] Parses a string in "dd/MM/yyyy" format to LocalDate.
+     * Converte uma string no formato {@code "dd/MM/yyyy"} para {@link LocalDate}.
      *
-     * @param dateStr [PT] string da data (ex: "25/12/2025")
-     *                [EN] date string (e.g., "25/12/2025")
-     * @return [PT] LocalDate correspondente
-     *         [EN] corresponding LocalDate
-     * @throws java.time.format.DateTimeParseException se o formato for inválido
+     * <p>Estrito: uma data que não existe (31/02, 29/02 em ano não bissexto, 31/04) é rejeitada.
+     * Antes, "31/02/2025" virava 28/02/2025 em silêncio.</p>
+     *
+     * @param dateStr String da data (ex: {@code "25/12/2025"}; não nula)
+     * @return {@link LocalDate} correspondente
+     * @throws DateTimeParseException se o formato for inválido ou a data não existir
      */
     public static LocalDate parseDate(String dateStr) {
-        return LocalDate.parse(dateStr, DATE_BR_FORMATTER);
+        return LocalDate.parse(dateStr, DATE_BR_PARSER);
     }
 
     /**
-     * [PT] Converte uma string no formato "dd/MM/yyyy - HH:mm" para LocalDateTime.
-     * [EN] Parses a string in "dd/MM/yyyy - HH:mm" format to LocalDateTime.
+     * Converte uma string no formato {@code "dd/MM/yyyy - HH:mm"} para {@link LocalDateTime}.
      *
-     * @param dateTimeStr [PT] string de data/hora (ex: "25/12/2025 - 14:30")
-     *                    [EN] date/time string (e.g., "25/12/2025 - 14:30")
-     * @return [PT] LocalDateTime correspondente
-     *         [EN] corresponding LocalDateTime
+     * <p>Estrito como {@link #parseDate(String)}: data ou hora que não existe é rejeitada.</p>
+     *
+     * @param dateTimeStr String de data/hora (ex: {@code "25/12/2025 - 14:30"}; não nula)
+     * @return {@link LocalDateTime} correspondente
+     * @throws DateTimeParseException se o formato for inválido ou a data/hora não existir
      */
     public static LocalDateTime parseDateTime(String dateTimeStr) {
-        return LocalDateTime.parse(dateTimeStr, DATETIME_BR_FORMATTER);
+        return LocalDateTime.parse(dateTimeStr, DATETIME_BR_PARSER);
     }
 
     /**
-     * [PT] Converte uma string para LocalDateTime usando um padrão personalizado.
-     * [EN] Parses a string to LocalDateTime using a custom pattern.
+     * Converte uma string para {@link LocalDateTime} usando um padrão personalizado.
      *
-     * @param dateTimeStr [PT] string da data/hora
-     *                    [EN] date/time string
-     * @param pattern     [PT] padrão usado na string (ex: "yyyy/MM/dd HH:mm")
-     *                    [EN] pattern used in the string (e.g., "yyyy/MM/dd HH:mm")
-     * @return [PT] LocalDateTime correspondente
-     *         [EN] corresponding LocalDateTime
+     * <p>Resolve no modo SMART do JDK, e não no estrito: um dia além do fim do mês (31/02) é
+     * ajustado para o último dia válido. O estrito exigiria {@code uuuu} no lugar de
+     * {@code yyyy} e rejeitaria todo padrão já escrito com {@code yyyy}. Para validar entrada do
+     * usuário no formato brasileiro, use {@link #parseDateTime(String)} ou
+     * {@link #isValidDateTime(String)}.</p>
+     *
+     * @param dateTimeStr String da data/hora
+     * @param pattern     Padrão usado na string (ex: {@code "yyyy/MM/dd HH:mm"})
+     * @return {@link LocalDateTime} correspondente
+     * @throws DateTimeParseException se o texto não seguir o padrão
+     * @throws IllegalArgumentException se o padrão for inválido
      */
     public static LocalDateTime parseCustom(String dateTimeStr, String pattern) {
         return LocalDateTime.parse(dateTimeStr, formatterFor(pattern));
     }
 
     // ==================== OPERAÇÕES ARITMÉTICAS COM DATAS ====================
-    // ==================== DATE ARITHMETIC ====================
 
     /**
-     * [PT] Adiciona ou subtrai dias a uma data.
-     * [EN] Adds or subtracts days from a date.
+     * Adiciona ou subtrai dias a uma data.
      *
-     * @param date [PT] data base
-     *             [EN] base date
-     * @param days [PT] número de dias (positivo para adicionar, negativo para subtrair)
-     *             [EN] number of days (positive to add, negative to subtract)
-     * @return [PT] nova data com os dias ajustados
-     *         [EN] new date with days adjusted
+     * @param date Data base
+     * @param days Número de dias (positivo para adicionar, negativo para subtrair)
+     * @return Nova data com os dias ajustados
      */
     public static LocalDate addDays(LocalDate date, long days) {
         return date.plusDays(days);
     }
 
     /**
-     * [PT] Adiciona ou subtrai meses a uma data.
-     * [EN] Adds or subtracts months from a date.
+     * Adiciona ou subtrai meses a uma data.
      *
-     * @param date   [PT] data base
-     *               [EN] base date
-     * @param months [PT] número de meses (positivo para adicionar, negativo para subtrair)
-     *               [EN] number of months (positive to add, negative to subtract)
-     * @return [PT] nova data com os meses ajustados
-     *         [EN] new date with months adjusted
+     * @param date   Data base
+     * @param months Número de meses (positivo para adicionar, negativo para subtrair)
+     * @return Nova data com os meses ajustados
      */
     public static LocalDate addMonths(LocalDate date, long months) {
         return date.plusMonths(months);
     }
 
     /**
-     * [PT] Adiciona ou subtrai anos a uma data.
-     * [EN] Adds or subtracts years from a date.
+     * Adiciona ou subtrai anos a uma data.
      *
-     * @param date  [PT] data base
-     *              [EN] base date
-     * @param years [PT] número de anos (positivo para adicionar, negativo para subtrair)
-     *              [EN] number of years (positive to add, negative to subtract)
-     * @return [PT] nova data com os anos ajustados
-     *         [EN] new date with years adjusted
+     * @param date  Data base
+     * @param years Número de anos (positivo para adicionar, negativo para subtrair)
+     * @return Nova data com os anos ajustados
      */
     public static LocalDate addYears(LocalDate date, long years) {
         return date.plusYears(years);
     }
 
     /**
-     * [PT] Adiciona ou subtrai horas a uma data/hora.
-     * [EN] Adds or subtracts hours from a date/time.
+     * Adiciona ou subtrai horas a uma data/hora.
      *
-     * @param dateTime [PT] data/hora base
-     *                 [EN] base date/time
-     * @param hours    [PT] número de horas (positivo para adicionar, negativo para subtrair)
-     *                 [EN] number of hours (positive to add, negative to subtract)
-     * @return [PT] nova data/hora com as horas ajustadas
-     *         [EN] new date/time with hours adjusted
+     * @param dateTime Data/hora base
+     * @param hours    Número de horas (positivo para adicionar, negativo para subtrair)
+     * @return Nova data/hora com as horas ajustadas
      */
     public static LocalDateTime addHours(LocalDateTime dateTime, long hours) {
         return dateTime.plusHours(hours);
     }
 
     /**
-     * [PT] Adiciona ou subtrai minutos a uma data/hora.
-     * [EN] Adds or subtracts minutes from a date/time.
+     * Adiciona ou subtrai minutos a uma data/hora.
      *
-     * @param dateTime [PT] data/hora base
-     *                 [EN] base date/time
-     * @param minutes  [PT] número de minutos (positivo para adicionar, negativo para subtrair)
-     *                 [EN] number of minutes (positive to add, negative to subtract)
-     * @return [PT] nova data/hora com os minutos ajustados
-     *         [EN] new date/time with minutes adjusted
+     * @param dateTime Data/hora base
+     * @param minutes  Número de minutos (positivo para adicionar, negativo para subtrair)
+     * @return Nova data/hora com os minutos ajustados
      */
     public static LocalDateTime addMinutes(LocalDateTime dateTime, long minutes) {
         return dateTime.plusMinutes(minutes);
     }
 
     /**
-     * [PT] Adiciona ou subtrai segundos a uma data/hora.
-     * [EN] Adds or subtracts seconds from a date/time.
+     * Adiciona ou subtrai segundos a uma data/hora.
      *
-     * @param dateTime [PT] data/hora base
-     *                 [EN] base date/time
-     * @param seconds  [PT] número de segundos (positivo para adicionar, negativo para subtrair)
-     *                 [EN] number of seconds (positive to add, negative to subtract)
-     * @return [PT] nova data/hora com os segundos ajustados
-     *         [EN] new date/time with seconds adjusted
+     * @param dateTime Data/hora base
+     * @param seconds  Número de segundos (positivo para adicionar, negativo para subtrair)
+     * @return Nova data/hora com os segundos ajustados
      */
     public static LocalDateTime addSeconds(LocalDateTime dateTime, long seconds) {
         return dateTime.plusSeconds(seconds);
     }
 
     // ==================== DIFERENÇA ENTRE DATAS ====================
-    // ==================== DATE DIFFERENCE ====================
 
     /**
-     * [PT] Calcula a diferença em dias entre duas datas.
-     * [EN] Calculates the difference in days between two dates.
+     * Calcula a diferença em dias entre duas datas.
      *
-     * @param start [PT] data inicial
-     *              [EN] start date
-     * @param end   [PT] data final
-     *              [EN] end date
-     * @return [PT] número de dias entre as datas (pode ser negativo)
-     *         [EN] number of days between the dates (may be negative)
+     * @param start Data inicial
+     * @param end   Data final
+     * @return Número de dias entre as datas (pode ser negativo)
      */
     public static long diffDays(LocalDate start, LocalDate end) {
         return ChronoUnit.DAYS.between(start, end);
     }
 
     /**
-     * [PT] Calcula a diferença em meses entre duas datas.
-     * [EN] Calculates the difference in months between two dates.
+     * Calcula a diferença em meses completos entre duas datas.
      *
-     * @param start [PT] data inicial
-     *              [EN] start date
-     * @param end   [PT] data final
-     *              [EN] end date
-     * @return [PT] número de meses entre as datas (pode ser negativo)
-     *         [EN] number of months between the dates (may be negative)
+     * @param start Data inicial
+     * @param end   Data final
+     * @return Número de meses entre as datas (pode ser negativo)
      */
     public static long diffMonths(LocalDate start, LocalDate end) {
         return ChronoUnit.MONTHS.between(start, end);
     }
 
     /**
-     * [PT] Calcula a diferença em anos entre duas datas.
-     * [EN] Calculates the difference in years between two dates.
+     * Calcula a diferença em anos completos entre duas datas.
      *
-     * @param start [PT] data inicial
-     *              [EN] start date
-     * @param end   [PT] data final
-     *              [EN] end date
-     * @return [PT] número de anos entre as datas (pode ser negativo)
-     *         [EN] number of years between the dates (may be negative)
+     * @param start Data inicial
+     * @param end   Data final
+     * @return Número de anos entre as datas (pode ser negativo)
      */
     public static long diffYears(LocalDate start, LocalDate end) {
         return ChronoUnit.YEARS.between(start, end);
     }
 
     /**
-     * [PT] Calcula a diferença em horas entre duas datas/horas.
-     * [EN] Calculates the difference in hours between two date/times.
+     * Calcula a diferença em horas completas entre duas datas/horas.
      *
-     * @param start [PT] data/hora inicial
-     *              [EN] start date/time
-     * @param end   [PT] data/hora final
-     *              [EN] end date/time
-     * @return [PT] número de horas entre as datas (pode ser negativo)
-     *         [EN] number of hours between the dates (may be negative)
+     * @param start Data/hora inicial
+     * @param end   Data/hora final
+     * @return Número de horas entre as datas (pode ser negativo)
      */
     public static long diffHours(LocalDateTime start, LocalDateTime end) {
         return ChronoUnit.HOURS.between(start, end);
     }
 
     /**
-     * [PT] Calcula a diferença em minutos entre duas datas/horas.
-     * [EN] Calculates the difference in minutes between two date/times.
+     * Calcula a diferença em minutos completos entre duas datas/horas.
      *
-     * @param start [PT] data/hora inicial
-     *              [EN] start date/time
-     * @param end   [PT] data/hora final
-     *              [EN] end date/time
-     * @return [PT] número de minutos entre as datas (pode ser negativo)
-     *         [EN] number of minutes between the dates (may be negative)
+     * @param start Data/hora inicial
+     * @param end   Data/hora final
+     * @return Número de minutos entre as datas (pode ser negativo)
      */
     public static long diffMinutes(LocalDateTime start, LocalDateTime end) {
         return ChronoUnit.MINUTES.between(start, end);
     }
 
     /**
-     * [PT] Calcula a diferença em segundos entre duas datas/horas.
-     * [EN] Calculates the difference in seconds between two date/times.
+     * Calcula a diferença em segundos completos entre duas datas/horas.
      *
-     * @param start [PT] data/hora inicial
-     *              [EN] start date/time
-     * @param end   [PT] data/hora final
-     *              [EN] end date/time
-     * @return [PT] número de segundos entre as datas (pode ser negativo)
-     *         [EN] number of seconds between the dates (may be negative)
+     * @param start Data/hora inicial
+     * @param end   Data/hora final
+     * @return Número de segundos entre as datas (pode ser negativo)
      */
     public static long diffSeconds(LocalDateTime start, LocalDateTime end) {
         return ChronoUnit.SECONDS.between(start, end);
     }
 
     // ==================== EXTRAÇÃO DE PARTES DA DATA ====================
-    // ==================== DATE PART EXTRACTION ====================
 
     /**
-     * [PT] Obtém o dia do mês (1-31) de uma data.
-     * [EN] Gets the day of month (1-31) from a date.
+     * Obtém o dia do mês de uma data.
+     *
+     * @param date Data (não nula)
+     * @return Dia do mês, de 1 a 31
      */
     public static int getDay(LocalDate date) {
         return date.getDayOfMonth();
     }
 
     /**
-     * [PT] Obtém o mês (1-12) de uma data.
-     * [EN] Gets the month (1-12) from a date.
+     * Obtém o mês de uma data.
+     *
+     * @param date Data (não nula)
+     * @return Mês, de 1 (janeiro) a 12 (dezembro)
      */
     public static int getMonth(LocalDate date) {
         return date.getMonthValue();
     }
 
     /**
-     * [PT] Obtém o ano de uma data.
-     * [EN] Gets the year from a date.
+     * Obtém o ano de uma data.
+     *
+     * @param date Data (não nula)
+     * @return Ano (ex: 2026)
      */
     public static int getYear(LocalDate date) {
         return date.getYear();
     }
 
     /**
-     * [PT] Obtém a hora (0-23) de uma data/hora.
-     * [EN] Gets the hour (0-23) from a date/time.
+     * Obtém a hora de uma data/hora.
+     *
+     * @param dateTime Data/hora (não nula)
+     * @return Hora, de 0 a 23
      */
     public static int getHour(LocalDateTime dateTime) {
         return dateTime.getHour();
     }
 
     /**
-     * [PT] Obtém o minuto (0-59) de uma data/hora.
-     * [EN] Gets the minute (0-59) from a date/time.
+     * Obtém o minuto de uma data/hora.
+     *
+     * @param dateTime Data/hora (não nula)
+     * @return Minuto, de 0 a 59
      */
     public static int getMinute(LocalDateTime dateTime) {
         return dateTime.getMinute();
     }
 
     /**
-     * [PT] Obtém o segundo (0-59) de uma data/hora.
-     * [EN] Gets the second (0-59) from a date/time.
+     * Obtém o segundo de uma data/hora.
+     *
+     * @param dateTime Data/hora (não nula)
+     * @return Segundo, de 0 a 59
      */
     public static int getSecond(LocalDateTime dateTime) {
         return dateTime.getSecond();
     }
 
     /**
-     * [PT] Obtém o dia da semana (segunda=1 a domingo=7, conforme ISO).
-     * [EN] Gets the day of week (Monday=1 to Sunday=7, ISO standard).
+     * Obtém o dia da semana conforme a ISO-8601.
+     *
+     * @param date Data (não nula)
+     * @return Dia da semana, de 1 (segunda-feira) a 7 (domingo)
      */
     public static int getDayOfWeek(LocalDate date) {
         return date.getDayOfWeek().getValue();
     }
 
     /**
-     * [PT] Verifica se o ano é bissexto.
-     * [EN] Checks if the year is leap.
+     * Verifica se o ano da data é bissexto.
+     *
+     * @param date Data (não nula)
+     * @return {@code true} se o ano for bissexto
      */
     public static boolean isLeapYear(LocalDate date) {
         return date.isLeapYear();
     }
 
     // ==================== AJUSTES DE DATA (INÍCIO/FIM) ====================
-    // ==================== DATE ADJUSTMENTS (START/END) ====================
 
     /**
-     * [PT] Retorna o início do dia (00:00:00) de uma data.
-     * [EN] Returns the start of the day (00:00:00) of a date.
+     * Retorna o início do dia (00:00:00) de uma data.
+     *
+     * @param date Data (não nula)
+     * @return Data/hora à meia-noite do dia
      */
     public static LocalDateTime startOfDay(LocalDate date) {
         return date.atStartOfDay();
     }
 
     /**
-     * [PT] Retorna o fim do dia (23:59:59.999999999) de uma data.
-     * [EN] Returns the end of the day (23:59:59.999999999) of a date.
+     * Retorna o fim do dia (23:59:59.999999999) de uma data.
+     *
+     * @param date Data (não nula)
+     * @return Data/hora no último instante do dia
      */
     public static LocalDateTime endOfDay(LocalDate date) {
         return date.atTime(LocalTime.MAX);
     }
 
     /**
-     * [PT] Retorna o primeiro dia do mês da data fornecida.
-     * [EN] Returns the first day of the month of the given date.
+     * Retorna o primeiro dia do mês da data fornecida.
+     *
+     * @param date Data (não nula)
+     * @return Dia 1 do mesmo mês
      */
     public static LocalDate firstDayOfMonth(LocalDate date) {
         return date.withDayOfMonth(1);
     }
 
     /**
-     * [PT] Retorna o último dia do mês da data fornecida.
-     * [EN] Returns the last day of the month of the given date.
+     * Retorna o último dia do mês da data fornecida.
+     *
+     * @param date Data (não nula)
+     * @return Último dia do mesmo mês (28, 29, 30 ou 31)
      */
     public static LocalDate lastDayOfMonth(LocalDate date) {
         return date.with(TemporalAdjusters.lastDayOfMonth());
     }
 
     /**
-     * [PT] Retorna o primeiro dia do ano da data fornecida.
-     * [EN] Returns the first day of the year of the given date.
+     * Retorna o primeiro dia do ano da data fornecida.
+     *
+     * @param date Data (não nula)
+     * @return 1º de janeiro do mesmo ano
      */
     public static LocalDate firstDayOfYear(LocalDate date) {
         return date.withDayOfYear(1);
     }
 
     /**
-     * [PT] Retorna o último dia do ano da data fornecida.
-     * [EN] Returns the last day of the year of the given date.
+     * Retorna o último dia do ano da data fornecida.
+     *
+     * @param date Data (não nula)
+     * @return 31 de dezembro do mesmo ano
      */
     public static LocalDate lastDayOfYear(LocalDate date) {
         return date.with(TemporalAdjusters.lastDayOfYear());
     }
 
     // ==================== COMPARAÇÕES E VALIDAÇÕES ====================
-    // ==================== COMPARISONS AND VALIDATIONS ====================
 
     /**
-     * [PT] Verifica se uma data é anterior a outra.
-     * [EN] Checks if a date is before another.
+     * Verifica se uma data é anterior a outra.
+     *
+     * @param date1 Data a testar
+     * @param date2 Data de referência
+     * @return {@code true} se {@code date1} for anterior a {@code date2}
      */
     public static boolean isBefore(LocalDate date1, LocalDate date2) {
         return date1.isBefore(date2);
     }
 
     /**
-     * [PT] Verifica se uma data é posterior a outra.
-     * [EN] Checks if a date is after another.
+     * Verifica se uma data é posterior a outra.
+     *
+     * @param date1 Data a testar
+     * @param date2 Data de referência
+     * @return {@code true} se {@code date1} for posterior a {@code date2}
      */
     public static boolean isAfter(LocalDate date1, LocalDate date2) {
         return date1.isAfter(date2);
     }
 
     /**
-     * [PT] Verifica se uma data está dentro de um intervalo (inclusivo).
-     * [EN] Checks if a date is within an interval (inclusive).
+     * Verifica se uma data está dentro de um intervalo (inclusivo).
      *
-     * @param date     [PT] data a testar
-     *                 [EN] date to test
-     * @param start    [PT] início do intervalo
-     *                 [EN] start of interval
-     * @param end      [PT] fim do intervalo
-     *                 [EN] end of interval
-     * @return [PT] true se start <= date <= end
-     *         [EN] true if start <= date <= end
+     * @param date  Data a testar
+     * @param start Início do intervalo
+     * @param end   Fim do intervalo
+     * @return {@code true} se {@code start <= date <= end}
      */
     public static boolean isBetween(LocalDate date, LocalDate start, LocalDate end) {
         return !date.isBefore(start) && !date.isAfter(end);
     }
 
     /**
-     * [PT] Calcula a idade com base na data de nascimento.
-     * [EN] Calculates age based on birth date.
+     * Calcula a idade com base na data de nascimento, na data de hoje em São Paulo.
      *
-     * @param birthDate [PT] data de nascimento
-     *                  [EN] birth date
-     * @return [PT] idade em anos
-     *         [EN] age in years
+     * @param birthDate Data de nascimento
+     * @return Idade em anos completos
      */
     public static int calculateAge(LocalDate birthDate) {
         LocalDate today = getCurrentDate();
@@ -616,107 +609,133 @@ public final class DataTime {
     }
 
     // ==================== CONVERSÕES ENTRE TIPOS ====================
-    // ==================== TYPE CONVERSIONS ====================
 
     /**
-     * [PT] Converte {@link java.util.Date} legado para {@link LocalDateTime} no fuso padrão.
-     * [EN] Converts legacy {@link java.util.Date} to {@link LocalDateTime} in default timezone.
+     * Converte {@link java.util.Date} legado para {@link LocalDateTime} no fuso padrão.
+     *
+     * @param date Data legada (não nula)
+     * @return Data/hora local em São Paulo
      */
     public static LocalDateTime toLocalDateTime(Date date) {
         return date.toInstant().atZone(DEFAULT_ZONE).toLocalDateTime();
     }
 
     /**
-     * [PT] Converte {@link java.util.Date} legado para {@link LocalDate}.
-     * [EN] Converts legacy {@link java.util.Date} to {@link LocalDate}.
+     * Converte {@link java.util.Date} legado para {@link LocalDate} no fuso padrão.
+     *
+     * @param date Data legada (não nula)
+     * @return Data local em São Paulo
      */
     public static LocalDate toLocalDate(Date date) {
         return toLocalDateTime(date).toLocalDate();
     }
 
     /**
-     * [PT] Converte {@link LocalDateTime} para {@link java.util.Date}.
-     * [EN] Converts {@link LocalDateTime} to {@link java.util.Date}.
+     * Converte {@link LocalDateTime} (interpretado em São Paulo) para {@link java.util.Date}.
+     *
+     * @param localDateTime Data/hora local (não nula)
+     * @return Data legada correspondente
      */
     public static Date toDate(LocalDateTime localDateTime) {
         return Date.from(localDateTime.atZone(DEFAULT_ZONE).toInstant());
     }
 
     /**
-     * [PT] Converte {@link LocalDate} para {@link java.util.Date}.
-     * [EN] Converts {@link LocalDate} to {@link java.util.Date}.
+     * Converte {@link LocalDate} (meia-noite em São Paulo) para {@link java.util.Date}.
+     *
+     * @param localDate Data local (não nula)
+     * @return Data legada correspondente
      */
     public static Date toDate(LocalDate localDate) {
         return toDate(localDate.atStartOfDay());
     }
 
     // ==================== TRABALHANDO COM TIMESTAMP ====================
-    // ==================== TIMESTAMP HANDLING ====================
 
     /**
-     * [PT] Converte um timestamp (segundos desde epoch) para LocalDateTime no fuso padrão.
-     * [EN] Converts a timestamp (seconds since epoch) to LocalDateTime in default timezone.
+     * Converte um timestamp (segundos desde epoch) para {@link LocalDateTime} no fuso padrão.
+     *
+     * @param timestamp Segundos desde 1970-01-01T00:00:00Z
+     * @return Data/hora local em São Paulo
      */
     public static LocalDateTime fromTimestamp(long timestamp) {
         return LocalDateTime.ofInstant(Instant.ofEpochSecond(timestamp), DEFAULT_ZONE);
     }
 
     /**
-     * [PT] Converte um LocalDateTime para timestamp em segundos.
-     * [EN] Converts a LocalDateTime to timestamp in seconds.
+     * Converte um {@link LocalDateTime} (interpretado em São Paulo) para timestamp em segundos.
+     *
+     * @param dateTime Data/hora local (não nula)
+     * @return Segundos desde 1970-01-01T00:00:00Z
      */
     public static long toTimestamp(LocalDateTime dateTime) {
         return dateTime.atZone(DEFAULT_ZONE).toEpochSecond();
     }
 
     // ==================== VALIDAÇÃO DE STRINGS DE DATA ====================
-    // ==================== DATE STRING VALIDATION ====================
 
     /**
-     * [PT] Verifica se uma string está no formato "dd/MM/yyyy" e representa uma data válida.
-     * [EN] Checks if a string is in "dd/MM/yyyy" format and represents a valid date.
+     * Verifica se uma string está no formato {@code "dd/MM/yyyy"} e representa uma data que
+     * existe no calendário.
+     *
+     * @param dateStr String a validar (pode ser nula)
+     * @return {@code true} se válida; {@code false} se nula, fora do formato ou inexistente
+     *         (ex.: {@code "31/02/2025"})
      */
     public static boolean isValidDate(String dateStr) {
+        if (dateStr == null) {
+            return false;
+        }
         try {
             parseDate(dateStr);
             return true;
-        } catch (java.time.format.DateTimeParseException e) {
+        } catch (DateTimeParseException e) {
             return false;
         }
     }
 
     /**
-     * [PT] Verifica se uma string está no formato "dd/MM/yyyy - HH:mm" e representa uma data/hora válida.
-     * [EN] Checks if a string is in "dd/MM/yyyy - HH:mm" format and represents a valid date/time.
+     * Verifica se uma string está no formato {@code "dd/MM/yyyy - HH:mm"} e representa uma
+     * data/hora que existe no calendário.
+     *
+     * @param dateTimeStr String a validar (pode ser nula)
+     * @return {@code true} se válida; {@code false} se nula, fora do formato ou inexistente
+     *         (ex.: {@code "30/02/2024 - 10:00"})
      */
     public static boolean isValidDateTime(String dateTimeStr) {
+        if (dateTimeStr == null) {
+            return false;
+        }
         try {
             parseDateTime(dateTimeStr);
             return true;
-        } catch (java.time.format.DateTimeParseException e) {
+        } catch (DateTimeParseException e) {
             return false;
         }
     }
 
     /**
-     * [PT] Obtém (ou cria e cacheia) um {@link DateTimeFormatter} para o padrão informado.
-     * <p>
-     * {@code DateTimeFormatter} é imutável e thread-safe; o cache evita a
-     * recompilação do padrão a cada chamada.
-     * </p>
+     * Obtém (ou cria e guarda) um {@link DateTimeFormatter} em português do Brasil para o padrão
+     * informado. {@code DateTimeFormatter} é imutável e thread-safe; guardar evita recompilar o
+     * padrão a cada chamada. Passado o teto de {@link #MAX_CACHED_PATTERNS}, padrões novos são
+     * compilados a cada uso, sem entrar no mapa.
      *
-     * [EN] Returns (creating and caching if needed) a {@link DateTimeFormatter} for the given pattern.
-     * <p>
-     * {@code DateTimeFormatter} is immutable and thread-safe; the cache avoids
-     * re-parsing the pattern on every call.
-     * </p>
-     *
-     * @param pattern [PT] padrão de formatação (ex: "yyyy/MM/dd HH:mm")
-     *                [EN] formatting pattern (e.g., "yyyy/MM/dd HH:mm")
-     * @return [PT] formatador reutilizável para o padrão
-     *         [EN] reusable formatter for the pattern
+     * @param pattern Padrão de formatação (ex: {@code "yyyy/MM/dd HH:mm"})
+     * @return Formatador reutilizável para o padrão
+     * @throws IllegalArgumentException se o padrão for inválido
      */
     private static DateTimeFormatter formatterFor(String pattern) {
-        return CUSTOM_FORMATTER_CACHE.computeIfAbsent(pattern, DateTimeFormatter::ofPattern);
+        DateTimeFormatter cached = CUSTOM_FORMATTER_CACHE.get(pattern);
+        if (cached != null) {
+            return cached;
+        }
+        // Locale fixo: sem ele, os nomes seguiam o idioma da JVM e o contêiner (en_US)
+        // imprimia "Wednesday, 23 de September".
+        DateTimeFormatter created = DateTimeFormatter.ofPattern(pattern, PT_BR);
+        if (CUSTOM_FORMATTER_CACHE.size() < MAX_CACHED_PATTERNS) {
+            DateTimeFormatter previous = CUSTOM_FORMATTER_CACHE.putIfAbsent(pattern, created);
+            return previous != null ? previous : created;
+        }
+        return created;
     }
 }
