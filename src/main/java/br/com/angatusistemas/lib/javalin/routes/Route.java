@@ -48,7 +48,7 @@ import lombok.Getter;
  *   <li>A biblioteca descobre, instancia e registra a rota automaticamente.</li>
  * </ol>
  *
- * <p><strong>Exemplo (HTTP):</strong>
+ * <p><strong>Exemplo (HTTP):</strong></p>
  * <pre>
  * public class HomeRoute extends Route {
  *     public HomeRoute() {
@@ -56,9 +56,8 @@ import lombok.Getter;
  *     }
  * }
  * </pre>
- * </p>
  *
- * <p><strong>Exemplo (WebSocket):</strong>
+ * <p><strong>Exemplo (WebSocket):</strong></p>
  * <pre>
  * public class ChatRoute extends Route {
  *     public ChatRoute() {
@@ -66,17 +65,20 @@ import lombok.Getter;
  *     }
  * }
  * </pre>
- * </p>
  *
  * <p><strong>Boas práticas:</strong> um construtor público vazio por rota
  * (necessário para a descoberta automática); nomes de classe no padrão
  * {@code XxxRoute}; mantenha o handler enxuto e delegue a lógica a serviços.</p>
  *
- * <p><strong>Limitações:</strong> rotas registradas após o servidor iniciar
- * usam a API {@code unsafe.routes} do Javalin (necessária para registro em
- * tempo de execução). A descoberta automática depende da dependência
- * {@code org.reflections:reflections:0.10.2} — se ausente, a biblioteca exibe
- * instruções de instalação.</p>
+ * <p><strong>WebSocket:</strong> o upgrade passa pelo bloqueio e pelo rate limit do
+ * {@link JavalinAPI}, mas não pelos demais filtros de uma requisição HTTP. Quem conecta
+ * <strong>não</strong> é autenticado pela biblioteca: a rota WebSocket confere a sessão dentro
+ * dela, no {@code onConnect}, antes de aceitar qualquer mensagem.</p>
+ *
+ * <p><strong>Limitações:</strong> as rotas descobertas são registradas antes de o servidor
+ * aceitar conexões; rotas registradas depois usam a API {@code unsafe.routes} do Javalin. A
+ * descoberta automática depende da dependência {@code org.reflections:reflections:0.10.2} — se
+ * ausente, a biblioteca exibe instruções de instalação.</p>
  *
  * <p><strong>Extensões futuras:</strong> a classe não é {@code sealed} porque
  * consumidores externos precisam poder estendê-la para criar rotas próprias —
@@ -161,12 +163,14 @@ public abstract class Route {
      * informado; uma mensagem de log confirma o registro.</p>
      *
      * <p><strong>Efeitos colaterais:</strong> registra o handler no servidor
-     * (irreversível — registrar o mesmo path novamente sobrescreve o handler
-     * anterior no Javalin).</p>
+     * (irreversível). Registrar de novo o mesmo método e caminho — outra rota, ou uma página
+     * HTML com o mesmo nome — faz o Javalin lançar {@link IllegalArgumentException}; na
+     * descoberta automática, isso aparece no console como erro ao registrar a rota.</p>
      *
      * @throws IllegalStateException se o servidor Javalin não foi inicializado
      *                               (defesa em profundidade — o construtor já
      *                               valida isso)
+     * @throws IllegalArgumentException se já existir rota no mesmo método e caminho
      */
     public void register() {
         if (app == null) {

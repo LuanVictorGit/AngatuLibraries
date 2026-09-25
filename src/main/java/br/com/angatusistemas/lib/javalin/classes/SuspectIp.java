@@ -9,12 +9,14 @@ import lombok.NoArgsConstructor;
 import lombok.Setter;
 
 /**
- * Entidade persistida (via {@link Saveable}) com estatísticas de um IP suspeito:
- * total de violações, timestamps da primeira/última violação e flag de bloqueio
- * permanente.
+ * Entidade persistida (via {@link Saveable}) com o histórico de um IP que estourou limites:
+ * total de violações, timestamps da primeira/última violação e a marca de bloqueio longo.
  *
- * <p>Utilizada pelo rate limiting do {@code JavalinAPI} para acumular violações
- * de segurança (SQL Injection, XSS, burst attacks) e decidir bloqueios permanentes.</p>
+ * <p>É registro para quem administra, e não o que decide o bloqueio: o {@code JavalinAPI}
+ * decide pela janela de violações em memória e grava estas linhas em lote, a cada minuto.
+ * Contam como violação o estouro de rate limit e a rajada de requisições; a recusa de conteúdo
+ * com cara de SQL Injection ou XSS não conta. A marca {@code isPermanentlyBlocked} é estado
+ * derivado — a verdade do bloqueio é a linha em {@code permanentblocks}.</p>
  *
  * @author Angatu Sistemas
  * @see Saveable
@@ -47,11 +49,26 @@ public class SuspectIp extends Saveable {
     }
 
     /**
-     * Incrementa a contagem de violações de forma thread-safe e atualiza o
-     * timestamp da última violação.
+     * Soma uma violação, agora, a esta instância.
+     *
+     * <p>Sincronizado só dentro da instância: duas cópias da mesma linha, lidas por threads
+     * diferentes, somam cada uma a sua e a última gravação vence. Para somar sem perder nada,
+     * altere a linha dentro de {@link Saveable#transaction(Runnable)} ou de
+     * {@link Saveable#mutate}.</p>
      */
     public synchronized void incrementViolations() {
-        this.totalViolations++;
-        this.lastViolationAt = Instant.now().getEpochSecond();
+        registerViolations(1, Instant.now().getEpochSecond());
+    }
+
+    /**
+     * Soma várias violações de uma vez — a gravação em lote do {@code JavalinAPI}.
+     *
+     * @param count Violações a somar (zero ou negativo não muda nada)
+     * @param at    Instante da mais recente, em segundos (epoch)
+     */
+    public synchronized void registerViolations(int count, long at) {
+        if (count <= 0) return;
+        this.totalViolations += count;
+        this.lastViolationAt = Math.max(this.lastViolationAt, at);
     }
 }

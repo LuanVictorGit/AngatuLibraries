@@ -6,11 +6,12 @@ import lombok.Getter;
  * Entrada de cache de conteúdo HTML: armazena o conteúdo e o timestamp de
  * expiração calculado a partir do TTL.
  *
- * <p>Classe de suporte interno do pacote {@code html} (construtor e método de
- * expiração package-private).</p>
- *
  * @author Angatu Sistemas
+ * @deprecated Não é usada por nenhuma parte da biblioteca, e o construtor não é acessível de
+ *             fora do pacote: não há como obter uma instância. As páginas não têm cache — são
+ *             lidas a cada requisição. Será removida numa próxima versão.
  */
+@Deprecated(forRemoval = true)
 @Getter
 public final class CachedHtml {
 

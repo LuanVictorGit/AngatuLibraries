@@ -120,14 +120,6 @@
 			<optional>true</optional>
 		</dependency>
 
-		<!-- javalin-ssl: plugin SSL/TLS com PEM/JKS (modo HTTPS do JavalinAPI) -->
-		<dependency>
-			<groupId>io.javalin.community.ssl</groupId>
-			<artifactId>javalin-ssl</artifactId>
-			<version>7.2.3</version>
-			<optional>true</optional>
-		</dependency>
-
 		<!-- Reflections: descoberta automática de rotas (Route) no classpath -->
 		<dependency>
 			<groupId>org.reflections</groupId>

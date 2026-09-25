@@ -13,12 +13,11 @@ import java.util.Deque;
  * cronológica crescente, portanto os expirados estão sempre no início da fila
  * e são removidos em O(1) amortizado — sem varreduras da lista inteira.</p>
  *
- * <p>Exemplo de uso:
+ * <p>Exemplo de uso:</p>
  * <pre>
  * SlidingWindowCounter secondWindow = new SlidingWindowCounter(1); // janela de 1 segundo
  * boolean allowed = secondWindow.checkAndIncrement(5, Instant.now().getEpochSecond());
  * </pre>
- * </p>
  *
  * <p><strong>Thread safety:</strong> a instância é segura para uso concorrente
  * (métodos sincronizados). Para rate limiting, mantenha uma instância por
@@ -55,9 +54,14 @@ public final class SlidingWindowCounter {
      *         {@code false} se a janela está cheia (requisição deve ser bloqueada)
      */
     public synchronized boolean checkAndIncrement(int limit, long now) {
-        // Timestamps expirados estão sempre no início da fila (ordem crescente)
+        // Timestamps expirados estão sempre no início da fila (ordem crescente).
+        //
+        // "<=" e não "<": os instantes são segundos inteiros, e a janela de N segundos cobre
+        // exatamente os N segundos até agora (now-N+1 .. now). Com "<", o segundo now-N ficava
+        // dentro também — a janela "de 1 segundo" contava dois segundos seguidos, e o limite de
+        // login (1 por segundo) recusava a segunda tentativa feita no segundo seguinte.
         long cutoff = now - windowSizeSeconds;
-        while (!timestamps.isEmpty() && timestamps.peekFirst() < cutoff) {
+        while (!timestamps.isEmpty() && timestamps.peekFirst() <= cutoff) {
             timestamps.pollFirst();
         }
 
@@ -84,8 +88,8 @@ public final class SlidingWindowCounter {
      * @return Segundos (epoch) da última requisição, ou {@link Long#MAX_VALUE} se vazio
      */
     public synchronized long lastSeenSeconds() {
-        Long ultimo = timestamps.peekLast();
-        return ultimo == null ? Long.MAX_VALUE : ultimo.longValue();
+        Long last = timestamps.peekLast();
+        return last == null ? Long.MAX_VALUE : last.longValue();
     }
 
     /**

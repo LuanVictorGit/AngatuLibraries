@@ -9,12 +9,13 @@ import lombok.NoArgsConstructor;
 import lombok.Setter;
 
 /**
- * Entidade persistida (via {@link Saveable}) que registra um bloqueio permanente
- * de um IP na tabela {@code permanentblocks}.
+ * Entidade persistida (via {@link Saveable}) que registra um bloqueio longo de um IP na tabela
+ * {@code permanentblocks}.
  *
- * <p>Cada bloqueio possui hash do IP, motivo, contagem de violações que o
- * causaram e expiração (24 horas por padrão). Bloqueios expirados são removidos
- * automaticamente pela limpeza periódica do {@code JavalinAPI}.</p>
+ * <p>Cada bloqueio possui hash do IP, motivo, contagem de violações que o causaram e expiração
+ * (24 horas por padrão). O {@code JavalinAPI} decide pelo bloqueio em memória e grava esta
+ * linha fora da requisição; na subida, os bloqueios ainda válidos voltam para a memória.
+ * Bloqueios expirados são removidos pela limpeza diária do {@code JavalinAPI}.</p>
  *
  * @author Angatu Sistemas
  * @see Saveable
@@ -32,9 +33,9 @@ public class PermanentBlock extends Saveable {
      * Um mês de punição sem recurso é caro demais para uma decisão tomada por
      * heurística.</p>
      *
-     * <p>Vinte e quatro horas continuam inviabilizando quem está abusando (o
-     * bloqueio se renova enquanto o abuso continuar) e devolvem sozinhas o
-     * acesso de quem caiu ali por engano.</p>
+     * <p>Vinte e quatro horas continuam inviabilizando quem está abusando e devolvem sozinhas
+     * o acesso de quem caiu ali por engano. O bloqueio não se renova sozinho: se o abuso
+     * voltar depois de vencer, as violações somam de novo e um novo bloqueio é criado.</p>
      */
     public static final long DEFAULT_DURATION_SEC = 24L * 60 * 60;
 

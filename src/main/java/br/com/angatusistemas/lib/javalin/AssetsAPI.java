@@ -7,6 +7,8 @@ import java.net.URISyntaxException;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.FileSystem;
+import java.nio.file.FileSystemAlreadyExistsException;
+import java.nio.file.FileSystemNotFoundException;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -14,8 +16,8 @@ import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Enumeration;
-import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
@@ -25,73 +27,84 @@ import br.com.angatusistemas.lib.console.Console;
 import io.javalin.http.Context;
 
 /**
- * [PT] Classe utilitária para gerenciamento de assets estáticos em projetos Javalin com Location.CLASSPATH.
- * <p>
- * Assume que os arquivos estão dentro da pasta {@code /public} no classpath.
- * Todos os caminhos relativos devem ser informados a partir da raiz (ex: "/css/style.css").
- * </p>
- * <p>
- * Exemplos:
+ * Leitura e listagem dos arquivos de {@code src/main/resources/public} (servidos pelo Javalin
+ * a partir do classpath).
+ *
+ * <p>Todo caminho é relativo a {@code public/} e começa por barra: {@code "/css/style.css"}
+ * lê {@code public/css/style.css}. Caminho com {@code ..}, {@code .}, barra invertida ou
+ * segmento vazio é recusado — com o classpath em pasta (desenvolvimento, JAR expandido), um
+ * {@code "/../application.properties"} lia arquivo de fora de {@code public/}.</p>
+ *
  * <pre>
- * // Lê o conteúdo de /public/css/style.css
- * String css = AssetManager.readAssetAsString("/css/style.css");
+ * // Lê o conteúdo de public/css/style.css
+ * String css = AssetsAPI.readAssetAsString("/css/style.css");
  *
- * // Lista todos os arquivos .js dentro de /public/js
- * List&lt;Path&gt; jsFiles = AssetManager.listAssetsByExtension("/js", "js");
+ * // Lista os .js de public/js (e subpastas)
+ * List&lt;String&gt; scripts = AssetsAPI.listAssetsByExtension("/js", "js");
  *
- * // Serve um asset diretamente no Javalin
- * AssetManager.serveAsset(ctx, "/img/logo.png");
+ * // Serve um arquivo direto numa rota
+ * AssetsAPI.serveAsset(ctx, "/img/logo.png");
  * </pre>
- * </p>
  *
- * [EN] Utility class for managing static assets in Javalin projects with Location.CLASSPATH.
- * <p>
- * Assumes files are inside the {@code /public} folder on the classpath.
- * Relative paths should be given from the root (e.g., "/css/style.css").
- * </p>
+ * <p><strong>Cache:</strong> desligado por padrão, como o resto do servidor — o conteúdo é lido
+ * a cada chamada. {@link #setCacheEnabled(boolean)} liga um cache em memória com prazo; só use
+ * quando o projeto pedir cache explicitamente.</p>
+ *
+ * @author Angatu Sistemas
  */
 public final class AssetsAPI {
 
     private static final String ASSETS_ROOT = "public";
     private static final Map<String, CachedAsset> CACHE = new ConcurrentHashMap<>();
-    private static boolean cacheEnabled = false;
-    private static long defaultCacheTtlMs = 60_000; // 1 minute
+    private static volatile boolean cacheEnabled = false;
+    private static volatile long defaultCacheTtlMs = 60_000; // 1 minuto
 
-    // Mapeamento básico de extensões para Content-Type
-    private static final Map<String, String> MIME_TYPES = new HashMap<>();
-    static {
-        MIME_TYPES.put("html", "text/html");
-        MIME_TYPES.put("css", "text/css");
-        MIME_TYPES.put("js", "application/javascript");
-        MIME_TYPES.put("json", "application/json");
-        MIME_TYPES.put("png", "image/png");
-        MIME_TYPES.put("jpg", "image/jpeg");
-        MIME_TYPES.put("jpeg", "image/jpeg");
-        MIME_TYPES.put("gif", "image/gif");
-        MIME_TYPES.put("svg", "image/svg+xml");
-        MIME_TYPES.put("ico", "image/x-icon");
-        MIME_TYPES.put("webp", "image/webp");
-        MIME_TYPES.put("txt", "text/plain");
-        MIME_TYPES.put("xml", "application/xml");
-        MIME_TYPES.put("pdf", "application/pdf");
-        MIME_TYPES.put("zip", "application/zip");
-        MIME_TYPES.put("mp4", "video/mp4");
-        MIME_TYPES.put("mp3", "audio/mpeg");
-        MIME_TYPES.put("woff", "font/woff");
-        MIME_TYPES.put("woff2", "font/woff2");
-        MIME_TYPES.put("ttf", "font/ttf");
-        MIME_TYPES.put("eot", "application/vnd.ms-fontobject");
-    }
+    /** Tipos por extensão. Com {@code X-Content-Type-Options: nosniff}, tipo errado é script recusado. */
+    private static final Map<String, String> MIME_TYPES = Map.ofEntries(
+            Map.entry("html", "text/html; charset=utf-8"),
+            Map.entry("css", "text/css; charset=utf-8"),
+            Map.entry("js", "text/javascript; charset=utf-8"),
+            Map.entry("mjs", "text/javascript; charset=utf-8"),
+            Map.entry("json", "application/json"),
+            Map.entry("map", "application/json"),
+            Map.entry("webmanifest", "application/manifest+json"),
+            Map.entry("png", "image/png"),
+            Map.entry("jpg", "image/jpeg"),
+            Map.entry("jpeg", "image/jpeg"),
+            Map.entry("gif", "image/gif"),
+            Map.entry("svg", "image/svg+xml"),
+            Map.entry("ico", "image/x-icon"),
+            Map.entry("webp", "image/webp"),
+            Map.entry("avif", "image/avif"),
+            Map.entry("txt", "text/plain; charset=utf-8"),
+            Map.entry("xml", "application/xml"),
+            Map.entry("pdf", "application/pdf"),
+            Map.entry("zip", "application/zip"),
+            Map.entry("wasm", "application/wasm"),
+            Map.entry("mp4", "video/mp4"),
+            Map.entry("webm", "video/webm"),
+            Map.entry("mp3", "audio/mpeg"),
+            Map.entry("ogg", "audio/ogg"),
+            Map.entry("wav", "audio/wav"),
+            Map.entry("woff", "font/woff"),
+            Map.entry("woff2", "font/woff2"),
+            Map.entry("ttf", "font/ttf"),
+            Map.entry("otf", "font/otf"),
+            Map.entry("eot", "application/vnd.ms-fontobject"));
+
+    /** Um arquivo de JAR aberto como sistema de arquivos por vez: evita a disputa entre listagens. */
+    private static final Object JAR_FILESYSTEM_LOCK = new Object();
 
     private AssetsAPI() {
-        throw new UnsupportedOperationException("Utility class cannot be instantiated");
+        throw new UnsupportedOperationException("Classe utilitária não pode ser instanciada");
     }
 
     // ==================== CONFIGURAÇÃO ====================
 
     /**
-     * [PT] Habilita/desabilita o cache de conteúdo (desabilitado por padrão).
-     * [EN] Enables/disables content caching (disabled by default).
+     * Liga ou desliga o cache de conteúdo em memória (desligado por padrão).
+     *
+     * @param enabled {@code true} para guardar o conteúdo lido por {@link #setDefaultCacheTtl(long)}
      */
     public static void setCacheEnabled(boolean enabled) {
         cacheEnabled = enabled;
@@ -100,16 +113,16 @@ public final class AssetsAPI {
     }
 
     /**
-     * [PT] Define o TTL (time-to-live) padrão do cache em milissegundos.
-     * [EN] Sets the default cache TTL (time-to-live) in milliseconds.
+     * Define o prazo padrão do cache, em milissegundos.
+     *
+     * @param ttlMs Prazo de cada entrada
      */
     public static void setDefaultCacheTtl(long ttlMs) {
         defaultCacheTtlMs = ttlMs;
     }
 
     /**
-     * [PT] Limpa o cache manualmente.
-     * [EN] Clears the cache manually.
+     * Esvazia o cache.
      */
     public static void clearCache() {
         CACHE.clear();
@@ -119,31 +132,42 @@ public final class AssetsAPI {
     // ==================== MÉTODOS PRINCIPAIS (CAMINHOS RELATIVOS A /public) ====================
 
     /**
-     * [PT] Converte um caminho relativo (ex: "/css/style.css") para o caminho completo no classpath.
+     * Converte um caminho relativo (ex: {@code "/css/style.css"}) no caminho completo do
+     * classpath ({@code "public/css/style.css"}).
      *
-     * [EN] Converts a relative path (e.g., "/css/style.css") to the full classpath path.
-     *
-     * @param relativePath [PT] caminho começando com "/" (ex: "/img/logo.png")
-     *                     [EN] path starting with "/" (e.g., "/img/logo.png")
-     * @return [PT] caminho completo dentro de "public" (ex: "public/css/style.css")
-     *         [EN] full path inside "public" (e.g., "public/css/style.css")
+     * @param relativePath Caminho começando por barra
+     * @return Caminho no classpath, ou {@code null} se o caminho sair de {@code public/} ou for
+     *         inválido
      */
     private static String toClasspathPath(String relativePath) {
         if (relativePath == null) return null;
-        // Remove leading slash if present
         String normalized = relativePath.startsWith("/") ? relativePath.substring(1) : relativePath;
-        return ASSETS_ROOT + "/" + normalized;
+        if (!normalized.isEmpty() && !isSafeRelativePath(normalized)) {
+            Console.debug("Caminho de asset recusado: %s", relativePath);
+            return null;
+        }
+        return normalized.isEmpty() ? ASSETS_ROOT : ASSETS_ROOT + "/" + normalized;
     }
 
     /**
-     * [PT] Lê um asset como String (UTF-8).
+     * Nenhum segmento pode subir de pasta, ser vazio, ser {@code .}, ou usar barra invertida:
+     * com o classpath em pasta, qualquer um deles permite ler arquivo de fora de
+     * {@code public/}.
+     */
+    private static boolean isSafeRelativePath(String path) {
+        if (path.indexOf('\\') >= 0 || path.indexOf('\0') >= 0) return false;
+        String trimmed = path.endsWith("/") ? path.substring(0, path.length() - 1) : path;
+        for (String segment : trimmed.split("/", -1)) {
+            if (segment.isEmpty() || segment.equals(".") || segment.equals("..")) return false;
+        }
+        return true;
+    }
+
+    /**
+     * Lê um asset como texto UTF-8.
      *
-     * [EN] Reads an asset as String (UTF-8).
-     *
-     * @param relativePath [PT] caminho relativo (ex: "/css/style.css")
-     *                     [EN] relative path (e.g., "/css/style.css")
-     * @return [PT] conteúdo do asset ou null se não encontrado
-     *         [EN] asset content or null if not found
+     * @param relativePath Caminho relativo (ex: {@code "/css/style.css"})
+     * @return Conteúdo, ou {@code null} se não existir
      */
     public static String readAssetAsString(String relativePath) {
         byte[] bytes = readAssetAsBytes(relativePath);
@@ -151,14 +175,10 @@ public final class AssetsAPI {
     }
 
     /**
-     * [PT] Lê um asset como array de bytes.
+     * Lê um asset como bytes.
      *
-     * [EN] Reads an asset as byte array.
-     *
-     * @param relativePath [PT] caminho relativo (ex: "/img/logo.png")
-     *                     [EN] relative path (e.g., "/img/logo.png")
-     * @return [PT] bytes do asset ou null se não encontrado
-     *         [EN] asset bytes or null if not found
+     * @param relativePath Caminho relativo (ex: {@code "/img/logo.png"})
+     * @return Bytes do arquivo, ou {@code null} se não existir
      */
     public static byte[] readAssetAsBytes(String relativePath) {
         String classpathPath = toClasspathPath(relativePath);
@@ -192,110 +212,80 @@ public final class AssetsAPI {
     }
 
     /**
-     * [PT] Verifica se um asset existe no classpath.
+     * Verifica se um asset existe no classpath.
      *
-     * [EN] Checks if an asset exists in the classpath.
-     *
-     * @param relativePath [PT] caminho relativo (ex: "/css/style.css")
-     *                     [EN] relative path (e.g., "/css/style.css")
-     * @return [PT] true se existir
-     *         [EN] true if exists
+     * @param relativePath Caminho relativo (ex: {@code "/css/style.css"})
+     * @return {@code true} se existir
      */
     public static boolean assetExists(String relativePath) {
         String classpathPath = toClasspathPath(relativePath);
-        return AssetsAPI.class.getClassLoader().getResource(classpathPath) != null;
+        return classpathPath != null && AssetsAPI.class.getClassLoader().getResource(classpathPath) != null;
     }
 
     /**
-     * [PT] Obtém o Content-Type (MIME) apropriado para a extensão do asset.
+     * Tipo (MIME) do asset pela extensão.
      *
-     * [EN] Gets the appropriate Content-Type (MIME) for the asset's extension.
-     *
-     * @param relativePath [PT] caminho do asset (ex: "/img/logo.png")
-     *                     [EN] asset path (e.g., "/img/logo.png")
-     * @return [PT] string do Content-Type (ex: "image/png") ou "application/octet-stream"
-     *         [EN] Content-Type string (e.g., "image/png") or "application/octet-stream"
+     * @param relativePath Caminho do asset (ex: {@code "/img/logo.png"})
+     * @return Tipo (ex: {@code "image/png"}), ou {@code "application/octet-stream"}
      */
     public static String getContentType(String relativePath) {
         String extension = "";
         int lastDot = relativePath.lastIndexOf('.');
         if (lastDot > 0) {
-            extension = relativePath.substring(lastDot + 1).toLowerCase();
+            extension = relativePath.substring(lastDot + 1).toLowerCase(Locale.ROOT);
         }
         return MIME_TYPES.getOrDefault(extension, "application/octet-stream");
     }
 
     /**
-     * [PT] Serve um asset diretamente para o contexto Javalin (com cache headers básicos).
+     * Responde a requisição com o asset, com o tipo certo.
      *
-     * [EN] Serves an asset directly to the Javalin context (with basic cache headers).
+     * <p>Não define {@code Cache-Control}: o padrão da casa é não guardar conteúdo no navegador
+     * sem pedido, e quem decide é o projeto (o valor fixo de um dia que existia aqui fazia a
+     * versão nova de um arquivo demorar até 24 horas para aparecer). Asset inexistente responde
+     * 404 sem repetir o caminho pedido.</p>
      *
-     * @param ctx          [PT] contexto da requisição Javalin
-     *                     [EN] Javalin request context
-     * @param relativePath [PT] caminho relativo do asset (ex: "/css/style.css")
-     *                     [EN] relative asset path (e.g., "/css/style.css")
+     * @param ctx          Contexto da requisição
+     * @param relativePath Caminho relativo do asset (ex: {@code "/css/style.css"})
      */
     public static void serveAsset(Context ctx, String relativePath) {
         byte[] data = readAssetAsBytes(relativePath);
         if (data == null) {
-            ctx.status(404).result("Asset not found: " + relativePath);
+            ctx.status(404).result("Arquivo não encontrado.");
             return;
         }
         ctx.contentType(getContentType(relativePath));
-        ctx.header("Cache-Control", "public, max-age=86400"); // 1 dia
         ctx.result(data);
     }
 
     // ==================== LISTAGEM DE ASSETS (DENTRO DE /public) ====================
 
     /**
-     * [PT] Lista todos os assets dentro de um diretório relativo (não recursivo).
+     * Lista os arquivos de uma pasta, sem entrar nas subpastas.
      *
-     * [EN] Lists all assets inside a relative directory (non-recursive).
+     * <p>Devolve sempre caminhos relativos a {@code public/}, com o classpath em pasta ou em
+     * JAR — antes, dentro do JAR, voltava {@code "public/css/x.css"} e ainda incluía as
+     * subpastas.</p>
      *
-     * @param relativeDir [PT] diretório relativo a /public (ex: "/css")
-     *                    [EN] directory relative to /public (e.g., "/css")
-     * @return [PT] lista de caminhos relativos (ex: ["/css/style.css", "/css/main.css"])
-     *         [EN] list of relative paths (e.g., ["/css/style.css", "/css/main.css"])
+     * @param relativeDir Pasta relativa a {@code public/} (ex: {@code "/css"})
+     * @return Caminhos relativos (ex: {@code ["/css/style.css", "/css/main.css"]})
      */
     public static List<String> listAssets(String relativeDir) {
         String classpathDir = toClasspathPath(relativeDir);
         if (classpathDir == null) return Collections.emptyList();
-
-        try {
-            URL dirUrl = AssetsAPI.class.getClassLoader().getResource(classpathDir);
-            if (dirUrl == null) return Collections.emptyList();
-
-            List<String> assets = new ArrayList<>();
-            if (dirUrl.getProtocol().equals("file")) {
-                Path dir = Paths.get(dirUrl.toURI());
-                try (Stream<Path> stream = Files.list(dir)) {
-                    stream.filter(Files::isRegularFile)
-                          .map(path -> "/" + classpathDir.replace(ASSETS_ROOT + "/", "") + "/" + path.getFileName().toString())
-                          .forEach(assets::add);
-                }
-            } else if (dirUrl.getProtocol().equals("jar")) {
-                // Para JARs, é mais complexo; alternativa: usar listClasspathResources
-                assets.addAll(listClasspathResources(classpathDir));
-            }
-            return assets;
-        } catch (IOException | URISyntaxException e) {
-            Console.error("Erro ao listar assets: %s", relativeDir, e);
-            return Collections.emptyList();
-        }
+        String prefix = classpathDir + "/";
+        return listClasspathResources(classpathDir).stream()
+                .filter(path -> path.startsWith(prefix) && path.indexOf('/', prefix.length()) < 0)
+                .map(AssetsAPI::toRelative)
+                .collect(Collectors.toList());
     }
 
     /**
-     * [PT] Lista assets recursivamente filtrando por extensão.
+     * Lista arquivos de uma pasta e das subpastas, filtrando pela extensão.
      *
-     * [EN] Lists assets recursively filtering by extension.
-     *
-     * @param relativeDir [PT] diretório relativo (ex: "/js")
-     *                    [EN] relative directory (e.g., "/js")
-     * @param extension   [PT] extensão sem ponto (ex: "js", "css")
-     *                    [EN] extension without dot (e.g., "js", "css")
-     * @return [PT] lista de caminhos relativos dos assets encontrados
-     *         [EN] list of relative paths of found assets
+     * @param relativeDir Pasta relativa (ex: {@code "/js"})
+     * @param extension   Extensão sem ponto (ex: {@code "js"})
+     * @return Caminhos relativos dos arquivos encontrados
      */
     public static List<String> listAssetsByExtension(String relativeDir, String extension) {
         String classpathDir = toClasspathPath(relativeDir);
@@ -303,25 +293,28 @@ public final class AssetsAPI {
 
         return listClasspathResources(classpathDir).stream()
                 .filter(path -> path.endsWith("." + extension))
-                .map(path -> "/" + path.replace(ASSETS_ROOT + "/", ""))
+                .map(AssetsAPI::toRelative)
                 .collect(Collectors.toList());
     }
 
+    /** {@code "public/css/x.css"} → {@code "/css/x.css"}. */
+    private static String toRelative(String classpathPath) {
+        return classpathPath.startsWith(ASSETS_ROOT + "/")
+                ? classpathPath.substring(ASSETS_ROOT.length())
+                : "/" + classpathPath;
+    }
+
     /**
-     * [PT] Lista recursivamente todos os recursos (arquivos) dentro de uma pasta do classpath.
+     * Lista, com as subpastas, todos os arquivos de uma pasta do classpath.
      *
-     * [EN] Recursively lists all resources (files) inside a classpath folder.
-     *
-     * @param classpathFolder [PT] caminho completo dentro do classpath (ex: "public/js")
-     *                        [EN] full path inside classpath (e.g., "public/js")
-     * @return [PT] lista de caminhos relativos ao classpath
-     *         [EN] list of paths relative to classpath
+     * @param classpathFolder Caminho completo no classpath (ex: {@code "public/js"})
+     * @return Caminhos relativos ao classpath (ex: {@code "public/js/app.js"})
      */
     public static List<String> listClasspathResources(String classpathFolder) {
         List<String> files = new ArrayList<>();
 
         try {
-            // Usa o ClassLoader correto (do contexto da thread)
+            // O ClassLoader do contexto da thread enxerga o classpath da aplicação
             ClassLoader classLoader = Thread.currentThread().getContextClassLoader();
 
             Enumeration<URL> resources = classLoader.getResources(classpathFolder);
@@ -339,38 +332,7 @@ public final class AssetsAPI {
                     }
 
                 } else if ("jar".equals(url.getProtocol())) {
-
-                    // exemplo: jar:file:/app.jar!/public
-                    String raw = url.toString();
-                    String jarPath = raw.substring(0, raw.indexOf("!"));
-                    URI jarUri = URI.create(jarPath);
-
-                    // Usa o filesystem já aberto (se existir) e fecha apenas o que foi criado aqui
-                    boolean openedHere = false;
-                    FileSystem fs;
-                    try {
-                        fs = FileSystems.getFileSystem(jarUri);
-                    } catch (Exception e) {
-                        fs = FileSystems.newFileSystem(jarUri, Collections.emptyMap());
-                        openedHere = true;
-                    }
-
-                    try {
-                        Path jarDir = fs.getPath(classpathFolder);
-
-                        if (Files.exists(jarDir)) {
-                            try (Stream<Path> walk = Files.walk(jarDir)) {
-                                walk.filter(Files::isRegularFile)
-                                    .map(path -> classpathFolder + "/" + jarDir.relativize(path).toString().replace("\\", "/"))
-                                    .forEach(files::add);
-                            }
-                        }
-                    } finally {
-                        // Evita vazamento de recursos: fecha o filesystem que abrimos
-                        if (openedHere) {
-                            fs.close();
-                        }
-                    }
+                    listJarResources(url, classpathFolder, files);
                 }
             }
 
@@ -382,39 +344,71 @@ public final class AssetsAPI {
     }
 
     /**
-     * [PT] Lista todos os assets de um diretório recursivamente (todas as extensões).
+     * Lista uma pasta de dentro de um JAR ({@code jar:file:/app.jar!/public}).
      *
-     * [EN] Lists all assets in a directory recursively (all extensions).
+     * <p>Usa o sistema de arquivos do JAR já aberto, se houver, e fecha só o que abriu aqui.
+     * A trava evita que duas listagens simultâneas tentem abrir o mesmo JAR ao mesmo tempo — a
+     * segunda recebia {@code FileSystemAlreadyExistsException} e devolvia lista incompleta.</p>
+     */
+    private static void listJarResources(URL url, String classpathFolder, List<String> files)
+            throws IOException, URISyntaxException {
+        String raw = url.toString();
+        URI jarUri = new URI(raw.substring(0, raw.indexOf('!')));
+
+        synchronized (JAR_FILESYSTEM_LOCK) {
+            boolean openedHere = false;
+            FileSystem fs;
+            try {
+                fs = FileSystems.getFileSystem(jarUri);
+            } catch (FileSystemNotFoundException notOpen) {
+                try {
+                    fs = FileSystems.newFileSystem(jarUri, Collections.emptyMap());
+                    openedHere = true;
+                } catch (FileSystemAlreadyExistsException raced) {
+                    fs = FileSystems.getFileSystem(jarUri);
+                }
+            }
+
+            try {
+                Path jarDir = fs.getPath(classpathFolder);
+                if (Files.exists(jarDir)) {
+                    try (Stream<Path> walk = Files.walk(jarDir)) {
+                        walk.filter(Files::isRegularFile)
+                            .map(path -> classpathFolder + "/" + jarDir.relativize(path).toString().replace("\\", "/"))
+                            .forEach(files::add);
+                    }
+                }
+            } finally {
+                if (openedHere) fs.close();
+            }
+        }
+    }
+
+    /**
+     * Lista, com as subpastas, todos os arquivos de uma pasta relativa a {@code public/}.
      *
-     * @param relativeDir [PT] diretório relativo (ex: "/images")
-     *                    [EN] relative directory (e.g., "/images")
-     * @return [PT] lista de caminhos relativos completos
-     *         [EN] list of full relative paths
+     * @param relativeDir Pasta relativa (ex: {@code "/images"}; {@code "/"} para todas)
+     * @return Caminhos relativos dos arquivos
      */
     public static List<String> listAllAssetsRecursive(String relativeDir) {
         String classpathDir = toClasspathPath(relativeDir);
         if (classpathDir == null) return Collections.emptyList();
         return listClasspathResources(classpathDir).stream()
-                .map(path -> "/" + path.replace(ASSETS_ROOT + "/", ""))
+                .map(AssetsAPI::toRelative)
                 .collect(Collectors.toList());
     }
 
     // ==================== UTILIDADES ADICIONAIS ====================
 
     /**
-     * [PT] Obtém o tamanho de um asset em bytes.
+     * Tamanho do asset em bytes, sem ler o conteúdo quando dá para evitar.
      *
-     * [EN] Gets the size of an asset in bytes.
-     *
-     * @param relativePath [PT] caminho relativo
-     *                     [EN] relative path
-     * @return [PT] tamanho em bytes ou -1 se não existir
-     *         [EN] size in bytes or -1 if not exists
+     * @param relativePath Caminho relativo
+     * @return Tamanho em bytes, ou {@code -1} se não existir
      */
     public static long getAssetSize(String relativePath) {
         String classpathPath = toClasspathPath(relativePath);
         if (classpathPath == null) return -1;
-        // Evita ler o asset inteiro: usa o Content-Length da conexão quando disponível
         try {
             URL url = AssetsAPI.class.getClassLoader().getResource(classpathPath);
             if (url == null) return -1;
@@ -429,23 +423,16 @@ public final class AssetsAPI {
     }
 
     /**
-     * [PT] Retorna o timestamp da última modificação do asset (se disponível).
-     * <p>
-     * No classpath, pode não estar disponível. Retorna -1 se não for possível determinar.
-     * </p>
+     * Instante da última modificação do asset, quando o classpath é pasta.
      *
-     * [EN] Returns the last modified timestamp of the asset (if available).
-     * <p>
-     * In classpath, it may not be available. Returns -1 if cannot be determined.
-     * </p>
+     * <p>Dentro de um JAR não há essa informação por arquivo, e o retorno é {@code -1}.</p>
      *
-     * @param relativePath [PT] caminho relativo
-     *                     [EN] relative path
-     * @return [PT] timestamp em milissegundos ou -1
-     *         [EN] timestamp in milliseconds or -1
+     * @param relativePath Caminho relativo
+     * @return Milissegundos (epoch), ou {@code -1}
      */
     public static long getAssetLastModified(String relativePath) {
         String classpathPath = toClasspathPath(relativePath);
+        if (classpathPath == null) return -1;
         URL url = AssetsAPI.class.getClassLoader().getResource(classpathPath);
         if (url == null) return -1;
         if (url.getProtocol().equals("file")) {
@@ -459,26 +446,22 @@ public final class AssetsAPI {
     }
 
     /**
-     * [PT] Registra manualmente um asset no cache (útil para pré-carregamento).
+     * Coloca um conteúdo no cache à mão (pré-carga). Não faz nada com o cache desligado.
      *
-     * [EN] Manually registers an asset in the cache (useful for preloading).
-     *
-     * @param relativePath [PT] caminho relativo
-     *                     [EN] relative path
-     * @param data         [PT] conteúdo do asset
-     *                     [EN] asset content
-     * @param ttlMs        [PT] TTL em milissegundos (0 = TTL padrão)
-     *                     [EN] TTL in milliseconds (0 = default TTL)
+     * @param relativePath Caminho relativo
+     * @param data         Conteúdo do asset
+     * @param ttlMs        Prazo em milissegundos ({@code 0} = prazo padrão)
      */
     public static void putInCache(String relativePath, byte[] data, long ttlMs) {
         if (!cacheEnabled) return;
         String classpathPath = toClasspathPath(relativePath);
+        if (classpathPath == null) return;
         CACHE.put(classpathPath, new CachedAsset(data, ttlMs > 0 ? ttlMs : defaultCacheTtlMs));
     }
 
     // ==================== CLASSE INTERNA DE CACHE ====================
 
-    private static class CachedAsset {
+    private static final class CachedAsset {
         final byte[] bytes;
         final long expiry;
 

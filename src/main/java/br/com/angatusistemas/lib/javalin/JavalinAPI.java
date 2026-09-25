@@ -1,19 +1,28 @@
 package br.com.angatusistemas.lib.javalin;
 
 import java.io.File;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
+import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.Deque;
-import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.LongAdder;
+import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import org.reflections.Reflections;
@@ -25,56 +34,68 @@ import br.com.angatusistemas.lib.console.Console;
 import br.com.angatusistemas.lib.database.Saveable;
 import br.com.angatusistemas.lib.dependencies.Dependencies;
 import br.com.angatusistemas.lib.javalin.classes.BlockInfo;
+import br.com.angatusistemas.lib.javalin.classes.DenyNotice;
 import br.com.angatusistemas.lib.javalin.classes.PermanentBlock;
 import br.com.angatusistemas.lib.javalin.classes.RateLimitConfig;
 import br.com.angatusistemas.lib.javalin.classes.RouteRateLimitConfig;
 import br.com.angatusistemas.lib.javalin.classes.SlidingWindowCounter;
 import br.com.angatusistemas.lib.javalin.classes.SuspectIp;
+import br.com.angatusistemas.lib.javalin.html.HtmlRouteAPI;
 import br.com.angatusistemas.lib.javalin.routes.Route;
 import br.com.angatusistemas.lib.task.Task;
 import io.javalin.Javalin;
-import io.javalin.community.ssl.SslPlugin;
 import io.javalin.http.Context;
+import io.javalin.http.ForbiddenResponse;
 import io.javalin.http.HandlerType;
+import io.javalin.http.TooManyRequestsResponse;
 import io.javalin.http.staticfiles.Location;
+import io.javalin.router.ParsedEndpoint;
+import io.javalin.websocket.WsHandlerEntry;
+import io.javalin.websocket.WsHandlerType;
 
 /**
  * API principal para configuração do servidor Javalin com rate limiting
  * avançado, proteção contra ataques e persistência de bloqueios.
  *
  * <p><strong>Propósito:</strong> encapsular toda a configuração do servidor web
- * (SSL, estáticos, segurança, rate limiting) em chamadas estáticas simples.</p>
+ * (estáticos, segurança, rate limiting) em chamadas estáticas simples.</p>
  *
  * <p><strong>Funcionalidades:</strong></p>
  * <ul>
- *   <li>Proteção contra DDoS, SQL Injection e XSS</li>
- *   <li>Rate limiting por IP e por rota com janela deslizante</li>
- *   <li>Bloqueios temporários e permanentes persistidos em banco de dados</li>
+ *   <li>Recusa de entrada com cara de SQL Injection e XSS (heurística, ver
+ *       {@link #hasMaliciousInput(Context)})</li>
+ *   <li>Rate limiting por IP e por rota com janela deslizante, também no upgrade de WebSocket</li>
+ *   <li>Bloqueios temporários (em memória) e bloqueios longos de 24 h (em memória e no banco,
+ *       recarregados na subida)</li>
  *   <li>Headers de segurança HTTP automáticos</li>
- *   <li>HTTP por padrão (TLS da hospedagem) e HTTPS opcional com redirecionamento</li>
- *   <li>Servir arquivos estáticos corretamente tanto em HTTP quanto HTTPS</li>
+ *   <li>Só HTTP: o TLS termina no proxy de borda do Coolify, que entrega a requisição em HTTP</li>
+ *   <li>Arquivos estáticos de {@code public/}, com os mesmos cabeçalhos de segurança</li>
  * </ul>
  *
  * <p><strong>Quando usar:</strong> em toda aplicação web da biblioteca — a
  * inicialização é feita automaticamente pelo {@link AngatuLib} (não é preciso
- * chamar {@link #setup} manualmente, exceto para cenários avançados). Use os
- * métodos de configuração (rate limit, paths) logo após a inicialização.</p>
+ * chamar {@link #setup} manualmente, exceto para cenários avançados).</p>
+ *
+ * <p><strong>Ordem:</strong> os métodos de configuração (rate limit, paths, proxy, cabeçalhos,
+ * tamanho de corpo) valem desde a primeira requisição quando chamados <strong>antes</strong> de
+ * {@code new AngatuLib(...)}. Chamados depois, valem a partir dali — e o
+ * {@code bloqByMaxRequisitions} do construtor sobrescreve {@link #setRateLimitingEnabled}.</p>
  *
  * <p><strong>Quando NÃO usar:</strong> em aplicações sem servidor web; não
  * chame {@link #setup} mais de uma vez por processo (retorna a instância já
- * criada). Os métodos de configuração devem ser chamados ANTES do servidor
- * receber tráfego para evitar janelas sem proteção.</p>
+ * criada).</p>
  *
  * <p><strong>Integração:</strong> {@link AngatuLib} chama {@link #setup} no
  * bootstrap; {@link Route} usa {@link #get()} para registro de rotas;
- * {@link Saveable} persiste bloqueios e configurações (permanentes e suspeitos).</p>
+ * {@link Saveable} persiste bloqueios longos, configurações de rota e o histórico de
+ * violações; o IP do cliente vem de {@link IP#get(Context)}.</p>
  *
  * <p><strong>Fluxo de utilização:</strong></p>
  * <ol>
+ *   <li>Declare o proxy ({@link #setTrustedProxyHops(int)}) e os limites
+ *       ({@link #configureRateLimit}, {@link #configureApiRateLimit},
+ *       {@link #configureLoginRateLimit}, {@link #addUnlimitedPath}, {@link #addIgnoredPath});</li>
  *   <li>Construa {@code new AngatuLib(...)} (ou chame {@link #setup} diretamente);</li>
- *   <li>Configure rate limits ({@link #configureRateLimit},
- *       {@link #configureApiRateLimit}, {@link #configureLoginRateLimit}) e
- *       paths especiais ({@link #addUnlimitedPath}, {@link #addIgnoredPath});</li>
  *   <li>Use {@link #get()} para acessar o Javalin em cenários avançados.</li>
  * </ol>
  *
@@ -83,19 +104,15 @@ import io.javalin.http.staticfiles.Location;
  * realmente públicos (health check); monitore {@link #getActivePermanentBlocks()}.</p>
  *
  * <p><strong>Limitações:</strong> exige as dependências
- * {@code io.javalin:javalin:7.2.2} (web), {@code io.javalin.community.ssl:javalin-ssl:7.2.2}
- * (apenas no modo HTTPS gerenciado), {@code org.reflections:reflections:0.10.2} (rotas automáticas) e os
- * requisitos do {@link Saveable} (persistência de bloqueios). Dependências
+ * {@code io.javalin:javalin:7.2.3} (web), {@code org.reflections:reflections:0.10.2} (rotas
+ * automáticas) e os requisitos do {@link Saveable} (persistência de bloqueios). Dependências
  * ausentes são detectadas com mensagens de instalação claras.</p>
  *
- * <p><strong>Extensões futuras:</strong> novos padrões de segurança podem ser
- * adicionados como métodos estáticos sem quebrar a API; a detecção de padrões
- * maliciosos é extensível via lista de {@code Pattern} pré-compilados.</p>
- *
  * @author Angatu Sistemas
- * @version 3.0
+ * @version 3.1
  * @see AngatuLib
  * @see Route
+ * @see IP
  * @see br.com.angatusistemas.lib.database.Saveable
  */
 public final class JavalinAPI {
@@ -163,34 +180,88 @@ public final class JavalinAPI {
      *
      * <p>Arquivo estático não é superfície de ataque: não tem query, não toca
      * o banco e não muda estado. O que precisa de limite é rota — login,
-     * pagamento, escrita. É lá que o contador continua valendo.</p>
+     * pagamento, escrita. É lá que o contador continua valendo. Por isso a
+     * isenção vale só para GET/HEAD de um caminho que <b>não</b> é rota
+     * (ver {@link #isStaticRequest(Context, String)}).</p>
+     *
+     * <p>{@code .json} e {@code .wasm} estão na lista porque arquivo fora dela cai no balde único
+     * dos caminhos que não são rota ({@link #NO_ROUTE}): o {@code manifest.json} de um PWA, pedido a
+     * cada página, dividia o balde com os 404.</p>
      */
     private static final Set<String> STATIC_EXTENSIONS = Set.of(
-            ".css", ".js", ".mjs", ".map",
+            ".css", ".js", ".mjs", ".map", ".json", ".wasm",
             ".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".svg", ".ico", ".bmp",
             ".woff", ".woff2", ".ttf", ".otf", ".eot",
             ".mp4", ".webm", ".ogg", ".mp3", ".wav",
             ".webmanifest", ".txt", ".xml", ".pdf");
 
+    /**
+     * Tamanho máximo padrão de um corpo lido em memória (16 MiB).
+     *
+     * <p>Era 1 GB. Toda rota que lê o corpo ({@code ctx.body()}, {@code bodyAsClass}) aceitava
+     * um pedido desse tamanho — e ler 1 GB custa perto de 3 GB de heap. Uma única requisição
+     * derrubava o contêiner. Upload multipart não passa por este limite (o Javalin grava as
+     * partes em disco); quem precisa de corpo maior chama {@link #setMaxRequestSize(long)}.</p>
+     */
+    private static final long DEFAULT_MAX_REQUEST_SIZE = 16L * 1024 * 1024;
+
+    /** Maior corpo que a varredura de conteúdo malicioso lê (64 KiB). */
+    private static final int MAX_SCANNED_BODY_BYTES = 64 * 1024;
+
+    /**
+     * O que o limite conta para todo caminho que não é rota: um balde só por IP (ver
+     * {@link #resolveLimit(Context, String, boolean)}).
+     */
+    private static final String NO_ROUTE = "(sem rota)";
+
+    /**
+     * Folga do freio de rede do IPv6: o {@code /48} inteiro pode somar este múltiplo do limite
+     * de um cliente, num limite <strong>configurado</strong>.
+     *
+     * <h4>Por que existe</h4>
+     * <p>O limite enxerga o IPv6 por {@code /64}, que é o que um cliente recebe. Mas um
+     * {@code /48} sai de graça num serviço de túnel, e tem 65.536 {@code /64} dentro: trocando de
+     * {@code /64} a cada pedido, o limite de login de 5 por minuto virava 327 mil — medido, 300
+     * tentativas de 300 {@code /64} do mesmo {@code /48} passaram todas em 710 ms.</p>
+     *
+     * <h4>Por que só nos limites configurados, e sem bloqueio longo</h4>
+     * <p>Um {@code /48} também pode ser uma operadora móvel inteira, com milhares de clientes
+     * legítimos dentro. O freio fica onde tentar e errar em massa compensa — login, cupom, API
+     * sensível, configurados com {@link #configureRateLimit} —, com folga de 16 vezes o limite de
+     * um cliente, e nunca registra violação: quem divide o {@code /48} com um atacante esbarra no
+     * freio por alguns minutos, mas não é banido por 24 horas pelo que não fez. O limite global
+     * continua por {@code /64}.</p>
+     */
+    private static final int IPV6_NETWORK_FACTOR = 16;
+
+    /** Quantas linhas de histórico de violação vão por transação, na gravação em lote. */
+    private static final int VIOLATION_FLUSH_BATCH = 200;
+
+
+    private static final Pattern MULTIPLE_SLASHES = Pattern.compile("/{2,}");
+
     // ==================== CONFIGURAÇÕES DE RATE LIMIT ====================
 
-    /** Configurações de rate limit por padrão de path */
+    /** Configurações de rate limit por padrão de path (chave: padrão canônico). */
     private static final Map<String, RateLimitConfig> RATE_LIMIT_CONFIGS = new ConcurrentHashMap<>();
-    /** Paths sem nenhum limite de requisição */
-    private static final Set<String> UNLIMITED_PATHS = new HashSet<>();
-    /** Paths completamente ignorados pela verificação de segurança */
-    private static final Set<String> IGNORED_PATHS = new HashSet<>();
+    /** Os padrões com curinga das configurações, compilados, do mais específico ao menos. */
+    private static volatile List<PathRule> rateLimitRules = List.of();
+    /** Paths sem nenhum limite de requisição (padrões canônicos). */
+    private static final Set<String> UNLIMITED_PATHS = ConcurrentHashMap.newKeySet();
+    /** Os padrões com curinga dos paths sem limite, compilados. */
+    private static volatile List<PathRule> unlimitedRules = List.of();
+    /** Prefixos de path completamente ignorados pela verificação de segurança (minúsculos). */
+    private static final Set<String> IGNORED_PATHS = ConcurrentHashMap.newKeySet();
 
-    /** Limite global de requisições por segundo (fallback) */
-    private static int globalReqSec = DEFAULT_REQ_SEC;
-    /** Limite global de requisições por minuto (fallback) */
-    private static int globalReqMin = DEFAULT_REQ_MIN;
-    /** Duração global de bloqueio em segundos (fallback) */
-    private static long globalBlockSec = DEFAULT_BLOCK_SEC;
+    /** Limite global aplicado a path sem configuração própria. */
+    private static volatile RateLimitConfig globalConfig =
+            new RateLimitConfig(DEFAULT_REQ_SEC, DEFAULT_REQ_MIN, DEFAULT_BLOCK_SEC);
     /** Flag para habilitar/desabilitar rate limiting */
-    private static boolean rateLimitingEnabled = true;
+    private static volatile boolean rateLimitingEnabled = true;
+    /** Maior corpo lido em memória; ver {@link #DEFAULT_MAX_REQUEST_SIZE}. */
+    private static volatile long maxRequestSize = DEFAULT_MAX_REQUEST_SIZE;
 
-    // ==================== CACHES IN-MEMORY ====================
+    // ==================== ESTADO EM MEMÓRIA ====================
 
     /**
      * Intervalo da varredura que devolve memória dos mapas de rate limiting.
@@ -222,7 +293,7 @@ public final class JavalinAPI {
      * linha, o sintoma chegaria como "o contêiner morreu de madrugada" e não como "um cliente
      * abriu cem mil rotas distintas".</p>
      */
-    private static final int MAX_KEYS_POR_MAPA = 50_000;
+    private static final int MAX_KEYS_PER_MAP = 50_000;
 
     /** Contador de janela deslizante por segundo, chaveado por IP+path */
     private static final Map<String, SlidingWindowCounter> SECOND_COUNTERS = new ConcurrentHashMap<>();
@@ -236,8 +307,21 @@ public final class JavalinAPI {
      * está parada e pode sair do mapa.</p>
      */
     private static final Map<String, Deque<Long>> BURST_TRACKER = new ConcurrentHashMap<>();
-    /** IPs/chaves atualmente bloqueados com tempo de desbloqueio */
+    /** Chaves (IP+path, ou path) temporariamente bloqueadas, com o instante do desbloqueio. */
     private static final Map<String, BlockInfo> BLOCKED_CACHE = new ConcurrentHashMap<>();
+
+    /**
+     * Bloqueios longos ativos: hash do IP → fim do bloqueio (epoch, segundos).
+     *
+     * <h4>Por que em memória</h4>
+     * <p>Antes, um IP com bloqueio longo custava <strong>uma consulta ao SQLite por
+     * requisição</strong>, para sempre — e sem índice, varrendo a tabela. Um atacante bloqueado
+     * que continuasse mandando pedidos transformava cada um deles em carga no banco, disputando
+     * conexão com o resto do site. Agora a decisão é um acesso a mapa. O banco continua sendo o
+     * registro durável: a linha em {@code permanentblocks} é gravada fora da requisição e
+     * recarregada na subida.</p>
+     */
+    private static final Map<String, Long> PERMANENT_BLOCKS = new ConcurrentHashMap<>();
 
     /**
      * Instantes das violações recentes de cada IP, em segundos.
@@ -250,14 +334,27 @@ public final class JavalinAPI {
      */
     private static final Map<String, Deque<Long>> VIOLATION_CACHE = new ConcurrentHashMap<>();
 
+    /**
+     * Violações ainda não gravadas no histórico ({@link SuspectIp}), por hash de IP.
+     *
+     * <p>Cada violação disparava uma leitura e uma gravação no banco, em tarefa separada. Sob
+     * ataque, isso era uma fila de milhares de transações disputando a vez de gravar com a
+     * própria aplicação. Agora elas somam aqui e vão ao banco em lote, na varredura de cada
+     * minuto. O histórico é para quem administra; a decisão de bloquear nunca dependeu dele.</p>
+     */
+    private static final Map<String, PendingViolations> PENDING_VIOLATIONS = new ConcurrentHashMap<>();
+
     // ==================== HEADERS DE SEGURANÇA ====================
 
-    private static final Map<String, String> SECURITY_HEADERS = new HashMap<>();
+    private static final Map<String, String> SECURITY_HEADERS = new ConcurrentHashMap<>();
 
     static {
         SECURITY_HEADERS.put("X-Frame-Options", "SAMEORIGIN");
         SECURITY_HEADERS.put("X-XSS-Protection", "1; mode=block");
         SECURITY_HEADERS.put("Referrer-Policy", "strict-origin-when-cross-origin");
+        // Sem ele, o navegador "adivinha" o tipo de um arquivo pelo conteúdo — e um upload que
+        // diz ser imagem, mas contém HTML com script, podia ser executado como página.
+        SECURITY_HEADERS.put("X-Content-Type-Options", "nosniff");
 
         SECURITY_HEADERS.put("Content-Security-Policy",
                 "default-src * data: blob: 'unsafe-inline' 'unsafe-eval'; " +
@@ -283,21 +380,49 @@ public final class JavalinAPI {
      * conhece. Então a aplicação declara a sua.</p>
      *
      * <p>Chame <b>antes</b> de {@code new AngatuLib(...)} para valer desde a
-     * primeira requisição.</p>
+     * primeira requisição. Os cabeçalhos de cache ({@code Cache-Control}, {@code Pragma} e
+     * {@code Expires}) declarados antes da subida valem também para os arquivos estáticos de
+     * {@code public/}, que sem isso sairiam com o {@code Cache-Control: max-age=0} do
+     * Javalin.</p>
      *
-     * @param nome  nome do header (ex: {@code "Content-Security-Policy"})
-     * @param valor valor a enviar; {@code null} remove o header
+     * @param name  nome do header (ex: {@code "Content-Security-Policy"})
+     * @param value valor a enviar; {@code null} remove o header
      */
-    public static void setSecurityHeader(String nome, String valor) {
-        if (nome == null || nome.isBlank()) return;
-        if (valor == null) SECURITY_HEADERS.remove(nome);
-        else SECURITY_HEADERS.put(nome, valor);
+    public static void setSecurityHeader(String name, String value) {
+        if (name == null || name.isBlank()) return;
+        if (value == null) SECURITY_HEADERS.remove(name);
+        else SECURITY_HEADERS.put(name, value);
+    }
+
+    /** Cabeçalhos de cache que o projeto declara e que também valem para os arquivos estáticos. */
+    private static final List<String> CACHE_HEADERS = List.of("Cache-Control", "Pragma", "Expires");
+
+    /**
+     * Cabeçalhos dos arquivos estáticos: os do Javalin, com os de cache trocados pelos que o
+     * projeto declarou em {@link #setSecurityHeader(String, String)}.
+     *
+     * <p>O servidor de estáticos escreve os próprios cabeçalhos <em>depois</em> do filtro de
+     * segurança, por cima do que ele pôs: sem isto, um {@code Cache-Control: no-store} valia para
+     * páginas e rotas, mas não para CSS, JS e imagens. O contorno — um {@code after} registrado
+     * depois da subida — disputava a lista de manipuladores do Javalin com as requisições em
+     * andamento.</p>
+     */
+    private static Map<String, String> staticFileHeaders(Map<String, String> javalinDefaults) {
+        Map<String, String> headers = new LinkedHashMap<>();
+        if (javalinDefaults != null) headers.putAll(javalinDefaults);
+        for (String cacheHeader : CACHE_HEADERS) {
+            for (Map.Entry<String, String> declared : SECURITY_HEADERS.entrySet()) {
+                if (declared.getKey().equalsIgnoreCase(cacheHeader)) {
+                    headers.keySet().removeIf(name -> name.equalsIgnoreCase(cacheHeader));
+                    headers.put(cacheHeader, declared.getValue());
+                }
+            }
+        }
+        return headers;
     }
 
     /** Coordenadas Maven do Javalin (versão alvo da biblioteca). */
-    private static final String JAVALIN_COORDINATES = "io.javalin:javalin:7.2.2";
-    /** Coordenadas Maven do plugin SSL (modo HTTPS). */
-    private static final String JAVALIN_SSL_COORDINATES = "io.javalin.community.ssl:javalin-ssl:7.2.2";
+    private static final String JAVALIN_COORDINATES = "io.javalin:javalin:7.2.3";
     /** Coordenadas Maven da Reflections (scan de rotas). */
     private static final String REFLECTIONS_COORDINATES = "org.reflections:reflections:0.10.2";
 
@@ -306,186 +431,298 @@ public final class JavalinAPI {
     /** Métodos HTTP que podem carregar corpo malicioso no request. */
     private static final Set<HandlerType> BODY_METHODS = Set.of(HandlerType.POST, HandlerType.PUT, HandlerType.PATCH);
 
-    /** Padrões compilados de SQL Injection e XSS para detecção */
+    /**
+     * Padrões de SQL Injection e XSS.
+     *
+     * <h4>Palavra inteira, distância limitada</h4>
+     * <p>Os padrões eram {@code select.+from}, {@code update.+set} e parecidos, sem limite de
+     * palavra. Dois defeitos saíam daí:</p>
+     * <ul>
+     *   <li><strong>recusavam JSON comum</strong>: {@code {"updatedAt":…,"setor":"vendas"}} casa
+     *       com {@code update.+set}, {@code {"selectedIds":[…],"from":…}} com
+     *       {@code select.+from}, {@code {"action":"update","offset":0}} de novo com
+     *       {@code update.+set}. A tela de configurações recebia 403;</li>
+     *   <li><strong>custo quadrático</strong>: o {@code .+} voltava sobre o texto inteiro a cada
+     *       ocorrência da primeira palavra. Um corpo de 128 KB de {@code select} repetido levava
+     *       10 s de CPU, e o filtro rodava antes de qualquer limite.</li>
+     * </ul>
+     * <p>Agora cada par exige as duas palavras inteiras ({@code \b}) a no máximo 100 caracteres
+     * uma da outra, atravessando quebra de linha — linear no tamanho do texto, e sem casar com
+     * nome de campo.</p>
+     */
     private static final Pattern[] MALICIOUS_PATTERNS = {
-            Pattern.compile("select.+from", Pattern.CASE_INSENSITIVE),
-            Pattern.compile("insert.+into", Pattern.CASE_INSENSITIVE),
-            Pattern.compile("update.+set", Pattern.CASE_INSENSITIVE),
-            Pattern.compile("delete.+from", Pattern.CASE_INSENSITIVE),
-            Pattern.compile("drop.+table", Pattern.CASE_INSENSITIVE),
-            Pattern.compile("union.+select", Pattern.CASE_INSENSITIVE),
-            Pattern.compile("exec\\s*\\(", Pattern.CASE_INSENSITIVE),
-            Pattern.compile("execute\\s*\\(", Pattern.CASE_INSENSITIVE),
-            Pattern.compile("<script", Pattern.CASE_INSENSITIVE),
-            Pattern.compile("javascript:", Pattern.CASE_INSENSITIVE),
-            Pattern.compile("onload\\s*=", Pattern.CASE_INSENSITIVE),
-            Pattern.compile("eval\\s*\\(", Pattern.CASE_INSENSITIVE),
-            Pattern.compile("alert\\s*\\(", Pattern.CASE_INSENSITIVE)
+            keywordPair("select", "from"),
+            keywordPair("insert", "into"),
+            keywordPair("update", "set"),
+            keywordPair("delete", "from"),
+            keywordPair("drop", "table"),
+            keywordPair("union", "select"),
+            Pattern.compile("\\bexec(?:ute)?\\s*\\(", Pattern.CASE_INSENSITIVE),
+            Pattern.compile("<\\s*script\\b", Pattern.CASE_INSENSITIVE),
+            Pattern.compile("\\bjavascript\\s*:", Pattern.CASE_INSENSITIVE),
+            Pattern.compile("\\bonload\\s*=", Pattern.CASE_INSENSITIVE),
+            Pattern.compile("\\beval\\s*\\(", Pattern.CASE_INSENSITIVE),
+            Pattern.compile("\\balert\\s*\\(", Pattern.CASE_INSENSITIVE)
     };
+
+    /** Escape <code>&#92;uXXXX</code> de uma string JSON. */
+    private static final Pattern JSON_UNICODE_ESCAPE = Pattern.compile("\\\\u([0-9a-fA-F]{4})");
+
+    private static Pattern keywordPair(String first, String second) {
+        return Pattern.compile("\\b" + first + "\\b.{0,100}?\\b" + second + "\\b",
+                Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
+    }
 
     // ==================== ESTADO DO SERVIDOR ====================
 
-    private static Javalin javalinInstance;
-    private static boolean initialized = false;
+    private static volatile Javalin javalinInstance;
+    private static volatile boolean initialized = false;
 
-    /**
-     * Quantos proxies reversos confiáveis existem na frente da aplicação.
-     * Zero (padrão) = nenhum; cabeçalho de proxy é ignorado.
-     */
-    private static int trustedProxyHops = 0;
+    /** Página de recusa do projeto; {@code null} usa a padrão. */
+    private static volatile Function<DenyNotice, String> denyPage;
+    /** A primeira falha da página do projeto vai para o log; as seguintes, sob ataque, não. */
+    private static final AtomicBoolean DENY_PAGE_FAILURE_LOGGED = new AtomicBoolean();
 
     private JavalinAPI() {}
 
     /**
      * Declara quantos proxies reversos confiáveis existem na frente da aplicação.
      *
-     * <p>Chame com {@code 1} quando houver um nginx (ou Caddy, ou Apache) na
-     * frente; com {@code 2} quando houver nginx atrás de uma CDN. Enquanto for
-     * zero, {@code X-Forwarded-For} é ignorado e vale o IP do socket — que é o
-     * único valor que o cliente não consegue forjar.</p>
+     * <p>Chame com {@code 1} no Coolify, ou com um nginx (ou Caddy, ou Apache) na frente; com
+     * {@code 2} quando houver uma CDN (Cloudflare) na frente do proxy. Com {@code 0}, o
+     * {@code X-Forwarded-For} é ignorado e vale o IP do socket — que é o único valor que o
+     * cliente não consegue forjar.</p>
+     *
+     * <p>Sem esta chamada, vale a regra automática de {@link IP}: um proxy só é presumido
+     * quando a conexão vem de rede privada. Declarar deixa a regra explícita.</p>
      *
      * <p>Errar para mais é pior que errar para menos: cada salto declarado a
      * mais devolve o controle do IP para quem faz a requisição.</p>
      *
      * @param hops Número de proxies confiáveis (negativo é tratado como zero)
+     * @see IP#get(Context)
      */
     public static void setTrustedProxyHops(int hops) {
-        trustedProxyHops = Math.max(0, hops);
+        IP.setTrustedProxyHops(hops);
+    }
+
+    /**
+     * Declara um cabeçalho que já traz o IP do cliente, escrito por quem está na frente —
+     * {@code "CF-Connecting-IP"} com a Cloudflare, {@code "True-Client-IP"} com a Akamai.
+     *
+     * <p>Só declare se <strong>todo</strong> o tráfego passa por esse intermediário: se a origem
+     * aceitar conexão direta, o cliente escreve o cabeçalho e escolhe o próprio IP.</p>
+     *
+     * @param header Nome do cabeçalho; {@code null} volta a ignorar cabeçalhos desse tipo
+     */
+    public static void setClientIpHeader(String header) {
+        IP.setTrustedHeader(header);
+    }
+
+    /**
+     * Define o maior corpo de requisição lido em memória ({@code ctx.body()},
+     * {@code bodyAsClass}). Corpo maior recebe 413.
+     *
+     * <p>Padrão: 16 MiB. Upload multipart não passa por este limite. Chame <b>antes</b> de
+     * {@code new AngatuLib(...)}: o valor é aplicado quando o servidor é criado.</p>
+     *
+     * @param bytes Tamanho máximo em bytes (mínimo 1 KiB)
+     */
+    public static void setMaxRequestSize(long bytes) {
+        maxRequestSize = Math.max(1024L, bytes);
+    }
+
+    /**
+     * Troca por uma página do projeto a recusa mostrada ao navegador — a do rate limit (429), a
+     * do bloqueio longo e a de conteúdo recusado (403).
+     *
+     * <p>É uma tela que uma pessoa de verdade lê: quem esbarra no limite quase sempre é um cliente
+     * comum, que clicou duas vezes ou recarregou a página. Com esta chamada, a recusa segue o
+     * sistema de design do projeto e leva a marca da Angatu Sistemas, como qualquer outra tela.</p>
+     *
+     * <p>A página precisa se bastar: estilo embutido, sem script e sem depender de outra
+     * requisição — quem a recebe já está sendo limitado. O status, o {@code Retry-After} e o JSON
+     * das chamadas de API continuam da biblioteca. Se a função lançar exceção ou devolver texto
+     * vazio, vale a página padrão.</p>
+     *
+     * <pre>
+     * JavalinAPI.setDenyPage(notice -&gt; DenyPageTemplate.render(notice.title(), notice.message()));
+     * </pre>
+     *
+     * @param renderer Monta o HTML completo a partir da recusa; {@code null} volta à página padrão
+     */
+    public static void setDenyPage(Function<DenyNotice, String> renderer) {
+        denyPage = renderer;
+        DENY_PAGE_FAILURE_LOGGED.set(false);
     }
 
     // ==================== API PÚBLICA ====================
 
     /**
-     * Inicializa o servidor Javalin em HTTP com todas as configurações de
-     * segurança — a forma usada pelos projetos hospedados no Coolify.
+     * Inicializa o servidor Javalin em HTTP com todas as configurações de segurança — a forma
+     * usada pelos projetos, todos hospedados no Coolify.
+     *
+     * <p>O servidor escuta em {@code 0.0.0.0:port}, só HTTP: o certificado, a renovação e o
+     * redirecionamento para HTTPS são do proxy de borda do Coolify.</p>
      *
      * @param port            Porta HTTP em que o servidor escuta
      * @param enableRateLimit {@code true} para habilitar rate limiting
      * @return Instância configurada do Javalin, ou {@code null} em caso de falha
      */
     public static Javalin setup(int port, boolean enableRateLimit) {
-        return setup(port, enableRateLimit, false, null);
+        return setup(port, enableRateLimit, (Consumer<Javalin>) null);
     }
 
     /**
-     * Inicializa o servidor Javalin com todas as configurações de segurança,
-     * escolhendo explicitamente quem gerencia o certificado SSL.
+     * Como a biblioteca subia com HTTPS gerenciado pelo próprio servidor.
      *
-     * <p>O padrão é <strong>HTTP</strong>: o servidor escuta em
-     * {@code 0.0.0.0:port} e o TLS fica com a hospedagem (Coolify, nginx ou
-     * outro proxy reverso). O modo HTTPS só é ligado quando
-     * {@code manageSsl} é {@code true} — aí o plugin javalin-ssl assume os
-     * certificados, escuta HTTPS na porta informada e mantém {@code port + 1}
-     * apenas para redirecionar o HTTP.</p>
-     *
-     * @param port            Porta principal (HTTP; ou HTTPS quando {@code manageSsl})
+     * @param port            Porta HTTP em que o servidor escuta
      * @param enableRateLimit {@code true} para habilitar rate limiting
-     * @param manageSsl       {@code true} para o Javalin gerenciar o certificado SSL
-     * @param folderCerts     Pasta com {@code fullchain.pem} e {@code privkey.pem};
-     *                        usada somente quando {@code manageSsl} é {@code true}
+     * @param manageSsl       Só {@code false} é aceito
+     * @param folderCerts     Ignorado
+     * @return Instância configurada do Javalin, ou {@code null} em caso de falha
+     * @throws UnsupportedOperationException se {@code manageSsl} for {@code true}
+     * @deprecated A biblioteca roda só atrás do Coolify, que termina o TLS: não existe mais HTTPS
+     *             gerenciado nem pasta de certificados. Use {@link #setup(int, boolean)}.
+     */
+    @Deprecated(forRemoval = true)
+    public static Javalin setup(int port, boolean enableRateLimit, boolean manageSsl, File folderCerts) {
+        refuseManagedSsl(manageSsl);
+        return setup(port, enableRateLimit);
+    }
+
+    /**
+     * Recusa o pedido de HTTPS gerenciado, que saiu da biblioteca.
+     *
+     * <p>Falha alto, na subida: servir HTTP em silêncio a quem pediu HTTPS deixaria a porta 443
+     * falando texto puro, e o site quebrado sem uma linha no log.</p>
+     */
+    private static void refuseManagedSsl(boolean manageSsl) {
+        if (manageSsl) {
+            throw new UnsupportedOperationException("HTTPS gerenciado saiu da biblioteca: ela roda só atrás do "
+                    + "Coolify, que termina o TLS. Suba em HTTP com JavalinAPI.setup(porta, rateLimit) ou "
+                    + "new AngatuLib(host, porta, rateLimit).");
+        }
+    }
+
+    /**
+     * Igual a {@link #setup(int, boolean)}, com um passo antes de o servidor aceitar conexões.
+     *
+     * <p>Tudo o que precisa existir desde a primeira requisição — o filtro de segurança, as
+     * rotas descobertas, as páginas — é registrado <strong>antes</strong> do {@code start()}. A
+     * ordem inversa deixava uma janela em que a requisição chegava sem filtro, recebia 404 de
+     * uma rota ainda não registrada, ou esbarrava no registro em andamento: as listas de rota
+     * do Javalin não aceitam inclusão concorrente.</p>
+     *
+     * @param port            Porta HTTP em que o servidor escuta
+     * @param enableRateLimit {@code true} para habilitar rate limiting
+     * @param beforeStart     Registro adicional a fazer antes de subir (ex.: páginas HTML);
+     *                        pode ser {@code null}
      * @return Instância configurada do Javalin, ou {@code null} em caso de falha
      */
-    public static Javalin setup(int port, boolean enableRateLimit, boolean manageSsl, File folderCerts) {
+    public static synchronized Javalin setup(int port, boolean enableRateLimit, Consumer<Javalin> beforeStart) {
         Dependencies.require("io.javalin.Javalin", JAVALIN_COORDINATES, "Web Server (Javalin)");
         if (initialized) return javalinInstance;
 
         rateLimitingEnabled = enableRateLimit;
         loadPersistedConfigs();
+        // A galeria da própria biblioteca (GET /image?id=…) é imagem de vitrine, como um .png:
+        // todas as fotos de uma página dividiam o contador de /image, e uma vitrine com mais de
+        // trinta fotos levava o visitante a um bloqueio de uma hora.
+        addUnlimitedPath("/image");
 
-        // Limpa dados antigos diariamente
-        Task.runTimerWithFixedDelay(JavalinAPI::cleanupOldData, 0, 24 * 60 * 60 * 1000L);
-        // E o estado em memória do rate limiting de minuto em minuto (ver sweepRateLimitState).
-        Task.runTimerWithFixedDelay(JavalinAPI::sweepRateLimitState, SWEEP_INTERVAL_MS, SWEEP_INTERVAL_MS);
-
+        Javalin javalin = null;
         try {
-            Javalin javalin = Javalin.create(config -> {
+            javalin = Javalin.create(config -> {
                 config.bundledPlugins.enableCors(cors -> cors.addRule(rule -> rule.anyHost()));
                 config.staticFiles.add(sf -> {
                     sf.hostedPath = "/";
                     sf.directory = "/public";
                     sf.location = Location.CLASSPATH;
+                    sf.headers = staticFileHeaders(sf.headers);
                 });
-                
+
                 config.router.contextPath = "/";
                 config.router.ignoreTrailingSlashes = true;
                 config.router.treatMultipleSlashesAsSingleSlash = true;
-
-                // Tamanho máximo do body (1 GB)
-                config.http.maxRequestSize = 1_000L * 1_024L * 1_024L;
-
-                // HTTPS só quando pedido explicitamente: no Coolify o TLS
-                // termina no proxy de borda e o contêiner recebe HTTP
-                if (manageSsl) {
-                    Console.log("Javalin iniciado em modo HTTPS gerenciado (porta %d, HTTP em %d apenas para redirecionar)",
-                            port, port + 1);
-                    Dependencies.require("io.javalin.community.ssl.SslPlugin", JAVALIN_SSL_COORDINATES,
-                            "Web Server (Javalin) — HTTPS gerenciado");
-                    SslSetup.configure(config, folderCerts, port);
-                } else {
-                    Console.log("Javalin iniciado em modo HTTP (porta %d) — HTTPS a cargo da hospedagem", port);
-                }
+                config.http.maxRequestSize = maxRequestSize;
             });
 
-            // No modo HTTPS as portas são definidas pelo plugin SSL
-            if (manageSsl) {
-                javalin.start();
-            } else {
-                javalin.start(port);
-            }
-
-            javalinInstance = javalin;
-
+            javalinInstance = javalin; // Route exige a instância para ser construída
             registerSecurityHandler(javalin);
             registerAllRoutes();
+            if (beforeStart != null) beforeStart.accept(javalin);
 
-            initialized = true;
-            return javalin;
-
+            javalin.start(port);
+            Console.log("Javalin no ar em HTTP (porta %d) — o HTTPS é do Coolify", port);
         } catch (Exception e) {
             Console.error("Falha ao iniciar Javalin", e);
+            javalinInstance = null;
+            if (javalin != null) {
+                try {
+                    javalin.stop();
+                } catch (RuntimeException ignored) {
+                    // o servidor nem chegou a subir
+                }
+            }
             return null;
         }
+
+        // Agendado só depois de subir: numa falha, uma segunda tentativa não duplica os timers.
+        Task.runTimerWithFixedDelay(JavalinAPI::cleanupOldData, 0, 24 * 60 * 60 * 1000L);
+        Task.runTimerWithFixedDelay(JavalinAPI::sweepRateLimitState, SWEEP_INTERVAL_MS, SWEEP_INTERVAL_MS);
+
+        initialized = true;
+        return javalin;
     }
 
     /**
      * Configura um limite de taxa personalizado para um padrão de path.
      *
+     * <p><strong>Padrões:</strong> caminho exato ({@code /login}); prefixo com {@code /*}
+     * ({@code /api/*} vale para {@code /api} e tudo abaixo, mas não para {@code /apiary});
+     * segmento variável com {@code {id}}, {@code <id>} ou {@code *} no meio
+     * ({@code /api/pedidos/{id}}). Quando mais de um padrão casa, vence o exato e, depois dele,
+     * o mais específico. O padrão fica gravado e é recarregado na subida — use
+     * {@link #removeRateLimit(String)} para desfazer.</p>
+     *
      * @param pathPattern Padrão de path (ex: {@code /api/*}, {@code /login})
      * @param config      Configuração de limite a aplicar
      */
     public static void configureRateLimit(String pathPattern, RateLimitConfig config) {
-        RATE_LIMIT_CONFIGS.put(pathPattern, config);
+        String pattern = canonicalPath(pathPattern);
+        putRateLimit(pattern, config);
 
         /* Atualiza a linha existente em vez de inserir outra. Como isto é
            chamado na subida, cada deploy gravava um registro novo (UUID novo)
            para o mesmo path — a tabela crescia sem parar e loadPersistedConfigs
-           relia tudo aquilo toda vez. */
-        List<RouteRateLimitConfig> existentes = Saveable.query(RouteRateLimitConfig.class,
-                "SELECT data FROM routeratelimitconfigs WHERE json_extract(data, '$.pathPattern') = ?",
-                pathPattern);
+           relia tudo aquilo toda vez. A comparação é pela forma canônica: uma
+           linha antiga gravada com barra dupla ou barra no fim é o mesmo padrão. */
+        List<RouteRateLimitConfig> existing = persistedRowsFor(pattern);
 
-        if (existentes.isEmpty()) {
+        if (existing.isEmpty()) {
             new RouteRateLimitConfig(
-                    pathPattern,
+                    pattern,
                     config.requestsPerSecond,
                     config.requestsPerMinute,
                     config.blockSeconds,
                     config.perIp
             ).save();
         } else {
-            RouteRateLimitConfig atual = existentes.get(0);
-            atual.setRequestsPerSecond(config.requestsPerSecond);
-            atual.setRequestsPerMinute(config.requestsPerMinute);
-            atual.setBlockSeconds(config.blockSeconds);
-            atual.setPerIp(config.perIp);
-            atual.setEnabled(true);
-            atual.save();
+            RouteRateLimitConfig current = existing.get(0);
+            current.setPathPattern(pattern);
+            current.setRequestsPerSecond(config.requestsPerSecond);
+            current.setRequestsPerMinute(config.requestsPerMinute);
+            current.setBlockSeconds(config.blockSeconds);
+            current.setPerIp(config.perIp);
+            current.setEnabled(true);
+            current.save();
 
             // Duplicatas deixadas pelas subidas anteriores
-            for (int i = 1; i < existentes.size(); i++) existentes.get(i).delete();
+            for (int i = 1; i < existing.size(); i++) existing.get(i).delete();
         }
 
-        Console.log("Rate limit configurado: %s → %d req/s, %d req/min", pathPattern,
+        Console.log("Rate limit configurado: %s → %d req/s, %d req/min", pattern,
                 config.requestsPerSecond, config.requestsPerMinute);
     }
 
@@ -499,30 +736,74 @@ public final class JavalinAPI {
     }
 
     /**
-     * Aplica configuração restritiva para login: 1 req/s, 5 req/min, bloqueio de 15 minutos.
+     * Aplica configuração restritiva para login: 2 req/s, 5 req/min, bloqueio de 15 minutos.
+     *
+     * <p>Eram 1 por segundo: o duplo clique no botão de entrar mandava o segundo pedido no mesmo
+     * segundo, e a pessoa levava 429 e 15 minutos de bloqueio sem ter errado a senha uma vez. O
+     * que segura a força bruta é o limite por minuto, que continua em 5.</p>
      *
      * @param pathPattern Padrão de path
      */
     public static void configureLoginRateLimit(String pathPattern) {
-        configureRateLimit(pathPattern, new RateLimitConfig(1, 5, 900));
+        configureRateLimit(pathPattern, new RateLimitConfig(2, 5, 900));
+    }
+
+    /**
+     * Remove um limite configurado por {@link #configureRateLimit}, da memória e do banco.
+     *
+     * <p>A configuração é gravada e volta a cada subida; sem este método, um limite apagado do
+     * código continuava valendo para sempre. O path passa a seguir o limite global.</p>
+     *
+     * @param pathPattern Padrão exatamente como foi configurado
+     * @return {@code true} se havia um limite para o padrão
+     */
+    public static boolean removeRateLimit(String pathPattern) {
+        String pattern = canonicalPath(pathPattern);
+        boolean removed;
+        synchronized (RATE_LIMIT_CONFIGS) {
+            removed = RATE_LIMIT_CONFIGS.remove(pattern) != null;
+            rateLimitRules = compileRules(RATE_LIMIT_CONFIGS.keySet());
+        }
+        for (RouteRateLimitConfig row : persistedRowsFor(pattern)) {
+            if (row.delete()) removed = true;
+        }
+        return removed;
+    }
+
+    /** Linhas gravadas cujo padrão, na forma canônica, é o informado. A tabela tem poucas linhas. */
+    private static List<RouteRateLimitConfig> persistedRowsFor(String canonicalPattern) {
+        List<RouteRateLimitConfig> rows = new ArrayList<>();
+        for (RouteRateLimitConfig row : Saveable.findAll(RouteRateLimitConfig.class)) {
+            if (row.getPathPattern() != null && canonicalPattern.equals(canonicalPath(row.getPathPattern()))) {
+                rows.add(row);
+            }
+        }
+        return rows;
     }
 
     /**
      * Adiciona um path sem nenhum limite de requisições (ex: arquivos estáticos grandes).
+     * Aceita os mesmos padrões de {@link #configureRateLimit}.
      *
      * @param pathPattern Padrão de path
      */
     public static void addUnlimitedPath(String pathPattern) {
-        UNLIMITED_PATHS.add(pathPattern);
+        synchronized (UNLIMITED_PATHS) {
+            UNLIMITED_PATHS.add(canonicalPath(pathPattern));
+            unlimitedRules = compileRules(UNLIMITED_PATHS);
+        }
     }
 
     /**
      * Adiciona um path completamente ignorado pela verificação de segurança.
      *
+     * <p>Vale para o próprio path e para tudo abaixo dele, por segmento: {@code /health} ignora
+     * {@code /health} e {@code /health/db}, mas não {@code /healthcare}.</p>
+     *
      * @param path Prefixo de path a ignorar (ex: {@code /health})
      */
     public static void addIgnoredPath(String path) {
-        IGNORED_PATHS.add(path);
+        IGNORED_PATHS.add(canonicalPath(path).toLowerCase(Locale.ROOT));
     }
 
     /**
@@ -533,9 +814,7 @@ public final class JavalinAPI {
      * @param blockSec Duração do bloqueio em segundos
      */
     public static void setGlobalRateLimit(int reqSec, int reqMin, long blockSec) {
-        globalReqSec = reqSec;
-        globalReqMin = reqMin;
-        globalBlockSec = blockSec;
+        globalConfig = new RateLimitConfig(reqSec, reqMin, blockSec);
     }
 
     /**
@@ -548,31 +827,34 @@ public final class JavalinAPI {
     }
 
     /**
-     * Remove o bloqueio permanente de um IP pelo seu hash SHA-256.
+     * Remove o bloqueio longo de um IP pelo hash dele.
+     *
+     * <p>O hash é o SHA-256 do IPv4 inteiro ou, para IPv6, do prefixo {@code /64} (ex.:
+     * {@code "2804:14c:1:2::/64"}) — ver {@link #rateLimitSubject(String)}. Desbloqueia de
+     * verdade: apaga o bloqueio longo, os bloqueios temporários daquele IP e a janela de
+     * violações.</p>
      *
      * @param ipHash Hash SHA-256 do IP
-     * @return {@code true} se o bloqueio foi removido com sucesso
+     * @return {@code true} se havia bloqueio longo
      */
     public static boolean unblockPermanently(String ipHash) {
-        List<PermanentBlock> blocks = Saveable.query(PermanentBlock.class,
-                "SELECT data FROM permanentblocks WHERE json_extract(data, '$.ipHash') = ?", ipHash);
+        boolean removed = PERMANENT_BLOCKS.remove(ipHash) != null;
+        for (PermanentBlock block : Saveable.findByField(PermanentBlock.class, "ipHash", ipHash))
+            if (block.delete()) removed = true;
 
-        boolean removeu = false;
-        for (PermanentBlock block : blocks)
-            if (block.delete()) removeu = true;
-
-        if (!removeu) return false;
-
-        BLOCKED_CACHE.remove(ipHash);
+        if (!removed) return false;
 
         /* Desbloquear tem que desbloquear de verdade. Apagando só a linha de
            permanentblocks, a janela de violações continuava cheia e a próxima
            requisição fora do limite bloqueava de novo na hora — e a flag em
            SuspectIp seguia ligada, marcando como banido quem acabou de ser
-           perdoado. */
+           perdoado. Os bloqueios temporários (chave ipHash|path) também saem. */
+        String prefix = ipHash + "|";
+        BLOCKED_CACHE.keySet().removeIf(key -> key.startsWith(prefix));
         VIOLATION_CACHE.remove(ipHash);
-        for (SuspectIp s : Saveable.query(SuspectIp.class,
-                "SELECT data FROM suspectips WHERE json_extract(data, '$.ipHash') = ?", ipHash)) {
+        BURST_TRACKER.remove(ipHash);
+        PENDING_VIOLATIONS.remove(ipHash);
+        for (SuspectIp s : Saveable.findByField(SuspectIp.class, "ipHash", ipHash)) {
             s.setPermanentlyBlocked(false);
             s.save();
         }
@@ -580,83 +862,80 @@ public final class JavalinAPI {
     }
 
     /**
-     * Remove <b>todos</b> os bloqueios permanentes e zera as violações.
+     * Remove <b>todos</b> os bloqueios (longos e temporários) e zera as violações.
      *
      * <p>Operação de manutenção. Existe porque {@link #unblockPermanently(String)}
-     * exige o hash SHA-256 do IP — que, por desenho, ninguém consegue derivar de
-     * volta. Sem isto, um bloqueio indevido não tinha como ser desfeito a não ser
-     * apagando o banco.</p>
+     * exige o hash do IP, e quem administra normalmente não tem o IP de quem foi bloqueado.
+     * Sem isto, um bloqueio indevido não tinha como ser desfeito a não ser apagando o banco.</p>
      *
-     * @return Quantidade de bloqueios removidos
+     * @return Quantidade de bloqueios longos removidos do banco
      */
     public static int unblockAll() {
-        int n = 0;
-        for (PermanentBlock block : Saveable.findAll(PermanentBlock.class))
-            if (block.delete()) n++;
-        for (SuspectIp s : Saveable.findAll(SuspectIp.class)) s.delete();
+        int removed = Saveable.deleteAll(PermanentBlock.class);
+        Saveable.deleteAll(SuspectIp.class);
+        PERMANENT_BLOCKS.clear();
         BLOCKED_CACHE.clear();
         BURST_TRACKER.clear();
+        PENDING_VIOLATIONS.clear();
         /* Sem isto o perdão durava um pedido: a janela de violações continuava
            cheia e o primeiro tropeço recriava o bloqueio. */
         VIOLATION_CACHE.clear();
-        return n;
+        return removed;
     }
 
     /**
-     * Retorna todos os bloqueios permanentes ativos (não expirados).
+     * Retorna todos os bloqueios longos ativos (não expirados), lidos do banco.
      *
      * @return Lista de {@link PermanentBlock} ativos
      */
     public static List<PermanentBlock> getActivePermanentBlocks() {
-        List<PermanentBlock> active = new ArrayList<>();
-        for (PermanentBlock block : Saveable.findAll(PermanentBlock.class))
-            if (!block.isExpired()) active.add(block);
-        return active;
+        return Saveable.query(PermanentBlock.class, "SELECT data FROM " + Saveable.tableName(PermanentBlock.class)
+                + " WHERE json_extract(data, '$.expiresAt') > ?", nowSeconds());
     }
 
     /**
-     * Devolve a memória dos mapas em memória do rate limiting. Roda a cada minuto.
+     * Devolve a memória dos mapas em memória do rate limiting e grava o histórico de violações
+     * acumulado. Roda a cada minuto.
      *
-     * <h3>O que estava acontecendo</h3>
-     * <p>As cinco estruturas de rate limiting ganhavam uma entrada por
+     * <h4>O que estava acontecendo</h4>
+     * <p>As estruturas de rate limiting ganhavam uma entrada por
      * {@code computeIfAbsent} a <strong>cada requisição</strong>, e só perdiam entrada quando a
      * chave era efetivamente <strong>bloqueada</strong>. Tráfego bem-comportado — que é a
      * imensa maioria — nunca saía. As chaves dos contadores são {@code ipHash + "|" + path},
      * então uma pessoa navegando por trinta telas deixava sessenta entradas permanentes, e um
-     * varredor de URLs pedindo quinhentos endereços deixava mil. A limpeza diária que existia
-     * ({@link #cleanupOldData}) mexe só no banco.</p>
+     * varredor de URLs pedindo quinhentos endereços deixava mil.</p>
      *
      * <p>Num processo que fica meses no ar, isso é um vazamento: cresce com o tráfego total
      * acumulado, nunca recua, e não aparece como defeito em lugar nenhum — só como um consumo
      * de memória que sobe devagar até o contêiner ser morto pelo sistema.</p>
      *
-     * <h3>Por que remover não enfraquece a proteção</h3>
+     * <h4>Por que remover não enfraquece a proteção</h4>
      * <p>Toda estrutura aqui é uma <strong>janela</strong>: o contador de segundo guarda 1 s, o
      * de minuto 60 s, o de burst 1 s e o de violações {@link #VIOLATION_WINDOW_SEC}. Passada a
      * janela, o próprio código joga os instantes fora no toque seguinte daquela chave. Esta
      * varredura remove apenas entradas cuja janela <strong>já está inteiramente vencida</strong>,
-     * com folga: recriar a entrada do zero produz exatamente o mesmo estado.</p>
-     *
-     * <p>Bloqueio é a exceção e por isso tem tratamento próprio: só sai do mapa o que já
-     * expirou (o mesmo que {@code isBlocked} faria), e bloqueio permanente
-     * ({@link Long#MAX_VALUE}) nunca sai.</p>
+     * com folga: recriar a entrada do zero produz exatamente o mesmo estado. Bloqueio, temporário
+     * ou longo, só sai do mapa depois de expirar.</p>
      */
     public static void sweepRateLimitState() {
         try {
-            long agoraSec = Instant.now().getEpochSecond();
-            long agoraMs = System.currentTimeMillis();
+            long nowSec = nowSeconds();
+            long nowMs = System.currentTimeMillis();
 
-            SECOND_COUNTERS.values().removeIf(c -> c.lastSeenSeconds() < agoraSec - IDLE_COUNTER_SEC);
-            MINUTE_COUNTERS.values().removeIf(c -> c.lastSeenSeconds() < agoraSec - IDLE_MINUTE_SEC);
-            BURST_TRACKER.values().removeIf(f -> ultimoDe(f) < agoraMs - IDLE_BURST_MS);
-            VIOLATION_CACHE.values().removeIf(f -> ultimoDe(f) < agoraSec - IDLE_VIOLATION_SEC);
-            BLOCKED_CACHE.values().removeIf(b -> b.getUnblockTime() < agoraSec);
+            SECOND_COUNTERS.values().removeIf(c -> c.lastSeenSeconds() < nowSec - IDLE_COUNTER_SEC);
+            MINUTE_COUNTERS.values().removeIf(c -> c.lastSeenSeconds() < nowSec - IDLE_MINUTE_SEC);
+            BURST_TRACKER.values().removeIf(q -> lastOf(q) < nowMs - IDLE_BURST_MS);
+            VIOLATION_CACHE.values().removeIf(q -> lastOf(q) < nowSec - IDLE_VIOLATION_SEC);
+            BLOCKED_CACHE.values().removeIf(b -> b.getUnblockTime() <= nowSec);
+            PERMANENT_BLOCKS.values().removeIf(until -> until <= nowSec);
 
-            avisarSeGigante("contadores por segundo", SECOND_COUNTERS.size());
-            avisarSeGigante("contadores por minuto", MINUTE_COUNTERS.size());
-            avisarSeGigante("rastreio de burst", BURST_TRACKER.size());
-            avisarSeGigante("violações recentes", VIOLATION_CACHE.size());
-            avisarSeGigante("bloqueios ativos", BLOCKED_CACHE.size());
+            warnIfHuge("contadores por segundo", SECOND_COUNTERS.size());
+            warnIfHuge("contadores por minuto", MINUTE_COUNTERS.size());
+            warnIfHuge("rastreio de burst", BURST_TRACKER.size());
+            warnIfHuge("violações recentes", VIOLATION_CACHE.size());
+            warnIfHuge("bloqueios ativos", BLOCKED_CACHE.size());
+
+            flushViolations();
         } catch (Throwable t) {
             // Uma varredura que falha não pode derrubar o agendador: ela roda de novo em 1 min.
             Console.warn("[JavalinAPI] varredura do rate limit: %s", t.getMessage());
@@ -669,33 +948,41 @@ public final class JavalinAPI {
      * <p>Fila vazia devolve {@link Long#MAX_VALUE}: é uma entrada recém-criada, e removê-la no
      * intervalo entre o {@code computeIfAbsent} e o primeiro registro seria uma corrida.</p>
      */
-    private static long ultimoDe(Deque<Long> fila) {
-        synchronized (fila) {
-            Long ultimo = fila.peekLast();
-            return ultimo == null ? Long.MAX_VALUE : ultimo.longValue();
+    private static long lastOf(Deque<Long> queue) {
+        synchronized (queue) {
+            Long last = queue.peekLast();
+            return last == null ? Long.MAX_VALUE : last.longValue();
         }
     }
 
-    private static void avisarSeGigante(String nome, int tamanho) {
-        if (tamanho > MAX_KEYS_POR_MAPA) {
+    private static void warnIfHuge(String name, int size) {
+        if (size > MAX_KEYS_PER_MAP) {
             Console.warn("[JavalinAPI] rate limit: %s com %d chaves (teto declarado: %d). "
                     + "Isso não é tráfego normal — investigue a origem.",
-                    nome, Integer.valueOf(tamanho), Integer.valueOf(MAX_KEYS_POR_MAPA));
+                    name, Integer.valueOf(size), Integer.valueOf(MAX_KEYS_PER_MAP));
         }
     }
 
     /**
-     * Remove registros antigos do banco de dados (bloqueios expirados e suspeitos inativos há 30 dias).
-     * Executado automaticamente a cada 24 horas.
+     * Remove do banco os bloqueios longos vencidos e o histórico de IPs sem violação há 30
+     * dias. Executado automaticamente a cada 24 horas.
+     *
+     * <p>Duas exclusões por SQL, em vez de ler as tabelas inteiras e apagar linha a linha —
+     * uma transação por linha, numa tabela que um ataque faz crescer. A marca
+     * {@code isPermanentlyBlocked} do histórico não impede a exclusão: é estado derivado, e as
+     * linhas com ela presa nunca eram apagadas. Uma falha aqui não interrompe o agendamento.</p>
      */
     public static void cleanupOldData() {
-        long cutoff = Instant.now().getEpochSecond() - (30L * 24 * 60 * 60);
-        Saveable.findAll(PermanentBlock.class).stream()
-                .filter(PermanentBlock::isExpired)
-                .forEach(PermanentBlock::delete);
-        Saveable.findAll(SuspectIp.class).stream()
-                .filter(s -> s.getLastViolationAt() < cutoff && !s.isPermanentlyBlocked())
-                .forEach(SuspectIp::delete);
+        try {
+            long now = nowSeconds();
+            long cutoff = now - (30L * 24 * 60 * 60);
+            Saveable.query(PermanentBlock.class, "DELETE FROM " + Saveable.tableName(PermanentBlock.class)
+                    + " WHERE json_extract(data, '$.expiresAt') <= ?", now);
+            Saveable.query(SuspectIp.class, "DELETE FROM " + Saveable.tableName(SuspectIp.class)
+                    + " WHERE json_extract(data, '$.lastViolationAt') < ?", cutoff);
+        } catch (Throwable t) {
+            Console.error("Limpeza diária dos bloqueios falhou; ela roda de novo amanhã", t);
+        }
     }
 
     /**
@@ -711,144 +998,197 @@ public final class JavalinAPI {
     // ==================== HANDLER DE SEGURANÇA ====================
 
     /**
-     * Registra o before-handler principal que aplica headers de segurança,
-     * proteção contra inputs maliciosos e rate limiting em todas as rotas.
+     * Registra os filtros de segurança: o {@code before} de toda requisição HTTP e o do upgrade
+     * de WebSocket.
+     *
+     * <p>O upgrade de WebSocket não passa pelo {@code before}: o Javalin o desvia antes. Sem o
+     * segundo filtro, um IP bloqueado conectava do mesmo jeito e uma rajada de conexões não
+     * tinha limite nenhum. A sessão continua sendo conferida dentro da rota WebSocket.</p>
      */
     private static void registerSecurityHandler(Javalin javalin) {
-        javalin.unsafe.routes.before(ctx -> {
-            String path = ctx.path();
+        javalin.unsafe.routes.before(JavalinAPI::screenHttpRequest);
+        javalin.unsafe.routes.wsBeforeUpgrade(JavalinAPI::screenWebSocketUpgrade);
+    }
 
-            // Redireciona URLs com extensão .html para a versão sem extensão
-            if (path.toLowerCase().endsWith(".html")) {
-                ctx.redirect(path.replace(".html", ""));
+    /** Filtro de toda requisição HTTP: headers, bloqueio e limite, e conteúdo malicioso. */
+    private static void screenHttpRequest(Context ctx) {
+        String path = canonicalPath(ctx.path());
+
+        // Redireciona URLs com extensão .html para a versão sem extensão
+        if (isHtmlAlias(ctx, path)) {
+            ctx.redirect(withoutHtmlExtension(ctx, path));
+            return;
+        }
+
+        // Aplica headers de segurança em todas as respostas
+        SECURITY_HEADERS.forEach(ctx::header);
+
+        // Ignora paths configurados (ex: health check)
+        if (shouldIgnorePath(path)) return;
+
+        // Preflight de CORS não é pedido do cliente: é o navegador perguntando se pode. O plugin
+        // de CORS responde sem rodar rota nenhuma. Contado, ele gastava o limite da chamada que
+        // vinha logo atrás: com o limite de login, o POST de uma tela em outro domínio levava 429
+        // e 15 minutos de bloqueio na primeira tentativa.
+        if (isCorsPreflight(ctx)) return;
+
+        // Bloqueio e limite ANTES da varredura de conteúdo. A varredura lê e percorre até 64 KiB
+        // de corpo; com ela na frente, um IP já bloqueado continuava gastando CPU a cada pedido
+        // — e o pedido recusado por ela nunca entrava na conta do limite.
+        //
+        // Recurso estático e paths sem limite não passam pelo rate limit: um <img> a mais numa
+        // vitrine não pode virar bloqueio de cliente. E essa isenção vem antes do bloqueio, e a
+        // ordem é o conserto de um estrago real: com ela depois, um IP bloqueado levava 403 no
+        // CSS, no JS e na página pública. Quem estava na lista não via "acesso bloqueado" — via
+        // o site quebrado, e o robô do buscador que caísse ali tirava o site inteiro do índice.
+        if (rateLimitingEnabled && !isStaticRequest(ctx, path) && !isUnlimitedPath(path)) {
+            Denial denial = checkAccess(ctx, path, isPublicPage(ctx, path), false);
+            if (denial != null) {
+                sendDenial(ctx, path, denial);
                 return;
             }
+        }
 
-            // Aplica headers de segurança em todas as respostas
-            SECURITY_HEADERS.forEach(ctx::header);
-
-            // Ignora paths configurados (ex: health check)
-            if (shouldIgnorePath(path)) return;
-
-            // Bloqueia inputs maliciosos (SQLi/XSS).
-            //
-            // Isto NÃO conta violação. O filtro é uma heurística de texto: um
-            // Referer de anúncio, ou uma busca digitada na loja, casa com os
-            // padrões sem que ninguém esteja atacando. Deixar essa heurística
-            // alimentar o contador de bloqueio permanente significa banir para
-            // sempre quem escreveu a frase errada no campo de busca. Recusa-se
-            // a requisição — que é o que protege — e pronto.
-            if (hasMaliciousInput(ctx)) {
-                sendDeniedPage(ctx);
-                return;
-            }
-
-            if (!rateLimitingEnabled) return;
-
-            // Recurso estático e paths sem limite não passam pelo rate limit.
-            // Um <img> a mais numa vitrine não pode virar bloqueio de cliente.
-            //
-            // Esta checagem vem ANTES do bloqueio, e a ordem é o conserto de um
-            // estrago real: com ela depois, um IP bloqueado levava 403 no CSS,
-            // no JS e na página pública. Quem estava na lista não via "acesso
-            // bloqueado" — via o site quebrado, e o robô do buscador que caísse
-            // ali tirava o site inteiro do índice. Bloqueio existe para conter
-            // operação (login, escrita, pagamento); arquivo estático e conteúdo
-            // público não custam nada e não mudam estado.
-            if (isStaticResource(path) || isUnlimitedPath(path)) return;
-
-            String ip = getClientIp(ctx);
-            String ipHash = hashIp(ip);
-
-            // Verifica bloqueio permanente
-            if (isPermanentlyBlocked(ipHash)) {
-                sendPermanentBlockPage(ctx);
-                return;
-            }
-
-            RateLimitConfig cfg = getRateLimitConfig(path);
-
-            // Chave única por IP + path exato para granularidade máxima
-            String key = buildRateLimitKey(ipHash, path, cfg);
-
-            // Verifica se o IP/chave está temporariamente bloqueado
-            if (isBlocked(key)) {
-                long remaining = BLOCKED_CACHE.get(key).getUnblockTime() - Instant.now().getEpochSecond();
-                sendBlockPage(ctx, remaining);
-                return;
-            }
-
-            // Detecta burst attack (muitas requisições em < 1 segundo)
-            if (cfg.isPerIp() && isBurstAttack(ipHash)) {
-                punir(ctx, ip, ipHash, key, HEAVY_BLOCK_SEC);
-                return;
-            }
-
-            // Verifica e registra a requisição nas janelas deslizantes
-            if (!checkAndRecordRequest(key, cfg))
-                punir(ctx, ip, ipHash, key, cfg.getBlockSeconds());
-        });
+        // Recusa inputs com cara de SQLi/XSS.
+        //
+        // Isto NÃO conta violação. O filtro é uma heurística de texto: um
+        // Referer de anúncio, ou uma busca digitada na loja, casa com os
+        // padrões sem que ninguém esteja atacando. Deixar essa heurística
+        // alimentar o contador de bloqueio longo significa banir quem
+        // escreveu a frase errada no campo de busca. Recusa-se a requisição —
+        // que é o que protege — e pronto.
+        if (hasMaliciousInput(ctx)) sendDeniedPage(ctx, path);
     }
 
     /**
-     * Bloqueia a chave e decide se o caso já virou bloqueio permanente.
+     * Filtro do upgrade de WebSocket. A recusa é por exceção: é o que interrompe o upgrade no
+     * Javalin e devolve o código HTTP ao cliente.
+     */
+    private static void screenWebSocketUpgrade(Context ctx) {
+        String path = canonicalPath(ctx.path());
+        if (shouldIgnorePath(path)) return;
+        if (rateLimitingEnabled && !isUnlimitedPath(path)) {
+            Denial denial = checkAccess(ctx, path, false, true);
+            if (denial != null) {
+                if (denial.permanent()) throw new ForbiddenResponse("Acesso bloqueado");
+                throw new TooManyRequestsResponse("Muitos acessos seguidos");
+            }
+        }
+        if (hasMaliciousInput(ctx)) throw new ForbiddenResponse("Pedido recusado");
+    }
+
+    /**
+     * Preflight de CORS: {@code OPTIONS} com {@code Access-Control-Request-Method}. É o
+     * navegador perguntando antes da chamada de verdade, e o plugin de CORS o responde sem rodar
+     * rota — por isso não passa pelo limite (ver {@link #screenHttpRequest(Context)}).
+     */
+    private static boolean isCorsPreflight(Context ctx) {
+        return ctx.method() == HandlerType.OPTIONS && ctx.header("Access-Control-Request-Method") != null;
+    }
+
+    /** Recusa decidida pelo limite: longa (403) ou temporária (429, com os segundos restantes). */
+    private record Denial(boolean permanent, long seconds) {
+    }
+
+    /**
+     * Aplica bloqueio e limite a uma requisição (HTTP ou upgrade de WebSocket).
      *
-     * <p>Estava escrito duas vezes, igual, em dois pontos do handler — e é o
-     * trecho que mais dói errar: cada cópia é uma chance de uma delas esquecer
-     * de encerrar a requisição ou de escalar cedo demais.</p>
+     * <p>O contador é do IP (IPv6: do {@code /64}) naquela <strong>rota</strong> — o molde que vai
+     * atender o pedido, não o caminho (ver {@link #resolveLimit(Context, String, boolean)}). Num
+     * limite configurado, o IPv6 passa também pelo freio do {@code /48} (ver
+     * {@link #IPV6_NETWORK_FACTOR}).</p>
+     *
+     * @param publicContent {@code true} para página pública: o bloqueio longo não vale nela —
+     *                      é o que a página de bloqueio promete, e o que impede uma rede inteira
+     *                      atrás do mesmo IP de ver o site "fora do ar" por 24 horas
+     * @param webSocket     {@code true} no upgrade de WebSocket, cujas rotas ficam num roteador à parte
+     * @return {@code null} se passa; a recusa, se não
+     */
+    private static Denial checkAccess(Context ctx, String path, boolean publicContent, boolean webSocket) {
+        String ip = IP.get(ctx);
+        String ipHash = hashIp(rateLimitSubject(ip));
+
+        if (!publicContent && isPermanentlyBlocked(ipHash)) return new Denial(true, 0);
+
+        Limit limit = resolveLimit(ctx, path, webSocket);
+        RateLimitConfig cfg = limit.config();
+        String key = cfg.isPerIp() ? ipHash + "|" + limit.subject() : limit.subject();
+
+        BlockInfo block = activeBlock(key);
+        if (block != null) return new Denial(false, block.getUnblockTime() - nowSeconds());
+
+        String networkKey = limit.configured() && cfg.isPerIp() ? ipv6NetworkKey(ip, limit.subject()) : null;
+        if (networkKey != null) {
+            BlockInfo networkBlock = activeBlock(networkKey);
+            if (networkBlock != null) return new Denial(false, networkBlock.getUnblockTime() - nowSeconds());
+        }
+
+        // Detecta burst attack (muitas requisições em < 1 segundo)
+        if (cfg.isPerIp() && isBurstAttack(ipHash)) return punish(ip, ipHash, key, HEAVY_BLOCK_SEC, true);
+
+        // Verifica e registra a requisição nas janelas deslizantes
+        if (!checkAndRecordRequest(key, cfg.getRequestsPerSecond(), cfg.getRequestsPerMinute())) {
+            return punish(ip, ipHash, key, cfg.getBlockSeconds(), cfg.isPerIp());
+        }
+
+        // O /48 inteiro: sem violação nem bloqueio longo — ver IPV6_NETWORK_FACTOR
+        if (networkKey != null && !checkAndRecordRequest(networkKey,
+                networkLimit(cfg.getRequestsPerSecond()), networkLimit(cfg.getRequestsPerMinute()))) {
+            blockKey(networkKey, cfg.getBlockSeconds());
+            return new Denial(false, cfg.getBlockSeconds());
+        }
+        return null;
+    }
+
+    /**
+     * Bloqueia a chave e decide se o caso já virou bloqueio longo.
      *
      * <p>O bloqueio longo é a punição mais cara, então exige duas coisas:
      * {@link #PERM_BLOCK_THRESHOLD} violações <b>dentro</b> de
      * {@link #VIOLATION_WINDOW_SEC} — repetição concentrada, não soma de uma
-     * vida — e um IP em que dê para confiar. Se o valor resolvido é loopback,
-     * rede privada ou CGNAT, ou o proxy não está repassando a origem — e aí
-     * todo mundo chega com o mesmo IP — ou é tráfego compartilhado por
-     * milhares de pessoas. Bloquear nesse caso derruba a aplicação inteira ou
-     * uma operadora de celular inteira. Continua valendo o bloqueio
-     * temporário, que contém o abuso e expira.</p>
+     * vida — e um IP em que dê para confiar. Se o valor resolvido é loopback ou rede privada,
+     * o proxy não está repassando a origem e todo mundo chega com o mesmo IP: bloquear derruba
+     * a aplicação inteira. Continua valendo o bloqueio temporário, que contém o abuso e
+     * expira.</p>
      *
-     * @param ctx     Contexto da requisição
-     * @param ip      IP resolvido do cliente
-     * @param ipHash  Hash SHA-256 do IP
-     * @param key     Chave de rate limit a bloquear
-     * @param seconds Duração do bloqueio temporário, em segundos
+     * <p>Limite compartilhado ({@code perIp = false}) estoura pela soma de todos os clientes:
+     * quem completou a conta não fez nada de errado, e a violação não é registrada contra
+     * ele.</p>
+     *
+     * @return A recusa a enviar
      */
-    private static void punir(Context ctx, String ip, String ipHash, String key, long seconds) {
-        int violations = registerViolation(ipHash);
-
-        if (violations >= PERM_BLOCK_THRESHOLD && !isSharedOrLocalIp(ip)) {
-            createPermanentBlock(ipHash, violations);
-            sendPermanentBlockPage(ctx);
-            return;
+    private static Denial punish(String ip, String ipHash, String key, long seconds, boolean perIp) {
+        if (perIp) {
+            int violations = registerViolation(ipHash);
+            if (violations >= PERM_BLOCK_THRESHOLD && !IP.isPrivateOrLocal(ip)) {
+                createPermanentBlock(ipHash, violations);
+                return new Denial(true, 0);
+            }
         }
-
         blockKey(key, seconds);
-        sendBlockPage(ctx, seconds);
+        return new Denial(false, seconds);
     }
 
     // ==================== PERSISTÊNCIA ====================
 
     /**
-     * Carrega configurações de rate limit, bloqueios permanentes e suspeitos do banco de dados
-     * para os caches in-memory ao iniciar o servidor.
+     * Carrega configurações de rate limit e bloqueios longos do banco para a memória, ao
+     * iniciar o servidor, e cria os índices das consultas por IP.
      */
     private static void loadPersistedConfigs() {
         try {
+            Saveable.createIndex(PermanentBlock.class, "ipHash");
+            Saveable.createIndex(SuspectIp.class, "ipHash");
+
             for (RouteRateLimitConfig c : Saveable.findAll(RouteRateLimitConfig.class))
                 if (c.isEnabled())
-                    RATE_LIMIT_CONFIGS.put(c.getPathPattern(), new RateLimitConfig(
+                    putRateLimit(canonicalPath(c.getPathPattern()), new RateLimitConfig(
                             c.getRequestsPerSecond(), c.getRequestsPerMinute(),
                             c.getBlockSeconds(), c.isPerIp()));
 
-            /* Long.MAX_VALUE é o sentinela que isPermanentlyBlocked() exige
-               para sequer consultar o banco. Gravando aqui o expiresAt real, o
-               bloqueio simplesmente não valia depois de um restart — só
-               voltava a valer de carona no laço de SuspectIp abaixo, que era
-               outra fonte de verdade para o mesmo fato. A validade continua
-               sendo do banco: quem decide é a linha em permanentblocks. */
             for (PermanentBlock b : Saveable.findAll(PermanentBlock.class))
                 if (!b.isExpired())
-                    BLOCKED_CACHE.put(b.getIpHash(), new BlockInfo(Long.MAX_VALUE, "Permanent"));
+                    PERMANENT_BLOCKS.merge(b.getIpHash(), b.getExpiresAt(), Math::max);
 
             /* O total de violações de SuspectIp NÃO volta para o cache. Ele é
                o acumulado de sempre; o cache conta só a janela de
@@ -860,130 +1200,284 @@ public final class JavalinAPI {
                derivado, fica velho quando o bloqueio expira ou é desfeito, e
                ressuscitava bloqueio já removido a cada reinicialização. */
 
-            /* Bloqueio permanente é invisível para quem administra: quem foi
+            /* Bloqueio longo é invisível para quem administra: quem foi
              * banido simplesmente não volta para reclamar, e quem olha o site
              * de outro lugar vê tudo funcionando. Dizer o número toda subida é
              * o que transforma "o site caiu para alguns" numa pista. */
-            long permanentes = BLOCKED_CACHE.values().stream()
-                    .filter(b -> b.getUnblockTime() == Long.MAX_VALUE).count();
-            if (permanentes > 0)
+            if (!PERMANENT_BLOCKS.isEmpty())
                 Console.warn("Há %d IP(s) com bloqueio longo. Quem estiver na lista recebe 403 "
-                        + "em rota limitada (API, login, escrita); conteúdo público e arquivo "
-                        + "estático continuam abrindo. Para zerar: JavalinAPI.unblockAll().", permanentes);
+                        + "em rota limitada (API, login, escrita); página pública e arquivo "
+                        + "estático continuam abrindo. Para zerar: JavalinAPI.unblockAll().",
+                        PERMANENT_BLOCKS.size());
         } catch (Exception e) {
             Console.error("Erro ao carregar configurações persistidas", e);
         }
     }
 
     /**
-     * Cria um bloqueio permanente para o IP informado e atualiza o banco de dados.
+     * Cria o bloqueio longo do IP: vale na hora, em memória, e é gravado no banco fora da
+     * requisição.
+     *
+     * <p>Várias requisições do mesmo IP cruzam o limiar ao mesmo tempo; só a primeira grava —
+     * antes, cada uma criava a sua linha em {@code permanentblocks}, na própria thread da
+     * requisição, esperando a vez de gravar.</p>
      *
      * @param ipHash     Hash SHA-256 do IP
      * @param violations Número de violações que causaram o bloqueio
      */
     private static void createPermanentBlock(String ipHash, int violations) {
-        new PermanentBlock(ipHash, String.format("Bloqueio após %d violações", violations), violations, "System").save();
-        BLOCKED_CACHE.put(ipHash, new BlockInfo(Long.MAX_VALUE, "Permanent"));
+        long now = nowSeconds();
+        long expiresAt = now + PermanentBlock.DEFAULT_DURATION_SEC;
+        // Só cria se não houver bloqueio VÁLIDO: um vencido que a varredura ainda não tirou do
+        // mapa é substituído, e não confundido com um bloqueio em vigor.
+        boolean[] created = {false};
+        PERMANENT_BLOCKS.compute(ipHash, (key, until) -> {
+            if (until != null && until > now) return until;
+            created[0] = true;
+            return expiresAt;
+        });
+        if (!created[0]) return;
 
-        Task.runLater(() -> {
-            List<SuspectIp> suspects = Saveable.query(SuspectIp.class,
-                    "SELECT data FROM suspectips WHERE json_extract(data, '$.ipHash') = ?", ipHash);
-            SuspectIp suspect = suspects.isEmpty() ? new SuspectIp(ipHash) : suspects.get(0);
-            suspect.setPermanentlyBlocked(true);
-            suspect.save();
-        }, 0);
+        Task.runAsync(() -> {
+            try {
+                Saveable.transaction(() -> {
+                    new PermanentBlock(ipHash, String.format("Bloqueio após %d violações", violations),
+                            violations, "System").save();
+                    SuspectIp suspect = suspectFor(ipHash);
+                    suspect.setPermanentlyBlocked(true);
+                    suspect.save();
+                });
+            } catch (RuntimeException e) {
+                Console.error("Falha ao gravar o bloqueio longo (ele segue valendo em memória)", e);
+            }
+        });
     }
 
     /**
-     * Verifica se um IP hash possui bloqueio permanente ativo no banco de dados.
+     * O IP tem bloqueio longo ativo? Decidido em memória — ver {@link #PERMANENT_BLOCKS}.
      *
      * @param ipHash Hash SHA-256 do IP
-     * @return {@code true} se o IP está permanentemente bloqueado
+     * @return {@code true} se o bloqueio ainda vale
      */
     private static boolean isPermanentlyBlocked(String ipHash) {
-        BlockInfo block = BLOCKED_CACHE.get(ipHash);
-        if (block == null || block.getUnblockTime() != Long.MAX_VALUE) return false;
-        return !Saveable.query(PermanentBlock.class,
-                "SELECT data FROM permanentblocks WHERE json_extract(data, '$.ipHash') = ? AND json_extract(data, '$.expiresAt') > ?",
-                ipHash, Instant.now().getEpochSecond()).isEmpty();
+        Long until = PERMANENT_BLOCKS.get(ipHash);
+        if (until == null) return false;
+        if (nowSeconds() < until) return true;
+        PERMANENT_BLOCKS.remove(ipHash, until);
+        return false;
+    }
+
+    /** Histórico de violações do IP: a linha existente, ou uma nova. */
+    private static SuspectIp suspectFor(String ipHash) {
+        SuspectIp suspect = Saveable.findFirstByField(SuspectIp.class, "ipHash", ipHash);
+        return suspect != null ? suspect : new SuspectIp(ipHash);
+    }
+
+    /** Violações acumuladas de um IP entre duas gravações do histórico. */
+    private static final class PendingViolations {
+        final LongAdder count = new LongAdder();
+        volatile long lastAt;
+    }
+
+    /**
+     * Grava no histórico ({@link SuspectIp}) as violações acumuladas desde a última varredura,
+     * em transações de {@link #VIOLATION_FLUSH_BATCH} linhas.
+     */
+    private static void flushViolations() {
+        if (PENDING_VIOLATIONS.isEmpty()) return;
+        List<Map.Entry<String, PendingViolations>> drained = new ArrayList<>();
+        for (String ipHash : PENDING_VIOLATIONS.keySet()) {
+            PendingViolations pending = PENDING_VIOLATIONS.remove(ipHash);
+            if (pending != null) drained.add(Map.entry(ipHash, pending));
+        }
+        for (int from = 0; from < drained.size(); from += VIOLATION_FLUSH_BATCH) {
+            List<Map.Entry<String, PendingViolations>> batch =
+                    drained.subList(from, Math.min(drained.size(), from + VIOLATION_FLUSH_BATCH));
+            Saveable.transaction(() -> {
+                for (Map.Entry<String, PendingViolations> entry : batch) {
+                    SuspectIp suspect = suspectFor(entry.getKey());
+                    suspect.registerViolations((int) entry.getValue().count.sum(), entry.getValue().lastAt);
+                    suspect.save();
+                }
+            });
+        }
     }
 
     // ==================== SEGURANÇA ====================
 
-    /**
-     * Gera o hash SHA-256 de um endereço IP para anonimização nos logs/banco.
-     *
-     * @param ip Endereço IP original
-     * @return Hash hexadecimal SHA-256, ou IP sanitizado em caso de erro
-     */
     /** Tabela hexadecimal para conversão de bytes sem alocação de formatadores. */
     private static final char[] HEX_DIGITS = "0123456789abcdef".toCharArray();
 
+    /**
+     * Gera o hash SHA-256 de um endereço IP, usado como chave de limite e nos registros de
+     * bloqueio.
+     *
+     * <p>É pseudonimização, não segredo: o espaço IPv4 é pequeno o bastante para ser
+     * percorrido, e quem tem o IP calcula o hash dele direto.</p>
+     *
+     * @param ip Endereço IP (ou prefixo IPv6, ver {@link #rateLimitSubject(String)})
+     * @return Hash hexadecimal SHA-256
+     */
     private static String hashIp(String ip) {
         try {
-            MessageDigest md = MessageDigest.getInstance("SHA-256");
-            byte[] hash = md.digest(ip.getBytes());
+            byte[] hash = MessageDigest.getInstance("SHA-256").digest(ip.getBytes(StandardCharsets.UTF_8));
             StringBuilder hex = new StringBuilder(64);
             for (byte b : hash) {
                 hex.append(HEX_DIGITS[(b >>> 4) & 0xF]);
                 hex.append(HEX_DIGITS[b & 0xF]);
             }
             return hex.toString();
-        } catch (Exception e) {
-            return ip.replaceAll("[^a-zA-Z0-9]", "");
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 indisponível na JVM", e); // obrigatório na plataforma Java
         }
     }
 
     /**
-     * Verifica se algum parâmetro, corpo ou header da requisição contém padrões maliciosos
-     * (SQL Injection ou XSS).
+     * Quem o limite enxerga: o IPv4 inteiro, ou o prefixo {@code /64} do IPv6.
      *
-     * @param ctx Contexto da requisição
-     * @return {@code true} se input malicioso detectado
+     * <p>Qualquer conexão doméstica ou VPS recebe um {@code /64} inteiro — são 2<sup>64</sup>
+     * endereços do mesmo cliente. Contando endereço por endereço, trocar de IP a cada pedido
+     * zerava todos os contadores, não havia limite nenhum, e cada pedido ainda deixava três
+     * entradas novas nos mapas.</p>
+     *
+     * @param ip Endereço literal devolvido por {@link IP#get(Context)}
+     * @return O próprio IPv4, ou {@code "<prefixo>::/64"} para IPv6
      */
-    private static boolean hasMaliciousInput(Context ctx) {
-        for (List<String> params : ctx.queryParamMap().values())
-            for (String p : params)
-                if (containsMaliciousPattern(p)) return true;
-
-        if (BODY_METHODS.contains(ctx.method()) && corpoEhTexto(ctx))
-            if (containsMaliciousPattern(ctx.body())) return true;
-
-        for (String h : ctx.headerMap().values())
-            if (containsMaliciousPattern(h)) return true;
-
-        return false;
+    static String rateLimitSubject(String ip) {
+        if (ip == null || ip.indexOf(':') < 0) return ip;
+        try {
+            // Literal garantido por IP.get: com ':' no texto, o Java só interpreta o endereço —
+            // nunca resolve nome.
+            byte[] address = InetAddress.getByName(ip).getAddress();
+            if (address.length != 16) return InetAddress.getByAddress(address).getHostAddress(); // IPv4 embutido
+            StringBuilder prefix = new StringBuilder(24);
+            for (int i = 0; i < 8; i += 2) {
+                if (i > 0) prefix.append(':');
+                prefix.append(Integer.toHexString(((address[i] & 0xFF) << 8) | (address[i + 1] & 0xFF)));
+            }
+            return prefix.append("::/64").toString();
+        } catch (UnknownHostException e) {
+            return ip;
+        }
     }
 
     /**
-     * O corpo desta requisição pode ser lido para varredura?
+     * O prefixo {@code /48} de um IPv6, para o freio de rede dos limites configurados (ver
+     * {@link #IPV6_NETWORK_FACTOR}).
      *
-     * <p><b>{@code ctx.body()} CONSOME o corpo.</b> Depois dele,
-     * {@code ctx.uploadedFiles()} lança {@code BodyAlreadyReadException} e todo
-     * upload multipart do consumidor morre — a rota recebe o corpo já gasto e
-     * não consegue mais separar as partes. Era o que derrubava as três telas de
-     * foto da Ele &amp; Ela: capa da home, capa de categoria e foto de produto.</p>
+     * @param ip Endereço literal devolvido por {@link IP#get(Context)}
+     * @return {@code "<prefixo>::/48"}, ou {@code null} para IPv4 (inclusive o embutido em IPv6)
+     */
+    static String ipv6Network(String ip) {
+        if (ip == null || ip.indexOf(':') < 0) return null;
+        try {
+            byte[] address = InetAddress.getByName(ip).getAddress();
+            if (address.length != 16) return null;
+            StringBuilder prefix = new StringBuilder(20);
+            for (int i = 0; i < 6; i += 2) {
+                if (i > 0) prefix.append(':');
+                prefix.append(Integer.toHexString(((address[i] & 0xFF) << 8) | (address[i + 1] & 0xFF)));
+            }
+            return prefix.append("::/48").toString();
+        } catch (UnknownHostException e) {
+            return null;
+        }
+    }
+
+    /** Chave do freio de rede do {@code /48} para a rota; {@code null} fora de IPv6. */
+    private static String ipv6NetworkKey(String ip, String subject) {
+        String network = ipv6Network(ip);
+        return network == null ? null : hashIp(network) + "|" + subject + "|48";
+    }
+
+    /** O limite do {@code /48}: o do cliente vezes {@link #IPV6_NETWORK_FACTOR}, sem estourar o {@code int}. */
+    private static int networkLimit(int perClient) {
+        return (int) Math.min(Integer.MAX_VALUE, (long) perClient * IPV6_NETWORK_FACTOR);
+    }
+
+    /**
+     * Verifica se a requisição traz padrões de SQL Injection ou XSS em nome ou valor de
+     * parâmetro, em cabeçalho ou no corpo.
      *
-     * <p>E procurar {@code <script} dentro dos bytes de um JPEG não protege
-     * nada: gasta megabytes virando String a cada foto enviada e ainda pode
-     * casar por acaso, recusando a foto sem que ninguém esteja atacando.</p>
+     * <p><strong>O corpo só é lido quando é texto e pequeno</strong> — JSON, formulário, XML ou
+     * {@code text/*}, com {@code Content-Length} declarado de até 64 KiB. Antes, qualquer corpo
+     * sem tipo binário era lido inteiro, até o limite do servidor (1 GB), antes de qualquer rate
+     * limit: um pedido grande derrubava o contêiner por memória. Multipart e binário nunca são
+     * lidos — {@code ctx.body()} consome o corpo, e depois dele {@code ctx.uploadedFiles()}
+     * lança exceção.</p>
      *
-     * <p>Sem {@code Content-Type} a varredura continua acontecendo — é o
-     * comportamento antigo, e sem cabeçalho não existe multipart para quebrar.
-     * Query params e headers seguem varridos em qualquer caso.</p>
+     * <p>Um corpo varrido fica em cache no Javalin: {@code ctx.body()}, {@code bodyAsBytes()} e
+     * {@code bodyAsClass()} continuam funcionando na rota. Quem lê em fluxo
+     * ({@code bodyInputStream()}) recebe o fluxo já consumido — nesse caso, use
+     * {@code bodyAsBytes()}.</p>
+     *
+     * <h4>O texto é varrido decodificado</h4>
+     * <p>O navegador codifica {@code <}, {@code :}, {@code =} e {@code (} num formulário, e o JSON
+     * pode trazer <code>&#92;u003c</code> no lugar de {@code <}. Varrido cru, o {@code <script>} de
+     * um formulário comum passava, enquanto o mesmo valor na query era recusado. Agora o formulário
+     * é varrido campo a campo, já decodificado, e o JSON com os escapes <code>&#92;uXXXX</code>
+     * resolvidos.</p>
      *
      * @param ctx Contexto da requisição
-     * @return {@code false} para multipart e binário, {@code true} para o resto
+     * @return {@code true} se input malicioso detectado, ou codificação percentual malformada
      */
-    private static boolean corpoEhTexto(Context ctx) {
-        String tipo = ctx.header("Content-Type");
-        if (tipo == null || tipo.isBlank()) return true;
-        String t = tipo.toLowerCase(Locale.ROOT);
-        if (t.startsWith("multipart/")) return false;
-        return !t.startsWith("image/")
-                && !t.startsWith("video/")
-                && !t.startsWith("audio/")
-                && !t.startsWith("application/octet-stream");
+    private static boolean hasMaliciousInput(Context ctx) {
+        try {
+            if (hasMaliciousParameter(ctx.queryParamMap())) return true;
+        } catch (IllegalArgumentException malformed) {
+            return true; // codificação percentual inválida: nenhum navegador manda isso
+        }
+
+        for (String header : ctx.headerMap().values())
+            if (containsMaliciousPattern(header)) return true;
+
+        if (!BODY_METHODS.contains(ctx.method()) || !isScannableBody(ctx)) return false;
+        String body = ctx.body();
+        if (containsMaliciousPattern(body)) return true;
+        String type = ctx.header("Content-Type").toLowerCase(Locale.ROOT); // isScannableBody garante o cabeçalho
+        if (type.startsWith("application/x-www-form-urlencoded")) {
+            try {
+                return hasMaliciousParameter(ctx.formParamMap());
+            } catch (IllegalArgumentException malformed) {
+                return true;
+            }
+        }
+        return (type.startsWith("application/json") || type.contains("+json")) && body.contains("\\u")
+                && containsMaliciousPattern(unescapeJsonUnicode(body));
+    }
+
+    /** Algum nome ou valor de parâmetro (query ou formulário, já decodificados) é malicioso? */
+    private static boolean hasMaliciousParameter(Map<String, List<String>> parameters) {
+        for (Map.Entry<String, List<String>> param : parameters.entrySet()) {
+            if (containsMaliciousPattern(param.getKey())) return true;
+            for (String value : param.getValue())
+                if (containsMaliciousPattern(value)) return true;
+        }
+        return false;
+    }
+
+    /** O texto com os escapes <code>&#92;uXXXX</code> do JSON trocados pelo caractere. */
+    private static String unescapeJsonUnicode(String json) {
+        Matcher escape = JSON_UNICODE_ESCAPE.matcher(json);
+        StringBuilder decoded = new StringBuilder(json.length());
+        while (escape.find()) {
+            char c = (char) Integer.parseInt(escape.group(1), 16);
+            escape.appendReplacement(decoded, Matcher.quoteReplacement(String.valueOf(c)));
+        }
+        escape.appendTail(decoded);
+        return decoded.toString();
+    }
+
+    /** O corpo é texto, com tamanho declarado e pequeno o bastante para a varredura? */
+    private static boolean isScannableBody(Context ctx) {
+        int length = ctx.contentLength();
+        if (length <= 0 || length > MAX_SCANNED_BODY_BYTES) return false;
+        String type = ctx.header("Content-Type");
+        if (type == null) return false;
+        String t = type.toLowerCase(Locale.ROOT);
+        return t.startsWith("application/json") || t.startsWith("application/x-www-form-urlencoded")
+                || t.startsWith("text/") || t.startsWith("application/xml")
+                || t.contains("+json") || t.contains("+xml");
     }
 
     /**
@@ -1004,37 +1498,29 @@ public final class JavalinAPI {
      *
      * <p>O retorno é o que decide o bloqueio longo, e por isso conta apenas o
      * que está dentro de {@link #VIOLATION_WINDOW_SEC}. O total de sempre
-     * continua sendo gravado no {@link SuspectIp}, mas como histórico para
-     * quem administra — não como sentença.</p>
+     * continua sendo gravado no {@link SuspectIp}, em lote (ver
+     * {@link #PENDING_VIOLATIONS}), como histórico para quem administra — não como
+     * sentença.</p>
      *
      * @param ipHash Hash SHA-256 do IP
      * @return Violações dentro da janela de {@link #VIOLATION_WINDOW_SEC}
      */
     private static int registerViolation(String ipHash) {
-        long now = Instant.now().getEpochSecond();
-        Deque<Long> recentes = VIOLATION_CACHE.computeIfAbsent(ipHash, k -> new ArrayDeque<>());
+        long now = nowSeconds();
+        Deque<Long> recent = VIOLATION_CACHE.computeIfAbsent(ipHash, k -> new ArrayDeque<>());
 
-        int naJanela;
-        synchronized (recentes) {
-            while (!recentes.isEmpty() && recentes.peekFirst() < now - VIOLATION_WINDOW_SEC)
-                recentes.pollFirst();
-            recentes.addLast(now);
-            naJanela = recentes.size();
+        int inWindow;
+        synchronized (recent) {
+            while (!recent.isEmpty() && recent.peekFirst() <= now - VIOLATION_WINDOW_SEC)
+                recent.pollFirst();
+            recent.addLast(now);
+            inWindow = recent.size();
         }
 
-        Task.runLater(() -> {
-            List<SuspectIp> suspects = Saveable.query(SuspectIp.class,
-                    "SELECT data FROM suspectips WHERE json_extract(data, '$.ipHash') = ?", ipHash);
-            SuspectIp suspect = suspects.isEmpty() ? new SuspectIp(ipHash) : suspects.get(0);
-            /* incrementViolations() em vez de setTotalViolations(n): o total é
-               histórico acumulado, e n aqui é só a janela. Ele também é quem
-               atualiza lastViolationAt — sem isso o campo ficava parado na
-               criação e a limpeza de 30 dias apagava suspeito ativo. */
-            suspect.incrementViolations();
-            suspect.save();
-        }, 0);
-
-        return naJanela;
+        PendingViolations pending = PENDING_VIOLATIONS.computeIfAbsent(ipHash, k -> new PendingViolations());
+        pending.count.increment();
+        pending.lastAt = now;
+        return inWindow;
     }
 
     /**
@@ -1048,8 +1534,8 @@ public final class JavalinAPI {
         Deque<Long> timestamps = BURST_TRACKER.computeIfAbsent(ipHash, k -> new ArrayDeque<>());
         synchronized (timestamps) {
             // Remove timestamps fora da janela de 1 segundo
-            while (!timestamps.isEmpty() && timestamps.peek() < now - 1_000) timestamps.poll();
-            timestamps.add(now);
+            while (!timestamps.isEmpty() && timestamps.peekFirst() <= now - 1_000) timestamps.pollFirst();
+            timestamps.addLast(now);
             return timestamps.size() > BURST_THRESHOLD;
         }
     }
@@ -1057,217 +1543,307 @@ public final class JavalinAPI {
     // ==================== RATE LIMITING ====================
 
     /**
-     * Retorna a configuração de rate limit aplicável ao path, em ordem de precedência:
-     * <ol>
-     *   <li>Correspondência exata do path</li>
-     *   <li>Correspondência por padrão (curinga ou regex)</li>
-     *   <li>Configuração global (fallback)</li>
-     * </ol>
+     * O limite que vale para a requisição e o que o contador dele conta.
      *
-     * @param path Path da requisição
-     * @return Configuração de rate limit aplicável
+     * @param config     Configuração aplicável
+     * @param subject    O que o contador conta, além do IP: o molde da rota, ou {@link #NO_ROUTE}
+     * @param configured {@code true} quando a configuração veio de {@link #configureRateLimit},
+     *                   não do limite global
      */
-    private static RateLimitConfig getRateLimitConfig(String path) {
-        RateLimitConfig exact = RATE_LIMIT_CONFIGS.get(path);
-        if (exact != null) return exact;
-        for (Map.Entry<String, RateLimitConfig> entry : RATE_LIMIT_CONFIGS.entrySet())
-            if (matchesPathPattern(path, entry.getKey())) return entry.getValue();
-        return new RateLimitConfig(globalReqSec, globalReqMin, globalBlockSec);
+    private record Limit(RateLimitConfig config, String subject, boolean configured) {
     }
 
     /**
-     * Verifica se um path corresponde a um padrão (suporta curingas {@code /*} e segmentos variáveis {@code {param}}).
+     * Resolve o limite da requisição.
      *
-     * @param path    Path real da requisição
-     * @param pattern Padrão de configuração
-     * @return {@code true} se o path corresponde ao padrão
+     * <p>A configuração vem do caminho, em ordem de precedência: correspondência exata, o padrão
+     * mais específico que casa (ver {@link #configureRateLimit}), e a configuração global.</p>
+     *
+     * <h4>O contador é da rota, não do caminho</h4>
+     * <p>O contador era chaveado pelo caminho exato. Cada caminho diferente abria uma entrada nova
+     * nos mapas, que ficava cinco minutos — e o caminho é o cliente quem escolhe: um IP pedindo
+     * {@code /x/1}, {@code /x/2}… com 7 KB de texto cada, a 30 por segundo, segurava 70 MB sem ser
+     * recusado uma vez sequer, e quinze IPs derrubavam o contêiner por falta de memória. O mesmo
+     * defeito esvaziava o limite configurado com curinga: em {@code /api/cupom/*}, cada código
+     * tentado ganhava o próprio contador, e o limite de 5 por minuto não segurava tentativa
+     * nenhuma.</p>
+     * <p>Agora o contador é do <strong>molde</strong> da rota que vai atender o pedido
+     * ({@code /api/cupom/{codigo}}): o número de moldes é o número de rotas da aplicação, e todos
+     * os códigos dividem o limite, como ele quer dizer. Caminho que não é rota — 404, varredura,
+     * arquivo com extensão fora da lista de estáticos — cai num balde só por IP
+     * ({@link #NO_ROUTE}). Um limite configurado para {@code /api/*} continua valendo por rota,
+     * e não para a pasta inteira.</p>
+     *
+     * @param ctx       Contexto da requisição
+     * @param path      Path canônico
+     * @param webSocket {@code true} no upgrade de WebSocket
+     * @return O limite e o que ele conta
      */
-    /** Cache de regex compiladas para padrões de path com parâmetros ({@code {id}}). */
-    private static final Map<String, Pattern> PATTERN_REGEX_CACHE = new ConcurrentHashMap<>();
+    private static Limit resolveLimit(Context ctx, String path, boolean webSocket) {
+        String subject = webSocket ? webSocketTemplate(path) : routeTemplate(ctx, path);
+        RateLimitConfig exact = RATE_LIMIT_CONFIGS.get(path);
+        if (exact != null) return new Limit(exact, subject, true);
+        for (PathRule rule : rateLimitRules) {
+            if (!rule.matches(path)) continue;
+            RateLimitConfig config = RATE_LIMIT_CONFIGS.get(rule.pattern());
+            if (config != null) return new Limit(config, subject, true);
+        }
+        return new Limit(globalConfig, subject, false);
+    }
 
-    private static boolean matchesPathPattern(String path, String pattern) {
-        if (pattern.endsWith("/*"))
-            return path.startsWith(pattern.substring(0, pattern.length() - 2));
-        Pattern regex = PATTERN_REGEX_CACHE.computeIfAbsent(pattern, p ->
-                Pattern.compile(p.replaceAll("\\{[^}]+}", "[^/]+")));
-        return regex.matcher(path).matches();
+    /**
+     * Molde da rota HTTP que vai atender o pedido ({@code /api/pedidos/{id}}), ou
+     * {@link #NO_ROUTE}. {@code HEAD} sem rota própria é atendido pela de {@code GET}.
+     */
+    private static String routeTemplate(Context ctx, String path) {
+        Javalin app = javalinInstance;
+        if (app == null) return NO_ROUTE;
+        HandlerType method = ctx.method();
+        ParsedEndpoint route = app.unsafe.internalRouter.findFirstHttpHandlerEntry(method, path);
+        if (route == null && method == HandlerType.HEAD) {
+            route = app.unsafe.internalRouter.findFirstHttpHandlerEntry(HandlerType.GET, path);
+        }
+        return route == null ? NO_ROUTE : route.endpoint.path;
+    }
+
+    /** Molde da rota WebSocket que vai atender o upgrade, ou {@link #NO_ROUTE}. */
+    private static String webSocketTemplate(String path) {
+        Javalin app = javalinInstance;
+        if (app == null) return NO_ROUTE;
+        for (WsHandlerEntry entry : app.unsafe.internalRouter.allWsHandlers()) {
+            if (entry.getType() == WsHandlerType.WEBSOCKET && entry.matches(path)) return entry.getPath();
+        }
+        return NO_ROUTE;
+    }
+
+    /** Guarda a configuração e recompila os padrões com curinga. */
+    private static void putRateLimit(String pattern, RateLimitConfig config) {
+        synchronized (RATE_LIMIT_CONFIGS) {
+            RATE_LIMIT_CONFIGS.put(pattern, config);
+            rateLimitRules = compileRules(RATE_LIMIT_CONFIGS.keySet());
+        }
+    }
+
+    /** Os padrões com curinga do conjunto, compilados, do mais específico ao menos. */
+    private static List<PathRule> compileRules(Set<String> patterns) {
+        List<PathRule> rules = new ArrayList<>();
+        for (String pattern : patterns) {
+            PathRule rule = PathRule.compile(pattern);
+            if (rule.wildcard()) rules.add(rule);
+        }
+        rules.sort(Comparator.comparingInt(PathRule::specificity).reversed());
+        return List.copyOf(rules);
+    }
+
+    /**
+     * Padrão de path compilado <strong>uma vez</strong>, quando é configurado.
+     *
+     * <p>Antes, o padrão virava regex a cada requisição, e o texto entrava cru: um
+     * {@code addUnlimitedPath("*")} lançava {@code PatternSyntaxException} em toda requisição
+     * (o site inteiro em 500), o {@code .} casava com qualquer caractere, e {@code /api/*}
+     * valia também para {@code /apiary}. Agora cada trecho literal é citado, o curinga final
+     * respeita a divisão de segmento, e vence o padrão mais específico — não o primeiro que o
+     * mapa devolvesse.</p>
+     *
+     * @param pattern     Padrão canônico, como configurado
+     * @param regex       Expressão compilada
+     * @param specificity Caracteres literais do padrão: quanto mais, mais específico
+     * @param wildcard    {@code false} para caminho exato (resolvido por busca direta)
+     */
+    private record PathRule(String pattern, Pattern regex, int specificity, boolean wildcard) {
+
+        static PathRule compile(String pattern) {
+            String[] segments = pattern.split("/", -1);
+            StringBuilder regex = new StringBuilder();
+            int literal = 0;
+            boolean wildcard = false;
+            for (int i = 1; i < segments.length; i++) {
+                String segment = segments[i];
+                boolean last = i == segments.length - 1;
+                if (last && (segment.equals("*") || segment.equals("**"))) {
+                    regex.append("(?:/.*)?"); // o prefixo e tudo abaixo dele
+                    wildcard = true;
+                } else if (segment.equals("*") || isParameter(segment, '{', '}')) {
+                    regex.append("/[^/]+");
+                    wildcard = true;
+                } else if (isParameter(segment, '<', '>')) {
+                    regex.append("/.+"); // como no Javalin: <param> aceita barras
+                    wildcard = true;
+                } else {
+                    regex.append('/').append(Pattern.quote(segment));
+                    literal += segment.length();
+                }
+            }
+            if (regex.isEmpty()) regex.append('/');
+            return new PathRule(pattern, Pattern.compile(regex.toString()), literal, wildcard);
+        }
+
+        private static boolean isParameter(String segment, char open, char close) {
+            return segment.length() > 2 && segment.charAt(0) == open && segment.charAt(segment.length() - 1) == close;
+        }
+
+        boolean matches(String path) {
+            return regex.matcher(path).matches();
+        }
+    }
+
+    /**
+     * Forma canônica do path: barras repetidas viram uma, e a barra final sai.
+     *
+     * <p>É a mesma normalização que o roteador do Javalin aplica ({@code ignoreTrailingSlashes}
+     * e {@code treatMultipleSlashesAsSingleSlash}). Sem ela, {@code /api//login},
+     * {@code /api/login/} e {@code //api/login} chegavam à rota de login, mas cada um com os
+     * próprios contadores e sem casar com a configuração de {@code /api/login}: girando entre
+     * sessenta variações, o limite de 5 tentativas por minuto virava 1.700.</p>
+     *
+     * @param raw Path como veio na requisição
+     * @return Path canônico
+     */
+    static String canonicalPath(String raw) {
+        if (raw == null || raw.isEmpty()) return "/";
+        String path = raw.contains("//") ? MULTIPLE_SLASHES.matcher(raw).replaceAll("/") : raw;
+        if (path.length() > 1 && path.endsWith("/")) path = path.substring(0, path.length() - 1);
+        return path.charAt(0) == '/' ? path : "/" + path;
     }
 
     /**
      * Verifica se o path está na lista de paths sem limite.
      */
     private static boolean isUnlimitedPath(String path) {
-        return UNLIMITED_PATHS.stream().anyMatch(p -> matchesPathPattern(path, p));
+        if (UNLIMITED_PATHS.contains(path)) return true;
+        for (PathRule rule : unlimitedRules)
+            if (rule.matches(path)) return true;
+        return false;
     }
 
     /**
-     * Verifica se o path aponta para um recurso estático.
+     * A requisição é de arquivo estático?
      *
      * <p>Decidido pela extensão, e não por prefixo de pasta: projetos servem
      * estático de lugares diferentes ({@code /assets}, {@code /public},
      * {@code /styles}, a raiz), e uma lista de pastas erra em todos eles.</p>
      *
-     * @param path Path da requisição
+     * <p>E só para GET/HEAD de um caminho que <strong>não é rota</strong>. Decidido só pela
+     * extensão, a isenção valia para qualquer método e para rota de verdade: um
+     * {@code /sitemap.xml} dinâmico, ou uma rota com parâmetro chamada como
+     * {@code /api/busca/x.css}, passava por fora de todo limite e bloqueio.</p>
+     *
+     * @param ctx  Contexto da requisição
+     * @param path Path canônico
      * @return {@code true} se for arquivo estático
      */
-    private static boolean isStaticResource(String path) {
-        int ponto = path.lastIndexOf('.');
-        if (ponto < 0) return false;
-        int barra = path.lastIndexOf('/');
-        if (ponto < barra) return false;                  // ponto no meio do caminho, não é extensão
-        return STATIC_EXTENSIONS.contains(path.substring(ponto).toLowerCase());
+    private static boolean isStaticRequest(Context ctx, String path) {
+        HandlerType method = ctx.method();
+        if (method != HandlerType.GET && method != HandlerType.HEAD) return false;
+        int dot = path.lastIndexOf('.');
+        if (dot < 0 || dot < path.lastIndexOf('/')) return false; // ponto no meio do caminho, não é extensão
+        if (!STATIC_EXTENSIONS.contains(path.substring(dot).toLowerCase(Locale.ROOT))) return false;
+        Javalin app = javalinInstance;
+        return app == null || !app.unsafe.internalRouter.hasHttpHandlerEntry(HandlerType.GET, path);
+    }
+
+    /** GET/HEAD de uma página registrada pelo {@link HtmlRouteAPI}? */
+    private static boolean isPublicPage(Context ctx, String path) {
+        HandlerType method = ctx.method();
+        return (method == HandlerType.GET || method == HandlerType.HEAD) && HtmlRouteAPI.isPage(path);
     }
 
     /**
-     * Verifica se o path deve ser completamente ignorado pela verificação de segurança.
+     * Verifica se o path deve ser completamente ignorado pela verificação de segurança: o
+     * prefixo configurado, ou algo abaixo dele — nunca um nome que só começa igual.
      */
     private static boolean shouldIgnorePath(String path) {
-        return IGNORED_PATHS.stream().anyMatch(p -> path.toLowerCase().startsWith(p.toLowerCase()));
+        if (IGNORED_PATHS.isEmpty()) return false;
+        String lower = path.toLowerCase(Locale.ROOT);
+        for (String prefix : IGNORED_PATHS)
+            if (lower.equals(prefix) || lower.startsWith(prefix.endsWith("/") ? prefix : prefix + "/")) return true;
+        return false;
     }
 
     /**
-     * Extrai o IP do cliente.
+     * O bloqueio temporário ativo da chave, lido uma vez só. Remove do cache o que já venceu.
      *
-     * <p><b>Cabeçalho de proxy só vale se houver proxy declarado.</b> A versão
-     * anterior lia {@code X-Forwarded-For} sempre, e pegava o <i>primeiro</i>
-     * item da lista. Os dois pontos estavam errados:</p>
-     *
-     * <ul>
-     *   <li>Sem proxy na frente, o cabeçalho vem do cliente. Mandar
-     *       {@code X-Forwarded-For: 1.2.3.4} contornava rate limit e bloqueio
-     *       permanente de uma vez — e, escolhendo o IP de outra pessoa,
-     *       permitia fazer <i>ela</i> ser bloqueada;</li>
-     *   <li>o primeiro item é justamente a parte que o cliente escreve. Com
-     *       {@code $proxy_add_x_forwarded_for} no nginx, a lista fica
-     *       {@code <o que o cliente mandou>, <o que o proxy viu>} — o valor
-     *       confiável é o do <b>fim</b>.</li>
-     * </ul>
-     *
-     * <p>Por isso a contagem é a partir da direita: {@link #trustedProxyHops}
-     * diz quantos proxies seus existem, e pula-se exatamente esse tanto. O
-     * padrão é zero — sem configuração, vale só o IP do socket.</p>
-     *
-     * @param ctx Contexto da requisição
-     * @return IP do cliente
-     * @see #setTrustedProxyHops(int)
-     */
-    private static String getClientIp(Context ctx) {
-        if (trustedProxyHops <= 0) return ctx.ip();
-
-        String forwarded = ctx.header("X-Forwarded-For");
-        if (forwarded != null && !forwarded.isBlank()) {
-            String[] cadeia = forwarded.split(",");
-            // length - hops: pula os proxies confiáveis, contando do fim.
-            int i = Math.max(0, cadeia.length - trustedProxyHops);
-            String ip = cadeia[i].trim();
-            if (!ip.isBlank() && !"unknown".equalsIgnoreCase(ip)) return ip;
-        }
-
-        // Cabeçalhos de valor único: o proxy sobrescreve, então não há cadeia
-        // para percorrer. Só entram porque um proxy foi declarado.
-        for (String header : new String[]{"CF-Connecting-IP", "True-Client-IP", "X-Real-IP"}) {
-            String value = ctx.header(header);
-            if (value != null && !value.isBlank() && !"unknown".equalsIgnoreCase(value))
-                return value.split(",")[0].trim();
-        }
-        return ctx.ip();
-    }
-
-    /**
-     * Verifica se o IP resolvido é local ou de rede privada.
-     *
-     * <p>Serve de rede de segurança para proxy mal configurado: se o nginx não
-     * repassa o IP de origem, <b>todo mundo</b> chega como {@code 127.0.0.1} e
-     * passa a dividir o mesmo contador. Aí o primeiro visitante a esbarrar no
-     * limite bloqueia a loja inteira, para sempre. Um IP assim continua sendo
-     * limitado por rajada, mas nunca vira bloqueio permanente.</p>
-     *
-     * <p>A faixa {@code 100.64.0.0/10} (CGNAT) entra pelo mesmo motivo, e é o
-     * caso que mais aparece no Brasil: operadora de celular não tem IPv4 para
-     * cada assinante, então coloca milhares de pessoas atrás do mesmo
-     * endereço. Banir esse IP não pune ninguém em particular — tira a cidade
-     * inteira do ar, e ela nem descobre por quê.</p>
-     *
-     * @param ip IP resolvido por {@link #getClientIp(Context)}
-     * @return {@code true} se for loopback, rede privada ou CGNAT
-     */
-    private static boolean isSharedOrLocalIp(String ip) {
-        if (ip == null || ip.isBlank()) return true;
-        String v = ip.trim().toLowerCase();
-        if (v.startsWith("[")) v = v.substring(1);
-        return v.startsWith("127.") || v.equals("::1") || v.startsWith("0:0:0:0:0:0:0:1")
-                || v.startsWith("10.") || v.startsWith("192.168.")
-                || v.startsWith("169.254.") || v.startsWith("fc") || v.startsWith("fd")
-                || v.matches("^172\\.(1[6-9]|2\\d|3[01])\\..*")
-                || v.matches("^100\\.(6[4-9]|[7-9]\\d|1[01]\\d|12[0-7])\\..*");
-    }
-
-    /**
-     * Constrói a chave de rate limiting.
-     *
-     * <p>Quando {@code perIp = true}, a chave é {@code <ipHash>|<path>}, garantindo
-     * granularidade máxima: cada IP é limitado individualmente por path exato.</p>
-     * <p>Quando {@code perIp = false}, a chave é apenas o path, compartilhado entre todos os IPs.</p>
-     *
-     * @param ipHash Hash SHA-256 do IP
-     * @param path   Path exato da requisição
-     * @param cfg    Configuração de rate limit
-     * @return Chave de rate limiting
-     */
-    private static String buildRateLimitKey(String ipHash, String path, RateLimitConfig cfg) {
-        return cfg.isPerIp() ? (ipHash + "|" + path) : path;
-    }
-
-    /**
-     * Verifica se uma chave (IP ou path) está atualmente bloqueada.
-     * Remove automaticamente do cache se o bloqueio já expirou.
+     * <p>Uma leitura só: conferir "está bloqueado?" e depois buscar o bloqueio de novo para
+     * calcular o tempo restante devolvia {@code null} na segunda leitura quando o bloqueio
+     * vencia no meio — e a requisição terminava em 500.</p>
      *
      * @param key Chave de rate limiting
-     * @return {@code true} se ainda bloqueada
+     * @return O bloqueio ainda válido, ou {@code null}
      */
-    private static boolean isBlocked(String key) {
+    private static BlockInfo activeBlock(String key) {
         BlockInfo info = BLOCKED_CACHE.get(key);
-        if (info == null) return false;
-        if (Instant.now().getEpochSecond() >= info.getUnblockTime()) {
-            BLOCKED_CACHE.remove(key);
-            return false;
+        if (info == null) return null;
+        if (nowSeconds() >= info.getUnblockTime()) {
+            BLOCKED_CACHE.remove(key, info);
+            return null;
         }
-        return true;
+        return info;
     }
 
     /**
      * Verifica e registra a requisição nas janelas deslizantes de segundo e minuto.
      *
-     * @param key Chave de rate limiting
-     * @param cfg Configuração com os limites a aplicar
+     * @param key           Chave de rate limiting
+     * @param perSecondMax  Limite por segundo
+     * @param perMinuteMax  Limite por minuto
      * @return {@code true} se a requisição está dentro dos limites; {@code false} se excedeu
      */
-    private static boolean checkAndRecordRequest(String key, RateLimitConfig cfg) {
-        long now = Instant.now().getEpochSecond();
+    private static boolean checkAndRecordRequest(String key, int perSecondMax, int perMinuteMax) {
+        long now = nowSeconds();
         SlidingWindowCounter perSecond = SECOND_COUNTERS.computeIfAbsent(key, k -> new SlidingWindowCounter(1));
-        if (!perSecond.checkAndIncrement(cfg.getRequestsPerSecond(), now)) return false;
+        if (!perSecond.checkAndIncrement(perSecondMax, now)) return false;
         SlidingWindowCounter perMinute = MINUTE_COUNTERS.computeIfAbsent(key, k -> new SlidingWindowCounter(60));
-        return perMinute.checkAndIncrement(cfg.getRequestsPerMinute(), now);
+        return perMinute.checkAndIncrement(perMinuteMax, now);
     }
 
     /**
-     * Bloqueia uma chave por um número de segundos, limpa seus contadores
-     * e agenda remoção automática do cache.
+     * Bloqueia uma chave por um número de segundos e limpa seus contadores.
+     *
+     * <p>A remoção do bloqueio vencido fica com a leitura ({@link #activeBlock(String)}) e com a
+     * varredura de cada minuto. Antes, cada bloqueio agendava uma tarefa própria para daqui a
+     * até uma hora: sob ataque, eram milhares de tarefas pendentes segurando memória.</p>
      *
      * @param key     Chave de rate limiting a bloquear
      * @param seconds Duração do bloqueio em segundos
      */
     private static void blockKey(String key, long seconds) {
-        long unblockAt = Instant.now().getEpochSecond() + seconds;
-        BLOCKED_CACHE.put(key, new BlockInfo(unblockAt, key));
+        BLOCKED_CACHE.put(key, new BlockInfo(nowSeconds() + seconds, key));
         SECOND_COUNTERS.remove(key);
         MINUTE_COUNTERS.remove(key);
-        // Remove do cache após expiração para evitar acúmulo de memória
-        Task.runLater(() -> {
-            BlockInfo info = BLOCKED_CACHE.get(key);
-            if (info != null && info.getUnblockTime() == unblockAt)
-                BLOCKED_CACHE.remove(key);
-        }, seconds * 1_000L);
+    }
+
+    private static long nowSeconds() {
+        return Instant.now().getEpochSecond();
+    }
+
+    // ==================== REDIRECIONAMENTO .html ====================
+
+    /** GET/HEAD de um caminho terminado em {@code .html}, em qualquer caixa? */
+    private static boolean isHtmlAlias(Context ctx, String path) {
+        HandlerType method = ctx.method();
+        return (method == HandlerType.GET || method == HandlerType.HEAD)
+                && path.length() > 5 && path.regionMatches(true, path.length() - 5, ".html", 0, 5);
+    }
+
+    /**
+     * Destino do redirecionamento de {@code /pagina.html}: a rota da página.
+     *
+     * <p>O {@code replace(".html", "")} de antes tinha quatro defeitos: {@code //site.com/x.html}
+     * virava {@code Location: //site.com/x} e mandava o visitante para outro domínio;
+     * {@code /Pagina.HTML} redirecionava para si mesma para sempre; a query string se perdia; e
+     * {@code /index.html} ia para {@code /index}, que não existe. Agora o destino começa sempre
+     * por uma barra só, tira os cinco últimos caracteres (qualquer caixa), usa a rota da página
+     * registrada quando houver ({@code /blog/post.html} → {@code /post}) e mantém a query.</p>
+     */
+    private static String withoutHtmlExtension(Context ctx, String path) {
+        String target = path.substring(0, path.length() - 5);
+        String name = target.substring(target.lastIndexOf('/') + 1).toLowerCase(Locale.ROOT);
+        if (name.isEmpty() || name.equals("index")) target = "/";
+        else if (HtmlRouteAPI.isPage("/" + name)) target = "/" + name;
+        target = "/" + target.replaceFirst("^/+", "");
+
+        String query = ctx.queryString();
+        return query == null || query.isEmpty() ? target : target + "?" + query;
     }
 
     // ==================== PÁGINAS DE RESPOSTA ====================
@@ -1282,18 +1858,26 @@ public final class JavalinAPI {
      * framework: são quatro linhas de texto.</p>
      */
     private static final String DENY_STYLE =
-            "*{box-sizing:border-box}body{margin:0;min-height:100vh;display:flex;"
-            + "align-items:center;justify-content:center;padding:24px;background:#F4F4F5;"
+            "*{box-sizing:border-box}body{margin:0;min-height:100vh;display:flex;flex-direction:column;"
+            + "gap:20px;align-items:center;justify-content:center;padding:24px;background:#F4F4F5;"
             + "color:#18181B;font:16px/1.55 system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}"
             + "main{max-width:26rem;background:#fff;border-radius:14px;padding:32px;"
             + "box-shadow:0 1px 3px rgba(0,0,0,.1),0 8px 24px rgba(0,0,0,.06)}"
             + "h1{margin:0 0 12px;font-size:1.3rem;line-height:1.3}"
-            + "p{margin:0;color:#52525B}strong{color:#18181B}"
+            + "p{margin:0;color:#52525B}strong{color:#18181B}footer{font-size:.8rem;color:#71717A}"
             + "@media(prefers-color-scheme:dark){body{background:#18181B;color:#FAFAFA}"
-            + "main{background:#27272A;box-shadow:none}p{color:#A1A1AA}strong{color:#FAFAFA}}";
+            + "main{background:#27272A;box-shadow:none}p{color:#A1A1AA}strong{color:#FAFAFA}"
+            + "footer{color:#A1A1AA}}";
+
+    /** Envia a recusa decidida pelo limite. */
+    private static void sendDenial(Context ctx, String path, Denial denial) {
+        if (denial.permanent()) sendPermanentBlockPage(ctx, path);
+        else sendBlockPage(ctx, path, denial.seconds());
+    }
 
     /**
-     * Monta uma página de recusa e <b>encerra a requisição</b>.
+     * Monta a recusa e <b>encerra a requisição</b>: página para o navegador, JSON para quem
+     * chama a API.
      *
      * <p>O {@code skipRemainingHandlers()} é o ponto crítico, e não um detalhe.
      * Um {@code before} do Javalin não interrompe nada ao retornar: o servlet
@@ -1303,62 +1887,118 @@ public final class JavalinAPI {
      * fica errado, o que quebra o site (o navegador recusa CSS e JS com 4xx)
      * sem proteger coisa alguma.</p>
      *
-     * @param ctx    Contexto da requisição
-     * @param status Código HTTP da recusa
-     * @param titulo Título curto, em linguagem comum
-     * @param corpo  Explicação em uma frase (HTML já escapado pelo chamador)
+     * <p>A chamada de API ({@code fetch} de uma tela) recebe
+     * {@code {"error": …, "message": …}}: com HTML, o {@code res.json()} da tela quebrava e a
+     * pessoa via um erro genérico no lugar da explicação.</p>
+     *
+     * @param ctx        Contexto da requisição
+     * @param path       Path canônico
+     * @param status     Código HTTP da recusa
+     * @param code       Código curto da recusa, para quem trata o JSON
+     * @param title      Título curto, em linguagem comum
+     * @param message    Explicação em uma frase, sem HTML
+     * @param detail     A mesma explicação em HTML (já escapado)
+     * @param retryAfter Segundos até a liberação, ou 0 sem prazo exato
      */
-    private static void sendDenyPage(Context ctx, int status, String titulo, String corpo) {
-        ctx.html("<!DOCTYPE html><html lang=\"pt-BR\"><head><meta charset=\"UTF-8\">"
-                + "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-                + "<meta name=\"robots\" content=\"noindex\">"
-                + "<title>" + titulo + "</title><style>" + DENY_STYLE + "</style></head>"
-                + "<body><main><h1>" + titulo + "</h1><p>" + corpo + "</p></main></body></html>")
-                .status(status);
+    private static void sendDenyPage(Context ctx, String path, int status, String code, String title,
+            String message, String detail, long retryAfter) {
+        if (wantsJson(ctx, path)) {
+            ctx.status(status).contentType("application/json; charset=utf-8")
+                    .result("{\"error\":\"" + code + "\",\"message\":\"" + message + "\"}");
+        } else {
+            ctx.html(denyPageHtml(new DenyNotice(status, code, title, message, retryAfter), detail)).status(status);
+        }
         ctx.skipRemainingHandlers();
     }
 
     /**
-     * Envia uma página de bloqueio temporário com o tempo restante.
-     *
-     * @param ctx     Contexto da requisição
-     * @param seconds Segundos restantes até o desbloqueio
+     * HTML da recusa: a página do projeto ({@link #setDenyPage}), quando existe e funciona; senão,
+     * a padrão, com o crédito da Angatu Sistemas.
      */
-    private static void sendBlockPage(Context ctx, long seconds) {
-        long minutos = Math.max(1, Math.round(seconds / 60.0));
-        String espera = seconds < 90
-                ? "<strong>" + Math.max(1, seconds) + " segundos</strong>"
-                : "<strong>" + minutos + (minutos == 1 ? " minuto" : " minutos") + "</strong>";
-        sendDenyPage(ctx, StatusCode.TOO_MANY_REQUESTS.code(), "Muitos acessos seguidos",
-                "Chegaram pedidos demais deste aparelho em pouco tempo. "
-                + "Espere " + espera + " e tente de novo.");
+    private static String denyPageHtml(DenyNotice notice, String detail) {
+        Function<DenyNotice, String> custom = denyPage;
+        if (custom != null) {
+            try {
+                String html = custom.apply(notice);
+                if (html != null && !html.isBlank()) return html;
+                if (DENY_PAGE_FAILURE_LOGGED.compareAndSet(false, true)) {
+                    Console.warn("A página de recusa do projeto devolveu texto vazio; usando a padrão.");
+                }
+            } catch (Exception | StackOverflowError | LinkageError e) {
+                // Não só RuntimeException: um template que lança exceção verificada (por
+                // @SneakyThrows ou Kotlin) ou estoura a pilha virava 500 — com Retry-After de 15
+                // minutos, e sem página nenhuma.
+                if (DENY_PAGE_FAILURE_LOGGED.compareAndSet(false, true)) {
+                    Console.error("A página de recusa do projeto falhou; usando a padrão.", e);
+                }
+            }
+        }
+        return "<!DOCTYPE html><html lang=\"pt-BR\"><head><meta charset=\"UTF-8\">"
+                + "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+                + "<meta name=\"robots\" content=\"noindex\">"
+                + "<title>" + notice.title() + "</title><style>" + DENY_STYLE + "</style></head>"
+                + "<body><main><h1>" + notice.title() + "</h1><p>" + detail + "</p></main>"
+                + "<footer>Desenvolvido por Angatu Sistemas</footer></body></html>";
+    }
+
+    /** Quem pediu espera JSON? Navegação de página nunca; chamada de API sim. */
+    private static boolean wantsJson(Context ctx, String path) {
+        String accept = ctx.header("Accept");
+        if (accept != null && accept.contains("text/html")) return false;
+        if (accept != null && accept.contains("application/json")) return true;
+        String type = ctx.header("Content-Type");
+        return (type != null && type.toLowerCase(Locale.ROOT).contains("json")) || path.startsWith("/api/");
     }
 
     /**
-     * Envia uma página de bloqueio permanente.
+     * Envia a recusa de bloqueio temporário, com o tempo restante e o cabeçalho
+     * {@code Retry-After}.
      *
-     * @param ctx Contexto da requisição
+     * @param ctx     Contexto da requisição
+     * @param path    Path canônico
+     * @param seconds Segundos restantes até o desbloqueio
      */
-    private static void sendPermanentBlockPage(Context ctx) {
+    private static void sendBlockPage(Context ctx, String path, long seconds) {
+        long remaining = Math.max(1, seconds);
+        long minutes = Math.max(1, Math.round(remaining / 60.0));
+        String wait = remaining < 90
+                ? remaining + (remaining == 1 ? " segundo" : " segundos")
+                : minutes + (minutes == 1 ? " minuto" : " minutos");
+        ctx.header("Retry-After", Long.toString(remaining));
+        sendDenyPage(ctx, path, StatusCode.TOO_MANY_REQUESTS.code(), "too_many_requests", "Muitos acessos seguidos",
+                "Chegaram pedidos demais deste aparelho em pouco tempo. Espere " + wait + " e tente de novo.",
+                "Chegaram pedidos demais deste aparelho em pouco tempo. "
+                + "Espere <strong>" + wait + "</strong> e tente de novo.", remaining);
+    }
+
+    /**
+     * Envia a recusa de bloqueio longo.
+     *
+     * @param ctx  Contexto da requisição
+     * @param path Path canônico
+     */
+    private static void sendPermanentBlockPage(Context ctx, String path) {
         /* Dizer que passa em 24 horas não é detalhe de texto: sem prazo, a
            página soa definitiva e quem foi bloqueado por engano simplesmente
            desiste do site — nunca aparece para reclamar, e o erro nunca é
            descoberto. */
-        sendDenyPage(ctx, StatusCode.FORBIDDEN.code(), "Acesso bloqueado",
-                "Este acesso foi bloqueado por atividade fora do normal e "
-                + "volta ao normal em até <strong>24 horas</strong>. "
-                + "Se você acha que houve engano, fale com o suporte.");
+        sendDenyPage(ctx, path, StatusCode.FORBIDDEN.code(), "blocked", "Acesso bloqueado",
+                "Este acesso foi bloqueado por atividade fora do padrão e será liberado automaticamente "
+                + "em até 24 horas. Se você acha que houve engano, fale com o suporte.",
+                "Este acesso foi bloqueado por atividade fora do padrão e será liberado automaticamente "
+                + "em até <strong>24 horas</strong>. Se você acha que houve engano, fale com o suporte.", 0);
     }
 
     /**
      * Envia a recusa de conteúdo suspeito (SQLi/XSS detectado na requisição).
      *
-     * @param ctx Contexto da requisição
+     * @param ctx  Contexto da requisição
+     * @param path Path canônico
      */
-    private static void sendDeniedPage(Context ctx) {
-        sendDenyPage(ctx, StatusCode.FORBIDDEN.code(), "Pedido recusado",
-                "O conteúdo enviado tem trechos que o sistema não aceita. "
-                + "Refaça o pedido sem símbolos ou comandos.");
+    private static void sendDeniedPage(Context ctx, String path) {
+        String message = "O conteúdo enviado tem trechos que o sistema não aceita. "
+                + "Refaça o pedido sem símbolos ou comandos.";
+        sendDenyPage(ctx, path, StatusCode.FORBIDDEN.code(), "rejected", "Pedido recusado", message, message, 0);
     }
 
     // ==================== REGISTRO DE ROTAS ====================
@@ -1378,30 +2018,6 @@ public final class JavalinAPI {
     // ==================== HELPERS (CARREGAMENTO LAZY) ====================
 
     /**
-     * Configura o plugin SSL/TLS do Javalin (javalin-ssl), usado somente quando
-     * a aplicação pede HTTPS gerenciado na inicialização. Classe separada para
-     * que a {@link JavalinAPI} possa ser vinculada sem a dependência do plugin —
-     * o guard de dependência roda antes deste helper ser tocado.
-     */
-    private static final class SslSetup {
-
-        private SslSetup() {
-        }
-
-        static void configure(io.javalin.config.JavalinConfig config, File folderCerts, int port) {
-            SslPlugin sslPlugin = new SslPlugin(ssl -> {
-                ssl.pemFromPath(folderCerts + "/fullchain.pem", folderCerts + "/privkey.pem");
-                ssl.secure = true;
-                ssl.insecure = false;
-                ssl.redirect = true;
-                ssl.securePort = port;
-                ssl.insecurePort = port + 1;
-            });
-            config.registerPlugin(sslPlugin);
-        }
-    }
-
-    /**
      * Descobre e registra todas as implementações de {@link Route} no classpath.
      * Classe separada para manter as referências à Reflections fora do bytecode
      * da {@link JavalinAPI} (link sem a dependência + guard com mensagem clara).
@@ -1411,10 +2027,27 @@ public final class JavalinAPI {
         private RouteDiscovery() {
         }
 
+        /**
+         * Onde procurar rotas: o {@code java.class.path}, os JARs listados no manifesto dele e
+         * os carregadores de classe da aplicação.
+         *
+         * <p>Só o {@code java.class.path} não bastava. No {@code mvn exec:java} ele é o
+         * classpath do próprio Maven — as classes do projeto estão num carregador à parte — e no
+         * JAR que só aponta para as dependências pelo manifesto ele é esse JAR sozinho. Nos dois
+         * casos a busca não achava rota nenhuma, e o servidor subia respondendo 404 a tudo.</p>
+         */
+        static java.util.Set<java.net.URL> classpathUrls() {
+            java.util.Collection<java.net.URL> javaClassPath = org.reflections.util.ClasspathHelper.forJavaClassPath();
+            java.util.Set<java.net.URL> urls = new java.util.LinkedHashSet<>(javaClassPath);
+            urls.addAll(org.reflections.util.ClasspathHelper.forManifest(javaClassPath));
+            urls.addAll(org.reflections.util.ClasspathHelper.forClassLoader());
+            return urls;
+        }
+
         static void scanAndRegister() {
             Reflections reflections = new Reflections(
                     new org.reflections.util.ConfigurationBuilder()
-                            .setUrls(org.reflections.util.ClasspathHelper.forJavaClassPath())
+                            .setUrls(classpathUrls())
                             .setScanners(Scanners.SubTypes)
             );
             for (Class<? extends Route> routeClass : reflections.getSubTypesOf(Route.class)) {
