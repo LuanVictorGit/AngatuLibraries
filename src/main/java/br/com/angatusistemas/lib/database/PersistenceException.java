@@ -1,9 +1,10 @@
 package br.com.angatusistemas.lib.database;
 
 /**
- * Falha ao falar com o banco: conexão indisponível, arquivo travado, disco cheio, SQL recusado.
+ * Falha ao falar com o banco: conexão indisponível, arquivo travado, disco cheio, SQL recusado,
+ * ou a vez de gravar que não chegou dentro do prazo.
  *
- * <h3>Por que esta classe existe</h3>
+ * <h2>Por que esta classe existe</h2>
  * <p>Até a versão anterior, {@code read} e {@code write} capturavam a {@code SQLException},
  * escreviam no log e <strong>devolviam um valor de recuo</strong>. O problema é que esse valor de
  * recuo também é um resultado legítimo:</p>
@@ -23,10 +24,10 @@ package br.com.angatusistemas.lib.database;
  * gravação destrutiva por cima de configuração real — e o sintoma que chegava ao usuário não era
  * "deu erro", era "minhas configurações voltaram de fábrica".</p>
  *
- * <p>Por isso a falha agora <strong>sobe</strong>. Uma requisição que devolve erro é honesta;
- * uma que devolve "vazio" faz o chamador apagar dados. Quem precisa de tolerância captura esta
- * exceção explicitamente — e aí a decisão de seguir em frente está escrita no código, em vez de
- * escondida aqui dentro.</p>
+ * <p>Por isso a falha agora <strong>sobe</strong> — dentro ou fora de transação, sempre como
+ * esta exceção. Uma requisição que devolve erro é honesta; uma que devolve "vazio" faz o
+ * chamador apagar dados. Quem precisa de tolerância captura esta exceção explicitamente — e aí a
+ * decisão de seguir em frente está escrita no código, em vez de escondida aqui dentro.</p>
  *
  * <p>É {@code RuntimeException} de propósito: a persistência aparece em praticamente toda
  * assinatura da biblioteca, e obrigar {@code throws} em cada uma delas só produziria
@@ -38,6 +39,21 @@ public class PersistenceException extends RuntimeException {
 
     private static final long serialVersionUID = 1L;
 
+    /**
+     * Falha sem exceção de origem — por exemplo, a vez de gravar que não chegou no prazo.
+     *
+     * @param message Descrição da falha, com a operação que a sofreu
+     */
+    public PersistenceException(String message) {
+        super(message);
+    }
+
+    /**
+     * Falha causada por outra exceção, normalmente a {@code SQLException} do driver.
+     *
+     * @param message Descrição da falha, com a operação que a sofreu
+     * @param cause   Exceção de origem
+     */
     public PersistenceException(String message, Throwable cause) {
         super(message, cause);
     }
