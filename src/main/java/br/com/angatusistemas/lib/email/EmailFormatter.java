@@ -1,194 +1,214 @@
 package br.com.angatusistemas.lib.email;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
-import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Random;
 import java.util.Set;
 import java.util.UUID;
-import java.util.regex.Pattern;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * [PT] Classe utilitária para formatação e validação de endereços de e-mail.
- * <p>
- * Fornece validação rigorosa seguindo a RFC 5322 (com adaptações para uso
- * prático), normalização, extração de domínio, formatação de nome + e-mail, e
- * <b>rejeição automática de e-mails temporários/descartáveis</b>.
- * </p>
- * <p>
- * <b>Exemplos de uso:</b>
- * 
+ * Classe utilitária para formatação e validação de endereços de e-mail.
+ *
+ * <p><strong>Propósito:</strong> validar o formato de um endereço (RFC 5321/5322, com as
+ * adaptações práticas descritas abaixo), normalizar, extrair domínio e parte local, mascarar
+ * para exibição, montar {@code "Nome <e-mail>"} e <strong>recusar e-mails
+ * temporários/descartáveis</strong>.</p>
+ *
+ * <p><strong>Quando usar:</strong> no cadastro e na troca de e-mail de usuários reais
+ * ({@link #isValidNormal(String)}) e para mensagens de erro prontas para exibir
+ * ({@link #getValidationErrorMessage(String)}).</p>
+ *
+ * <p><strong>O que é validado:</strong></p>
+ * <ul>
+ * <li>Espaços nas pontas são ignorados em toda a classe: {@code "x@mailinator.com "} é o mesmo
+ * endereço que {@code "x@mailinator.com"}. Antes, o espaço final ia parar no domínio extraído
+ * e fazia o domínio descartável passar direto pela checagem.</li>
+ * <li>Até 254 caracteres no total (RFC 5321), até 64 na parte local e rótulos de domínio de até
+ * 63. O tamanho é conferido antes de qualquer outra análise, e a análise não usa expressão
+ * regular: um texto de 4 KB derrubava a validação antiga com {@code StackOverflowError}.</li>
+ * <li>Parte local: letras e dígitos ASCII e os símbolos {@code ! # $ % & ' * + - / = ? ^ _ ` { | } ~}
+ * da RFC 5322, em blocos separados por um único ponto. Aceita {@code o'brien@...}, como o
+ * {@code <input type="email">} do navegador aceita — o servidor não deve recusar o que a tela
+ * deixou passar. {@link #isValidStrict(String)} usa um conjunto conservador (letras, dígitos e
+ * {@code + - _}).</li>
+ * <li>Domínio: dois ou mais rótulos de letras, dígitos e hífen (sem hífen nas pontas) e domínio
+ * de topo com duas letras ou mais, ou IDN em punycode ({@code xn--...}).</li>
+ * </ul>
+ *
+ * <p><strong>Descartáveis:</strong> a lista de provedores conhecidos (permitidos) é consultada
+ * primeiro e sempre vence. Depois, o domínio <em>e cada domínio pai</em> são procurados na lista
+ * de descartáveis: {@code x@qualquer.mailinator.com} é recusado como {@code x@mailinator.com}. A
+ * lista de descartáveis pode ser alterada com a aplicação no ar
+ * ({@link #addDisposableDomain(String)}, {@link #removeDisposableDomain(String)}), com segurança
+ * entre threads.</p>
+ *
+ * <p><strong>Exemplo:</strong></p>
  * <pre>
- * // Validação normal (rejeita e-mails temporários)
- * boolean valido = EmailFormatter.isValidNormal("usuario@gmail.com"); // true
- * boolean invalido = EmailFormatter.isValidNormal("teste@mailinator.com"); // false
- *
- * // Formatação para exibição
- * String formatado = EmailFormatter.format("Usuário", "usuario@exemplo.com");
- *
- * // Extração de domínio
- * String dominio = EmailFormatter.getDomain("usuario@exemplo.com");
+ * EmailFormatter.isValidNormal("usuario@gmail.com");        // true
+ * EmailFormatter.isValidNormal("teste@mailinator.com");     // false (descartável)
+ * EmailFormatter.format("Usuário", "usuario@exemplo.com");  // "Usuário &lt;usuario@exemplo.com&gt;"
+ * EmailFormatter.getDomain("usuario@exemplo.com");          // "exemplo.com"
  * </pre>
- * </p>
  *
- * [EN] Utility class for formatting and validating email addresses.
- * <p>
- * Provides strict validation following RFC 5322 (with practical adaptations),
- * normalization, domain extraction, name+email formatting, and <b>automatic
- * rejection of temporary/disposable emails</b>.
- * </p>
- * <p>
- * <b>Usage examples:</b>
- * 
- * <pre>
- * // Normal validation (rejects temporary emails)
- * boolean valid = EmailFormatter.isValidNormal("user@gmail.com"); // true
- * boolean invalid = EmailFormatter.isValidNormal("test@mailinator.com"); // false
- *
- * // Format for display
- * String formatted = EmailFormatter.format("User", "user@example.com");
- *
- * // Domain extraction
- * String domain = EmailFormatter.getDomain("user@example.com");
- * </pre>
- * </p>
+ * <p><strong>Limitações:</strong> valida o formato, não a existência — só um envio confirma que a
+ * caixa existe. Parte local entre aspas, IP literal ({@code [1.2.3.4]}) e caracteres fora do ASCII
+ * (SMTPUTF8) são recusados de propósito. A lista de descartáveis é estática e incompleta: serviços
+ * novos surgem o tempo todo.</p>
  *
  * @author Angatu Sistemas
  * @see <a href="https://tools.ietf.org/html/rfc5322">RFC 5322</a>
+ * @see <a href="https://tools.ietf.org/html/rfc5321">RFC 5321</a>
  */
 public final class EmailFormatter {
 
-	// Regex para validação de e-mail (RFC 5322 adaptado para uso prático)
-	private static final String EMAIL_REGEX = "^[a-zA-Z0-9_+&*-]+(?:\\.[a-zA-Z0-9_+&*-]+)*@(?:[a-zA-Z0-9-]+\\.)+[a-zA-Z]{2,}$";
-	private static final Pattern EMAIL_PATTERN = Pattern.compile(EMAIL_REGEX, Pattern.CASE_INSENSITIVE);
+	/**
+	 * Tamanho máximo do endereço: o caminho SMTP tem 256 octetos, menos os sinais {@code <} e
+	 * {@code >} (RFC 5321, 4.5.3.1.3). Conferido antes de qualquer outra análise.
+	 */
+	private static final int MAX_ADDRESS_LENGTH = 254;
+	/** Tamanho máximo da parte local (RFC 5321, 4.5.3.1.1). */
+	private static final int MAX_LOCAL_PART_LENGTH = 64;
+	/**
+	 * Tamanho máximo de um domínio (RFC 1035). Também limita o custo da busca por domínios pai em
+	 * {@link #isDisposableDomain(String)}, que recebe texto de fora.
+	 */
+	private static final int MAX_DOMAIN_LENGTH = 253;
+	/** Tamanho máximo de um rótulo de domínio (RFC 1035). */
+	private static final int MAX_LABEL_LENGTH = 63;
+	/** Símbolos "atext" da RFC 5322 aceitos na parte local, além de letras e dígitos ASCII. */
+	private static final String LOCAL_PART_SYMBOLS = "!#$%&'*+-/=?^_`{|}~";
+	/** Subconjunto conservador de símbolos usado por {@link #isValidStrict(String)}. */
+	private static final String STRICT_LOCAL_PART_SYMBOLS = "+-_";
+	/** Caracteres que obrigam o nome de exibição a sair entre aspas ("specials" da RFC 5322). */
+	private static final String DISPLAY_NAME_SPECIALS = "()<>[]:;@\\,.\"";
 
-	// Regex para validação mais rigorosa (com suporte a caracteres especiais)
-	private static final String STRICT_EMAIL_REGEX = "^(?=.{1,64}@)[A-Za-z0-9\\+_\\-]+(\\.[A-Za-z0-9\\+_\\-]+)*@[A-Za-z0-9\\-]+(\\.[A-Za-z0-9\\-]+)*(\\.[A-Za-z]{2,})$";
-	private static final Pattern STRICT_EMAIL_PATTERN = Pattern.compile(STRICT_EMAIL_REGEX, Pattern.CASE_INSENSITIVE);
-
-	// Domínios de e-mail temporário/descartável (bloqueados)
-	private static final Set<String> DISPOSABLE_DOMAINS = new HashSet<>(Arrays.asList(
-			// Gerais
-			"tempmail.com", "10minutemail.com", "guerrillamail.com", "mailinator.com", "yopmail.com", "throwaway.email",
-			"sharklasers.com", "guerrillamail.net", "guerrillamail.org", "guerrillamail.biz", "mailmetrash.com",
-			"trashmail.com", "temp-mail.org", "tempmail.net", "tempinbox.com", "fakeinbox.com", "getnada.com",
-			"mailnator.com", "dispostable.com", "spambox.us", "mintemail.com", "mytrashmail.com", "trash2009.com",
-			"trashdevil.com", "trashymail.com", "tyldd.com", "uggsrock.com", "wegwerfmail.de", "wegwerfmail.net",
-			"wegwerfmail.org", "wh4f.org", "whyspam.me", "willselfdestruct.com", "winemaven.info", "wronghead.com",
-			"wuzup.net", "xagloo.com", "xemaps.com", "xents.com", "xmaily.com", "xoxy.net", "yep.it", "yogamaven.com",
-			"yopmail.fr", "yopmail.net", "ypmail.webarnak.fr.eu.org",
-
-			// Adicionais
-			"maildrop.cc", "guerrillamail.biz", "guerrillamail.org", "guerrillamail.net", "guerrillamail.com",
-			"spam4.me", "spamspot.com", "tempemail.net", "tempmail.net", "temp-mail.net", "temp-mail.org",
-			"tempinbox.co", "tempinbox.com", "tempomail.fr", "temporarily.de", "temporario.email", "temporary-mail.net",
-			"temporaryemail.net", "temporayemail.net", "temporry.com", "temporry.net", "temporry.org",
-			"temporryemail.com", "temporryemail.net", "temporryemail.org", "temporrymail.com", "temporrymail.net",
-			"temporrymail.org", "temporrymail.co", "10minut.xyz", "10minute.com", "10minutemail.co.za",
-			"10minutemail.com", "10minutemail.net", "10minutemail.org", "10minutemail.us", "10minutemail.xyz",
-			"10minutemailz.com", "10minutesmail.com", "10minutesmail.net", "10minutesmail.org", "10minutesmail.us",
-			"10minutesmail.xyz", "1secmail.com", "1secmail.net", "1secmail.org", "20minutemail.com", "20minutemail.it",
-			"20minutemail.net", "2prong.com", "30minutemail.com", "30minutemail.org", "33mail.com", "3d-painting.com",
-			"3mail.fi", "4warding.com", "4warding.net", "4warding.org", "5mail.xyz", "60minutemail.com", "6mail.xyz",
-			"7mail.xyz", "8mail.xyz", "9mail.xyz", "abyssmail.com", "acmemail.net", "aeneasmail.com", "airmail.net",
-			"airmailhub.com", "airpost.net", "allmail.net", "altmails.com", "amail.com", "amail4.me", "amail.club",
-			"amail.to", "amail.xyz", "anonymbox.com", "antichef.com", "antichef.net", "antireg.com", "antireg.ru",
-			"antispam.de", "antispam24.de", "antispammail.de", "armyspy.com", "artman-mail.com", "artman-mail.de",
-			"artman-mail.net", "artman-mail.org", "averdov.com", "averdov.net", "averdov.org", "averdov.su",
-			"averdov.xyz", "azazazatashkent.tk", "baxomale.ht.cx", "beefmilk.com", "bigstring.com", "binkmail.com",
-			"bizmail.net", "bobmail.info", "bobmurch.com", "bofthew.com", "bongobongo.ga", "bongobongo.gq",
-			"bongobongo.ml", "bongobongo.tk", "brefmail.com", "brennendesreich.de", "broadbandninja.com", "bsnow.net",
-			"buon.club", "burnthespam.info", "burstmail.info", "busiwebs.com", "buygoldmail.com", "c2.hu", "c2.li",
-			"c2.lv", "c2.si", "c2.vc", "cachedot.net", "card.zp.ua", "casualdx.com", "cbair.com", "cechire.com",
-			"cek.pm", "cellurl.com", "centermail.com", "centermail.net", "chammy.info", "cheatmail.de", "chogmail.com",
-			"choicemail1.com", "clixser.com", "cmail.club", "cmail.com", "cmail.net", "cmail.org", "coldemail.info",
-			"cool.fr.nf", "courriel.fr.nf", "courrieltemporaire.com", "crapmail.org", "curryworld.de", "cust.in",
-			"d3p.dk", "dacoolest.com", "dandikmail.com", "dayrep.com", "dcemail.com", "deadaddress.com", "deadspam.com",
-			"deagot.com", "dealja.com", "despam.it", "despammed.com", "devnullmail.com", "dfgh.net",
-			"digitalsanctuary.com", "dingbone.com", "discard.email", "discardmail.com", "discardmail.de",
-			"disposableaddress.com", "disposableemail.com", "disposableemail.org", "disposableinbox.com", "dispose.it",
-			"disposeamail.com", "disposemail.com", "dispostable.com", "divermail.com", "dm.w3sites.net", "dodgeit.com",
-			"dodgit.com", "dodgit.org", "doiea.com", "dolphinnet.net", "donebyng.com", "dotman.de", "dotmsg.com",
-			"drdrb.com", "drdrb.net", "drdrb.org", "drdrb.ru", "drdrb.su", "drdrb.xyz", "drdrba.com", "drdrba.net",
-			"drdrba.org", "drdrba.ru", "drdrba.su", "drdrba.xyz", "drdrbb.com", "drdrbb.net", "drdrbb.org", "drdrbb.ru",
-			"drdrbb.su", "drdrbb.xyz", "drdrbc.com", "drdrbc.net", "drdrbc.org", "drdrbc.ru", "drdrbc.su", "drdrbc.xyz",
-			"drdrbd.com", "drdrbd.net", "drdrbd.org", "drdrbd.ru", "drdrbd.su", "drdrbd.xyz", "drdrbe.com",
-			"drdrbe.net", "drdrbe.org", "drdrbe.ru", "drdrbe.su", "drdrbe.xyz", "dropmail.me", "dt.com", "duam.net",
-			"dudmail.com", "dump-email.info", "dumpandjunk.com", "dumpmail.de", "dumpyemail.com", "dwjworld.com",
-			"e-mail.com", "e-mail.org", "e4ward.com", "easytrashmail.com", "einrot.com", "einrot.de", "eintagsmail.de",
-			"email60.com", "emailacc.com", "emailage.ga", "emailage.gq", "emailage.ml", "emailage.tk", "emaildienst.de",
-			"emailfake.com", "emailforyou.net", "emailgo.de", "emailias.com", "emailigo.com", "emailinfive.com",
-			"emailisvalid.com", "emaillime.com", "emailmiser.com", "emailproxsy.com", "emailresort.com", "emails.ga",
-			"emails.gq", "emails.ml", "emails.tk", "emailsense.com", "emailspam.cf", "emailspam.ga", "emailspam.gq",
-			"emailspam.ml", "emailspam.tk", "emailsubject.com", "emailtemporario.com", "emailtemporario.net",
-			"emailtemporario.org", "emailtemporario.xyz", "emailtemporario.com.br", "emailtemporario.net.br",
-			"emailtemporario.org.br", "emailtemporario.xyz.br", "emailtmp.com", "emailto.org", "emailwarden.com",
-			"emailx.at", "emailx.net", "emailx.org", "emailx.xyz", "emailxfer.com", "emailz.ga", "emailz.gq",
-			"emailz.ml", "emailz.tk", "eml.cc", "eml.pp.ua", "emlhub.com", "emlpro.com", "emltmp.com", "empireanime.ga",
-			"empireanime.gq", "empireanime.ml", "empireanime.tk", "emz.net", "enterto.com", "ephemail.net",
-			"ero-tube.org", "etranquil.com", "etranquil.net", "etranquil.org", "evopo.com", "explodemail.com",
-			"express.net.ua", "eyepaste.com", "f4k.es", "f5.si", "facebook-email.ga", "facebook-email.gq",
-			"facebook-email.ml", "facebook-email.tk", "facebookmail.ga", "facebookmail.gq", "facebookmail.ml",
-			"facebookmail.tk", "facebookmailer.ga", "facebookmailer.gq", "facebookmailer.ml", "facebookmailer.tk",
-			"fake-email.pp.ua", "fake-mail.cf", "fake-mail.ga", "fake-mail.gq", "fake-mail.ml", "fake-mail.tk",
-			"fakebox.ga", "fakebox.gq", "fakebox.ml", "fakebox.tk", "fakeemail.de", "fakeinbox.cf", "fakeinbox.ga",
-			"fakeinbox.gq", "fakeinbox.ml", "fakeinbox.tk", "fakemail.fr", "fakemail.net", "fakemail.org",
-			"fakemail.xyz", "fakemailgenerator.com", "fakemailz.com", "fammix.com", "fansworldwide.de",
-			"fantasymail.de", "fastacura.com", "fastchevy.com", "fastchrysler.com", "fastcruz.com", "fastdodge.com",
-			"fastemail.us", "fastholden.com", "fasthonda.com", "fasthummer.com", "fastinfiniti.com", "fastjaguar.com",
-			"fastjeep.com", "fastkia.com", "fastlamborghini.com", "fastlandrover.com", "fastlexus.com", "fastmazda.com",
-			"fastmitsubishi.com", "fastnissan.com", "fastpontiac.com", "fastporsche.com", "fastsaab.com",
-			"fastsaturn.com", "fastscion.com", "fastsubaru.com", "fastsuzuki.com", "fasttoyota.com",
-			"fastvolkswagen.com", "fastvolvo.com", "fauxmail.com", "femail.ga", "femail.gq", "femail.ml", "femail.tk",
-			"ficken.de", "figshot.com", "fiifke.com", "filzmail.com", "fivemail.de", "fixmail.tk", "fizmail.com",
-			"flashbox.5v.pl", "fleckens.hu", "fliegend.com", "flurred.com", "fly-ts.de", "flyspam.com", "foobar.com",
-			"forgetmail.com", "fr33mail.info", "frapmail.com", "free-email.ga", "free-email.gq", "free-email.ml",
-			"free-email.tk", "freecoolemail.com", "freefattymovies.com", "freemail.bo.pl", "freemail.c3.cx",
-			"freemail.ms", "freemail.xxx", "freemails.ga", "freemails.gq", "freemails.ml", "freemails.tk",
-			"freemeil.ga", "freemeil.gq", "freemeil.ml", "freemeil.tk", "freerubik.ru", "freeschoolgirls.net",
-			"freesmail.net", "freeweb.email", "freeweb.org", "freeyellow.com", "friendlymail.net", "front14.org",
-			"ftp.sh", "fullmail.com", "funkymail.de", "fux0ringduh.com", "fw.mn", "garbagemail.org", "gardenscape.ca",
-			"garliclife.com", "gatamail.com", "gaumesnil.com", "gehensiemirnichtaufdensack.de", "gelitik.in",
-			"get1mail.com", "get2mail.fr", "getairmail.com", "getcloudmail.com", "getmails.eu", "getonemail.com",
-			"getonemail.net", "getsimpleemail.com", "gett.ee", "ghosttexter.de", "giantmail.de", "ginzi.be",
-			"ginzi.co.uk", "ginzi.es", "ginzi.eu", "ginzi.fr", "ginzi.it", "ginzi.net", "ginzi.org", "ginzi.xyz",
-			"girlmail.ws", "girlsindetention.com", "gishpuppy.com", "givehimthefinger.info", "givememail.club",
-			"gmx.fr", "goat.si", "google-mail.ga", "google-mail.gq", "google-mail.ml", "google-mail.tk",
-			"googlemail.ga", "googlemail.gq", "googlemail.ml", "googlemail.tk", "googlegroups.ga", "googlegroups.gq",
-			"googlegroups.ml", "googlegroups.tk", "gorillaswithdirtyarmpits.com", "gotmail.com", "gotmail.net",
-			"gotmail.org", "gowikitest.com", "grafischeweb.de", "grandmamail.com", "grandmasmail.com", "great-host.in",
-			"greensloth.com", "grr.la", "gs-arc.org", "gsredcross.org", "gsrv.co.uk", "guerillamail.biz",
-			"guerillamail.com", "guerillamail.net", "guerillamail.org", "guerrillamail.biz", "guerrillamail.com",
-			"guerrillamail.net", "guerrillamail.org", "guerrillamailblock.com", "gustr.com", "h.mintemail.com",
-			"h8s.org", "h9s.org", "hablas.com", "haltospam.com", "harakirimail.com", "hartbot.de", "hat-geld.de",
-			"hatespam.org", "hawrong.com", "haydoo.com", "hazelnutbread.com", "hecat.es", "hellodream.mobi",
-			"hellokitty.com", "helmsen.net", "herp.in", "hidemail.de", "hidzz.com", "hmamail.com", "hochsitzungen.de",
-			"hoer.pw", "holl.ga", "holl.gq", "holl.ml", "holl.tk", "hopemail.biz", "hotpop.com", "hulapla.de",
-			"humn.ws.gd", "hush.ai", "hush.com", "hushmail.com", "hushmail.me", "hushmail.net", "hushmail.org",
-			"hushmail.xyz", "hushmailing.com", "hushmailings.com", "hushmailings.net", "hushmailings.org",
-			"hushmailings.xyz", "hushmailings.com.br", "hushmailings.net.br", "hushmailings.org.br",
-			"hushmailings.xyz.br", "hushmailings.info", "hushmailings.ru", "hushmailings.su", "hushmailings.ua",
-			"i2pmail.org", "i6.cloudns.cc", "i6.cloudns.cf", "i6.cloudns.ga", "i6.cloudns.gq", "i6.cloudns.ml",
-			"i6.cloudns.tk", "i6.cloudns.xyz", "i6.xyz", "iaoss.com", "ibm.net", "icantbelieveineedtoexplainthis.com",
-			"icemail.com", "ichigo.me", "ieatspam.eu", "ieatspam.info", "ieh-mail.de", "ihateyoualot.info",
-			"ihatespam.com", "ihatespam.info", "ihatespam.net", "ihatespam.org", "ihatespam.xyz", "ihatespamming.com",
-			"ihatespamming.net", "ihatespamming.org", "ihatespamming.xyz", "iheartspam.com", "iheartspam.net",
-			"iheartspam.org", "iheartspam.xyz", "iheartspamming.com", "iheartspamming.net", "iheartspamming.org",
-			"iheartspamming.xyz", "iheartspammy.com", "iheartspammy.net", "iheartspammy.org", "iheartspammy.xyz",
-			"ikbenspamvrij.nl", "ilovespam.com", "ilovespam.net", "ilovespam.org", "ilovespam.xyz", "ilovespamming.com",
+	/**
+	 * Domínios de e-mail temporário/descartável (bloqueados, com os subdomínios).
+	 *
+	 * <p>Conjunto concorrente porque {@link #addDisposableDomain(String)} e
+	 * {@link #removeDisposableDomain(String)} o alteram com a aplicação no ar enquanto requisições
+	 * o leem: um {@code HashSet} alterado durante uma leitura pode responder errado ou corromper a
+	 * própria estrutura interna.</p>
+	 *
+	 * <p>Provedores e organizações reais que estavam aqui por engano saíram (Microsoft, Micro Focus,
+	 * mail.com, Mail.ru, mail.de, mail.ee, Hushmail, Lycos, Mailfence, GMX, domínios da FastMail,
+	 * MikroTik, Mailinblack, entre outros): recusavam clientes de verdade. As entradas repetidas
+	 * também saíram.</p>
+	 */
+	private static final Set<String> DISPOSABLE_DOMAINS = concurrentSetOf(
+			"tempmail.com", "10minutemail.com", "guerrillamail.com", "mailinator.com", "yopmail.com",
+			"throwaway.email", "sharklasers.com", "guerrillamail.net", "guerrillamail.org", "guerrillamail.biz",
+			"mailmetrash.com", "trashmail.com", "temp-mail.org", "tempmail.net", "tempinbox.com", "fakeinbox.com",
+			"getnada.com", "mailnator.com", "dispostable.com", "spambox.us", "mintemail.com", "mytrashmail.com",
+			"trash2009.com", "trashdevil.com", "trashymail.com", "tyldd.com", "uggsrock.com", "wegwerfmail.de",
+			"wegwerfmail.net", "wegwerfmail.org", "wh4f.org", "whyspam.me", "willselfdestruct.com", "winemaven.info",
+			"wronghead.com", "wuzup.net", "xagloo.com", "xemaps.com", "xents.com", "xmaily.com", "xoxy.net", "yep.it",
+			"yogamaven.com", "yopmail.fr", "yopmail.net", "ypmail.webarnak.fr.eu.org", "maildrop.cc", "spam4.me",
+			"spamspot.com", "tempemail.net", "temp-mail.net", "tempinbox.co", "tempomail.fr", "temporarily.de",
+			"temporario.email", "temporary-mail.net", "temporaryemail.net", "temporayemail.net", "temporry.com",
+			"temporry.net", "temporry.org", "temporryemail.com", "temporryemail.net", "temporryemail.org",
+			"temporrymail.com", "temporrymail.net", "temporrymail.org", "temporrymail.co", "10minut.xyz",
+			"10minute.com", "10minutemail.co.za", "10minutemail.net", "10minutemail.org", "10minutemail.us",
+			"10minutemail.xyz", "10minutemailz.com", "10minutesmail.com", "10minutesmail.net", "10minutesmail.org",
+			"10minutesmail.us", "10minutesmail.xyz", "1secmail.com", "1secmail.net", "1secmail.org",
+			"20minutemail.com", "20minutemail.it", "20minutemail.net", "2prong.com", "30minutemail.com",
+			"30minutemail.org", "33mail.com", "3d-painting.com", "3mail.fi", "4warding.com", "4warding.net",
+			"4warding.org", "5mail.xyz", "60minutemail.com", "6mail.xyz", "7mail.xyz", "8mail.xyz", "9mail.xyz",
+			"abyssmail.com", "acmemail.net", "aeneasmail.com", "airmailhub.com", "altmails.com", "amail.com",
+			"amail4.me", "amail.club", "amail.to", "amail.xyz", "anonymbox.com", "antichef.com", "antichef.net",
+			"antireg.com", "antireg.ru", "antispam.de", "antispam24.de", "antispammail.de", "armyspy.com",
+			"artman-mail.com", "artman-mail.de", "artman-mail.net", "artman-mail.org", "averdov.com", "averdov.net",
+			"averdov.org", "averdov.su", "averdov.xyz", "azazazatashkent.tk", "baxomale.ht.cx", "beefmilk.com",
+			"bigstring.com", "binkmail.com", "bizmail.net", "bobmail.info", "bobmurch.com", "bofthew.com",
+			"bongobongo.ga", "bongobongo.gq", "bongobongo.ml", "bongobongo.tk", "brefmail.com", "brennendesreich.de",
+			"broadbandninja.com", "bsnow.net", "buon.club", "burnthespam.info", "burstmail.info", "busiwebs.com",
+			"buygoldmail.com", "c2.hu", "c2.li", "c2.lv", "c2.si", "c2.vc", "cachedot.net", "card.zp.ua",
+			"casualdx.com", "cbair.com", "cechire.com", "cek.pm", "cellurl.com", "centermail.com", "centermail.net",
+			"chammy.info", "cheatmail.de", "chogmail.com", "choicemail1.com", "clixser.com", "cmail.club", "cmail.com",
+			"cmail.net", "cmail.org", "coldemail.info", "cool.fr.nf", "courriel.fr.nf", "courrieltemporaire.com",
+			"crapmail.org", "curryworld.de", "cust.in", "d3p.dk", "dacoolest.com", "dandikmail.com", "dayrep.com",
+			"dcemail.com", "deadaddress.com", "deadspam.com", "deagot.com", "dealja.com", "despam.it", "despammed.com",
+			"devnullmail.com", "dfgh.net", "digitalsanctuary.com", "dingbone.com", "discard.email", "discardmail.com",
+			"discardmail.de", "disposableaddress.com", "disposableemail.com", "disposableemail.org",
+			"disposableinbox.com", "dispose.it", "disposeamail.com", "disposemail.com", "divermail.com",
+			"dm.w3sites.net", "dodgeit.com", "dodgit.com", "dodgit.org", "doiea.com", "dolphinnet.net", "donebyng.com",
+			"dotman.de", "dotmsg.com", "drdrb.com", "drdrb.net", "drdrb.org", "drdrb.ru", "drdrb.su", "drdrb.xyz",
+			"drdrba.com", "drdrba.net", "drdrba.org", "drdrba.ru", "drdrba.su", "drdrba.xyz", "drdrbb.com",
+			"drdrbb.net", "drdrbb.org", "drdrbb.ru", "drdrbb.su", "drdrbb.xyz", "drdrbc.com", "drdrbc.net",
+			"drdrbc.org", "drdrbc.ru", "drdrbc.su", "drdrbc.xyz", "drdrbd.com", "drdrbd.net", "drdrbd.org",
+			"drdrbd.ru", "drdrbd.su", "drdrbd.xyz", "drdrbe.com", "drdrbe.net", "drdrbe.org", "drdrbe.ru", "drdrbe.su",
+			"drdrbe.xyz", "dropmail.me", "dt.com", "duam.net", "dudmail.com", "dump-email.info", "dumpandjunk.com",
+			"dumpmail.de", "dumpyemail.com", "dwjworld.com", "e-mail.com", "e-mail.org", "e4ward.com",
+			"easytrashmail.com", "einrot.com", "einrot.de", "eintagsmail.de", "email60.com", "emailacc.com",
+			"emailage.ga", "emailage.gq", "emailage.ml", "emailage.tk", "emaildienst.de", "emailfake.com",
+			"emailforyou.net", "emailgo.de", "emailias.com", "emailigo.com", "emailinfive.com", "emailisvalid.com",
+			"emaillime.com", "emailmiser.com", "emailproxsy.com", "emailresort.com", "emails.ga", "emails.gq",
+			"emails.ml", "emails.tk", "emailsense.com", "emailspam.cf", "emailspam.ga", "emailspam.gq", "emailspam.ml",
+			"emailspam.tk", "emailsubject.com", "emailtemporario.com", "emailtemporario.net", "emailtemporario.org",
+			"emailtemporario.xyz", "emailtemporario.com.br", "emailtemporario.net.br", "emailtemporario.org.br",
+			"emailtemporario.xyz.br", "emailtmp.com", "emailto.org", "emailwarden.com", "emailx.at", "emailx.net",
+			"emailx.org", "emailx.xyz", "emailxfer.com", "emailz.ga", "emailz.gq", "emailz.ml", "emailz.tk",
+			"eml.pp.ua", "emlhub.com", "emlpro.com", "emltmp.com", "empireanime.ga", "empireanime.gq",
+			"empireanime.ml", "empireanime.tk", "emz.net", "enterto.com", "ephemail.net", "ero-tube.org",
+			"etranquil.com", "etranquil.net", "etranquil.org", "evopo.com", "explodemail.com", "express.net.ua",
+			"eyepaste.com", "f4k.es", "f5.si", "facebook-email.ga", "facebook-email.gq", "facebook-email.ml",
+			"facebook-email.tk", "facebookmail.ga", "facebookmail.gq", "facebookmail.ml", "facebookmail.tk",
+			"facebookmailer.ga", "facebookmailer.gq", "facebookmailer.ml", "facebookmailer.tk", "fake-email.pp.ua",
+			"fake-mail.cf", "fake-mail.ga", "fake-mail.gq", "fake-mail.ml", "fake-mail.tk", "fakebox.ga", "fakebox.gq",
+			"fakebox.ml", "fakebox.tk", "fakeemail.de", "fakeinbox.cf", "fakeinbox.ga", "fakeinbox.gq", "fakeinbox.ml",
+			"fakeinbox.tk", "fakemail.fr", "fakemail.net", "fakemail.org", "fakemail.xyz", "fakemailgenerator.com",
+			"fakemailz.com", "fammix.com", "fansworldwide.de", "fantasymail.de", "fastacura.com", "fastchevy.com",
+			"fastchrysler.com", "fastcruz.com", "fastdodge.com", "fastholden.com", "fasthonda.com", "fasthummer.com",
+			"fastinfiniti.com", "fastjaguar.com", "fastjeep.com", "fastkia.com", "fastlamborghini.com",
+			"fastlandrover.com", "fastlexus.com", "fastmazda.com", "fastmitsubishi.com", "fastnissan.com",
+			"fastpontiac.com", "fastporsche.com", "fastsaab.com", "fastsaturn.com", "fastscion.com", "fastsubaru.com",
+			"fastsuzuki.com", "fasttoyota.com", "fastvolkswagen.com", "fastvolvo.com", "fauxmail.com", "femail.ga",
+			"femail.gq", "femail.ml", "femail.tk", "ficken.de", "figshot.com", "fiifke.com", "filzmail.com",
+			"fivemail.de", "fixmail.tk", "fizmail.com", "flashbox.5v.pl", "fleckens.hu", "fliegend.com", "flurred.com",
+			"fly-ts.de", "flyspam.com", "foobar.com", "forgetmail.com", "fr33mail.info", "frapmail.com",
+			"free-email.ga", "free-email.gq", "free-email.ml", "free-email.tk", "freecoolemail.com",
+			"freefattymovies.com", "freemail.bo.pl", "freemail.c3.cx", "freemail.ms", "freemail.xxx", "freemails.ga",
+			"freemails.gq", "freemails.ml", "freemails.tk", "freemeil.ga", "freemeil.gq", "freemeil.ml", "freemeil.tk",
+			"freerubik.ru", "freeschoolgirls.net", "freesmail.net", "freeweb.email", "freeweb.org", "freeyellow.com",
+			"friendlymail.net", "front14.org", "ftp.sh", "fullmail.com", "funkymail.de", "fux0ringduh.com", "fw.mn",
+			"garbagemail.org", "gardenscape.ca", "garliclife.com", "gatamail.com", "gaumesnil.com",
+			"gehensiemirnichtaufdensack.de", "gelitik.in", "get1mail.com", "get2mail.fr", "getairmail.com",
+			"getcloudmail.com", "getmails.eu", "getonemail.com", "getonemail.net", "getsimpleemail.com", "gett.ee",
+			"ghosttexter.de", "giantmail.de", "ginzi.be", "ginzi.co.uk", "ginzi.es", "ginzi.eu", "ginzi.fr",
+			"ginzi.it", "ginzi.net", "ginzi.org", "ginzi.xyz", "girlmail.ws", "girlsindetention.com", "gishpuppy.com",
+			"givehimthefinger.info", "givememail.club", "goat.si", "google-mail.ga", "google-mail.gq",
+			"google-mail.ml", "google-mail.tk", "googlemail.ga", "googlemail.gq", "googlemail.ml", "googlemail.tk",
+			"googlegroups.ga", "googlegroups.gq", "googlegroups.ml", "googlegroups.tk", "gorillaswithdirtyarmpits.com",
+			"gotmail.com", "gotmail.net", "gotmail.org", "gowikitest.com", "grafischeweb.de", "grandmamail.com",
+			"grandmasmail.com", "great-host.in", "greensloth.com", "grr.la", "gs-arc.org", "gsredcross.org",
+			"gsrv.co.uk", "guerillamail.biz", "guerillamail.com", "guerillamail.net", "guerillamail.org",
+			"guerrillamailblock.com", "gustr.com", "h.mintemail.com", "h8s.org", "h9s.org", "hablas.com",
+			"haltospam.com", "harakirimail.com", "hartbot.de", "hat-geld.de", "hatespam.org", "hawrong.com",
+			"haydoo.com", "hazelnutbread.com", "hecat.es", "hellodream.mobi", "hellokitty.com", "helmsen.net",
+			"herp.in", "hidemail.de", "hidzz.com", "hmamail.com", "hochsitzungen.de", "hoer.pw", "holl.ga", "holl.gq",
+			"holl.ml", "holl.tk", "hopemail.biz", "hotpop.com", "hulapla.de", "humn.ws.gd", "i2pmail.org",
+			"i6.cloudns.cc", "i6.cloudns.cf", "i6.cloudns.ga", "i6.cloudns.gq", "i6.cloudns.ml", "i6.cloudns.tk",
+			"i6.cloudns.xyz", "i6.xyz", "iaoss.com", "icantbelieveineedtoexplainthis.com", "icemail.com", "ichigo.me",
+			"ieatspam.eu", "ieatspam.info", "ieh-mail.de", "ihateyoualot.info", "ihatespam.com", "ihatespam.info",
+			"ihatespam.net", "ihatespam.org", "ihatespam.xyz", "ihatespamming.com", "ihatespamming.net",
+			"ihatespamming.org", "ihatespamming.xyz", "iheartspam.com", "iheartspam.net", "iheartspam.org",
+			"iheartspam.xyz", "iheartspamming.com", "iheartspamming.net", "iheartspamming.org", "iheartspamming.xyz",
+			"iheartspammy.com", "iheartspammy.net", "iheartspammy.org", "iheartspammy.xyz", "ikbenspamvrij.nl",
+			"ilovespam.com", "ilovespam.net", "ilovespam.org", "ilovespam.xyz", "ilovespamming.com",
 			"ilovespamming.net", "ilovespamming.org", "ilovespamming.xyz", "imails.info", "imgof.com", "imgv.de",
 			"immo-gerance.info", "imstations.com", "inbax.tk", "inbox.si", "inboxalias.com", "inboxbear.com",
 			"inboxclean.com", "inboxclean.org", "inboxdesign.com", "inboxed.pw", "inboxkitten.com", "inboxmail.eu",
 			"inboxme.eu", "inboxproxy.com", "inboxstore.me", "incognitomail.com", "incognitomail.net",
 			"incognitomail.org", "incognitomail.xyz", "incognitomail.com.br", "incognitomail.net.br",
 			"incognitomail.org.br", "incognitomail.xyz.br", "ineec.net", "inerted.com", "infocom.zp.ua", "inggo.org",
-			"inoutbox.com", "insanum.xyz", "insorg-mail.info", "instaddr.com", "instantemailaddress.com",
-			"instantmail.fr", "instantmailaddress.com", "ipoo.org", "irish2k.com", "iwi.net", "jajxz.com",
-			"jdmadventures.com", "jellyfishpink.net", "jetable.com", "jetable.fr.nf", "jetable.net", "jetable.org",
-			"jetable.pp.ua", "jetableemail.com", "jetablemail.com", "jmail.ovh", "jmail.ro", "jmailr.com", "jmailz.com",
-			"job.cf", "job.ga", "job.gq", "job.ml", "job.tk", "junk1.com", "junkmail.com", "junkmail.ga", "junkmail.gq",
+			"insanum.xyz", "insorg-mail.info", "instaddr.com", "instantemailaddress.com", "instantmail.fr",
+			"instantmailaddress.com", "ipoo.org", "irish2k.com", "iwi.net", "jajxz.com", "jdmadventures.com",
+			"jellyfishpink.net", "jetable.com", "jetable.fr.nf", "jetable.net", "jetable.org", "jetable.pp.ua",
+			"jetableemail.com", "jetablemail.com", "jmail.ovh", "jmail.ro", "jmailr.com", "jmailz.com", "job.cf",
+			"job.ga", "job.gq", "job.ml", "job.tk", "junk1.com", "junkmail.com", "junkmail.ga", "junkmail.gq",
 			"junkmail.ml", "junkmail.tk", "junkmailgenerator.com", "junkme.info", "junkpile.net", "junkstuff.com",
 			"juyouxi.com", "jwork.ru", "k2-herberg.de", "k2-herberg.info", "k2-herberg.net", "k2-herberg.org",
 			"k2-herberg.xyz", "k2-herberg.com.br", "k2-herberg.net.br", "k2-herberg.org.br", "k2-herberg.xyz.br",
@@ -199,63 +219,57 @@ public final class EmailFormatter {
 			"killmail.xyz", "killmailing.com", "killmailing.net", "killmailing.org", "killmailing.xyz", "killspam.com",
 			"killspam.net", "killspam.org", "killspam.xyz", "killspamming.com", "killspamming.net", "killspamming.org",
 			"killspamming.xyz", "kimsdisk.com", "kingsq.ga", "kingsq.gq", "kingsq.ml", "kingsq.tk", "kiois.com",
-			"kitnastar.com", "klicksafe.de", "klzlk.com", "knol-power.nl", "kobrandly.com", "kommespaeter.de",
-			"kon42.com", "konsul.xyz", "kook.ml", "kopagas.com", "kopaka.net", "kostenlosemailadresse.de",
-			"koszmail.pl", "krop.kz", "krypton.tk", "kundenserver.de", "kurzepost.de", "l2gv.com", "l2gv.net",
-			"l2gv.org", "l2gv.xyz", "l2gv.com.br", "l2gv.net.br", "l2gv.org.br", "l2gv.xyz.br", "l2gv.info", "l2gv.ru",
-			"l2gv.su", "l2gv.ua", "lackmail.net", "lackmail.ru", "lageri.com", "lags.us", "lalala.fun", "lalala.xyz",
-			"landmail.co", "lazyinbox.com", "lazyinbox.net", "lazyinbox.org", "lazyinbox.xyz", "lazyinbox.com.br",
-			"lazyinbox.net.br", "lazyinbox.org.br", "lazyinbox.xyz.br", "lazyinbox.info", "lazyinbox.ru",
-			"lazyinbox.su", "lazyinbox.ua", "leemail.me", "lellno.com", "lellno.net", "lellno.org", "lellno.xyz",
-			"lellno.com.br", "lellno.net.br", "lellno.org.br", "lellno.xyz.br", "lellno.info", "lellno.ru", "lellno.su",
-			"lellno.ua", "letmeinonthis.com", "letthemeatspam.com", "lhsdv.com", "lifebyfood.com", "ligsb.com",
-			"link2mail.net", "litedrop.com", "liveradio.tk", "llogin.ru", "loadby.us", "login-email.cf",
-			"login-email.ga", "login-email.gq", "login-email.ml", "login-email.tk", "loginemail.cf", "loginemail.ga",
-			"loginemail.gq", "loginemail.ml", "loginemail.tk", "loh.pp.ua", "lol.ovpn.to", "lolfreak.net",
-			"lookugly.com", "lortemail.dk", "louisvuittonbagoutlet.com", "lovemeleaveme.com", "lowly.dk", "lpthe.com",
-			"lrsotv.com", "lsz.co.il", "lte.dk", "lucas-imb.de", "lukemail.info", "lutu.org", "luv2.us", "lvie.com",
-			"lyfestyle.com", "lycos.com", "lycos.de", "lycos.es", "lycos.it", "lycos.net", "lycos.org", "lycos.ru",
-			"lycos.ua", "lycos.xyz", "lycosmail.com", "lycosmail.net", "lycosmail.org", "lycosmail.xyz", "m4ilweb.info",
-			"mac.hush.com", "macbox.com", "macfreak.com", "macmail.com", "madcreas.com", "madeinindia.com",
-			"madonna.com", "magicbox.ro", "magspam.net", "mail.by", "mail.co.ua", "mail.com", "mail.de", "mail.ee",
-			"mail.et", "mail.eu", "mail.fr", "mail.gr", "mail.hu", "mail.ie", "mail.it", "mail.lt", "mail.lv",
-			"mail.md", "mail.nl", "mail.no", "mail.pl", "mail.pt", "mail.ro", "mail.ru", "mail.se", "mail.si",
-			"mail.sk", "mail.ua", "mail.uk", "mail.us", "mail.xyz", "mail1a.de", "mail1web.de", "mail21.cc",
-			"mail2consultant.com", "mail2consultant.net", "mail2consultant.org", "mail2consultant.xyz",
-			"mail2world.com", "mail2world.net", "mail2world.org", "mail2world.xyz", "mail333.com", "mail4trash.com",
-			"mail7.io", "mail8.com", "mailandftp.com", "mailandnews.com", "mailbox.as", "mailbox.co.za", "mailbox.gr",
-			"mailbox.hu", "mailbox72.de", "mailbox80.de", "mailbox82.de", "mailbox83.de", "mailbox84.de",
-			"mailbox85.de", "mailbox86.de", "mailbox87.de", "mailbox88.de", "mailbox89.de", "mailbox90.de",
-			"mailbox91.de", "mailbox92.de", "mailbox93.de", "mailbox94.de", "mailbox95.de", "mailbox96.de",
-			"mailbox97.de", "mailbox98.de", "mailbox99.de", "mailcatch.com", "mailchop.com", "mailcker.com",
-			"maildrop.cc", "maildrop.com", "maildrop.net", "maildrop.org", "maildrop.xyz", "maildu.de", "maildx.com",
-			"maileater.com", "mailed.ro", "maileimer.de", "mailexpire.com", "mailfa.tk", "mailfall.com",
-			"mailfence.com", "mailfilter.it", "mailfix.net", "mailfly.com", "mailfree.ga", "mailfree.gq", "mailfree.ml",
-			"mailfree.tk", "mailfreeonline.com", "mailfreeway.com", "mailfs.com", "mailftp.com", "mailgates.com",
-			"mailgenie.net", "mailguard.me", "mailhaven.com", "mailhood.com", "mailimate.com", "mailin8r.com",
-			"mailinatar.com", "mailinator.com", "mailinator.net", "mailinator.org", "mailinator.xyz", "mailinator2.com",
-			"mailinator2.net", "mailinator2.org", "mailinator2.xyz", "mailinator3.com", "mailinator3.net",
-			"mailinator3.org", "mailinator3.xyz", "mailinator4.com", "mailinator4.net", "mailinator4.org",
-			"mailinator4.xyz", "mailinator5.com", "mailinator5.net", "mailinator5.org", "mailinator5.xyz",
-			"mailinblack.com", "mailinblack.net", "mailinblack.org", "mailinblack.xyz", "mailinbox.net",
-			"mailingaddress.org", "mailingweb.com", "mailisent.com", "mailismagic.com", "mailite.com", "mailmate.com",
-			"mailme.ir", "mailme.lv", "mailme24.com", "mailmetrash.com", "mailmight.com", "mailmij.nl", "mailnator.com",
-			"mailnesia.com", "mailnew.com", "mailnull.com", "mailorg.org", "mailowl.com", "mailpanda.com",
-			"mailpickle.com", "mailpill.com", "mailpkg.com", "mailplug.com", "mailpost.zzn.com", "mailpride.com",
-			"mailprodigy.com", "mailprofs.com", "mailquack.com", "mailrock.biz", "mailsac.com", "mailscrap.com",
-			"mailsend.com", "mailservice.ms", "mailshiv.com", "mailsiphon.com", "mailslapping.com", "mailslite.com",
-			"mailstick.com", "mailstored.com", "mailstream.net", "mailstrom.com", "mailthrow.com", "mailto.plus",
-			"mailtothis.com", "mailtrash.net", "mailtrix.net", "mailtv.net", "mailtv.tv", "mailueberfall.de",
-			"mailup.net", "mailwall.com", "mailwatch.com", "mailwee.com", "mailwork.cf", "mailwork.ga", "mailwork.gq",
-			"mailwork.ml", "mailwork.tk", "mailzilla.com", "mailzilla.org", "mailzilla.xyz", "makemetheking.com",
-			"manifestgenerator.com", "manybrain.com", "mbx.cc", "mcache.net", "mciek.com", "mcrb.co.uk", "mdz.email",
-			"meantinc.com", "mega.zik.dj", "mehrani.com", "meinspamschutz.de", "meltmail.com", "meltmail.net",
-			"meltmail.org", "meltmail.xyz", "meltmailing.com", "meltmailing.net", "meltmailing.org", "meltmailing.xyz",
-			"meltspam.com", "meltspam.net", "meltspam.org", "meltspam.xyz", "meltspamming.com", "meltspamming.net",
-			"meltspamming.org", "meltspamming.xyz", "memecode.com", "merry.pet", "messagebeamer.de", "mettamail.com",
-			"mexicomail.com", "mezimages.net", "mfsa.info", "mh2o.net", "mh2o.org", "mh2o.xyz", "mh2o.com.br",
-			"mh2o.net.br", "mh2o.org.br", "mh2o.xyz.br", "mh2o.info", "mh2o.ru", "mh2o.su", "mh2o.ua", "miarroba.com",
-			"microfocus.com", "microsoft.com", "midiharmonica.com", "midlertidig.com", "midlertidig.net",
+			"kitnastar.com", "klzlk.com", "knol-power.nl", "kobrandly.com", "kommespaeter.de", "kon42.com",
+			"konsul.xyz", "kook.ml", "kopagas.com", "kopaka.net", "kostenlosemailadresse.de", "koszmail.pl", "krop.kz",
+			"krypton.tk", "kundenserver.de", "kurzepost.de", "l2gv.com", "l2gv.net", "l2gv.org", "l2gv.xyz",
+			"l2gv.com.br", "l2gv.net.br", "l2gv.org.br", "l2gv.xyz.br", "l2gv.info", "l2gv.ru", "l2gv.su", "l2gv.ua",
+			"lackmail.net", "lackmail.ru", "lageri.com", "lags.us", "lalala.fun", "lalala.xyz", "landmail.co",
+			"lazyinbox.com", "lazyinbox.net", "lazyinbox.org", "lazyinbox.xyz", "lazyinbox.com.br", "lazyinbox.net.br",
+			"lazyinbox.org.br", "lazyinbox.xyz.br", "lazyinbox.info", "lazyinbox.ru", "lazyinbox.su", "lazyinbox.ua",
+			"leemail.me", "lellno.com", "lellno.net", "lellno.org", "lellno.xyz", "lellno.com.br", "lellno.net.br",
+			"lellno.org.br", "lellno.xyz.br", "lellno.info", "lellno.ru", "lellno.su", "lellno.ua",
+			"letmeinonthis.com", "letthemeatspam.com", "lhsdv.com", "lifebyfood.com", "ligsb.com", "link2mail.net",
+			"litedrop.com", "liveradio.tk", "llogin.ru", "loadby.us", "login-email.cf", "login-email.ga",
+			"login-email.gq", "login-email.ml", "login-email.tk", "loginemail.cf", "loginemail.ga", "loginemail.gq",
+			"loginemail.ml", "loginemail.tk", "loh.pp.ua", "lol.ovpn.to", "lolfreak.net", "lookugly.com",
+			"lortemail.dk", "louisvuittonbagoutlet.com", "lovemeleaveme.com", "lowly.dk", "lpthe.com", "lrsotv.com",
+			"lsz.co.il", "lte.dk", "lucas-imb.de", "lukemail.info", "lutu.org", "luv2.us", "lvie.com", "lyfestyle.com",
+			"m4ilweb.info", "macbox.com", "macfreak.com", "macmail.com", "madcreas.com", "madeinindia.com",
+			"madonna.com", "magicbox.ro", "magspam.net", "mail.by", "mail.co.ua", "mail.et", "mail.eu", "mail.fr",
+			"mail.gr", "mail.hu", "mail.ie", "mail.it", "mail.lt", "mail.lv", "mail.md", "mail.nl", "mail.no",
+			"mail.pl", "mail.pt", "mail.ro", "mail.se", "mail.si", "mail.sk", "mail.uk", "mail.us", "mail.xyz",
+			"mail1a.de", "mail1web.de", "mail21.cc", "mail2consultant.com", "mail2consultant.net",
+			"mail2consultant.org", "mail2consultant.xyz", "mail2world.com", "mail2world.net", "mail2world.org",
+			"mail2world.xyz", "mail333.com", "mail4trash.com", "mail7.io", "mail8.com", "mailandnews.com",
+			"mailbox.as", "mailbox.co.za", "mailbox.gr", "mailbox.hu", "mailbox72.de", "mailbox80.de", "mailbox82.de",
+			"mailbox83.de", "mailbox84.de", "mailbox85.de", "mailbox86.de", "mailbox87.de", "mailbox88.de",
+			"mailbox89.de", "mailbox90.de", "mailbox91.de", "mailbox92.de", "mailbox93.de", "mailbox94.de",
+			"mailbox95.de", "mailbox96.de", "mailbox97.de", "mailbox98.de", "mailbox99.de", "mailcatch.com",
+			"mailchop.com", "mailcker.com", "maildrop.com", "maildrop.net", "maildrop.org", "maildrop.xyz",
+			"maildu.de", "maildx.com", "maileater.com", "mailed.ro", "maileimer.de", "mailexpire.com", "mailfa.tk",
+			"mailfall.com", "mailfilter.it", "mailfix.net", "mailfly.com", "mailfree.ga", "mailfree.gq", "mailfree.ml",
+			"mailfree.tk", "mailfreeonline.com", "mailfreeway.com", "mailfs.com", "mailgates.com", "mailgenie.net",
+			"mailguard.me", "mailhood.com", "mailimate.com", "mailin8r.com", "mailinatar.com", "mailinator.net",
+			"mailinator.org", "mailinator.xyz", "mailinator2.com", "mailinator2.net", "mailinator2.org",
+			"mailinator2.xyz", "mailinator3.com", "mailinator3.net", "mailinator3.org", "mailinator3.xyz",
+			"mailinator4.com", "mailinator4.net", "mailinator4.org", "mailinator4.xyz", "mailinator5.com",
+			"mailinator5.net", "mailinator5.org", "mailinator5.xyz", "mailinbox.net", "mailingweb.com",
+			"mailisent.com", "mailismagic.com", "mailmate.com", "mailme.ir", "mailme.lv", "mailme24.com", "mailmij.nl",
+			"mailnesia.com", "mailnull.com", "mailorg.org", "mailowl.com", "mailpanda.com", "mailpickle.com",
+			"mailpill.com", "mailpkg.com", "mailplug.com", "mailpost.zzn.com", "mailpride.com", "mailprodigy.com",
+			"mailprofs.com", "mailquack.com", "mailrock.biz", "mailsac.com", "mailscrap.com", "mailsend.com",
+			"mailshiv.com", "mailsiphon.com", "mailslapping.com", "mailslite.com", "mailstick.com", "mailstored.com",
+			"mailstream.net", "mailstrom.com", "mailthrow.com", "mailto.plus", "mailtothis.com", "mailtrash.net",
+			"mailtrix.net", "mailtv.net", "mailtv.tv", "mailueberfall.de", "mailwall.com", "mailwatch.com",
+			"mailwee.com", "mailwork.cf", "mailwork.ga", "mailwork.gq", "mailwork.ml", "mailwork.tk", "mailzilla.com",
+			"mailzilla.org", "mailzilla.xyz", "makemetheking.com", "manifestgenerator.com", "manybrain.com", "mbx.cc",
+			"mcache.net", "mciek.com", "mcrb.co.uk", "mdz.email", "meantinc.com", "mega.zik.dj", "mehrani.com",
+			"meinspamschutz.de", "meltmail.com", "meltmail.net", "meltmail.org", "meltmail.xyz", "meltmailing.com",
+			"meltmailing.net", "meltmailing.org", "meltmailing.xyz", "meltspam.com", "meltspam.net", "meltspam.org",
+			"meltspam.xyz", "meltspamming.com", "meltspamming.net", "meltspamming.org", "meltspamming.xyz",
+			"memecode.com", "merry.pet", "messagebeamer.de", "mettamail.com", "mezimages.net", "mfsa.info", "mh2o.net",
+			"mh2o.org", "mh2o.xyz", "mh2o.com.br", "mh2o.net.br", "mh2o.org.br", "mh2o.xyz.br", "mh2o.info", "mh2o.ru",
+			"mh2o.su", "mh2o.ua", "miarroba.com", "midiharmonica.com", "midlertidig.com", "midlertidig.net",
 			"midlertidig.org", "midlertidig.xyz", "midlertidig.com.br", "midlertidig.net.br", "midlertidig.org.br",
 			"midlertidig.xyz.br", "midlertidig.info", "midlertidig.ru", "midlertidig.su", "midlertidig.ua",
 			"midlertidigemail.com", "midlertidigemail.net", "midlertidigemail.org", "midlertidigemail.xyz",
@@ -268,55 +282,48 @@ public final class EmailFormatter {
 			"midlertidigespam.org", "midlertidigespam.xyz", "midlertidigespam.com.br", "midlertidigespam.net.br",
 			"midlertidigespam.org.br", "midlertidigespam.xyz.br", "midlertidigespam.info", "midlertidigespam.ru",
 			"midlertidigespam.su", "midlertidigespam.ua", "mighty.co.za", "migmail.net", "migmail.pl", "migumail.com",
-			"mihaus.com", "mijnhva.nl", "mijnmail.nl", "mijnstreek.nl", "mikrotik.com", "mikrotik.net", "mikrotik.org",
-			"mikrotik.xyz", "mikrotik.com.br", "mikrotik.net.br", "mikrotik.org.br", "mikrotik.xyz.br", "mikrotik.info",
-			"mikrotik.ru", "mikrotik.su", "mikrotik.ua", "milliondollarinternet.com", "mini-mail.com", "miniature.xyz",
-			"minimail.eu", "minimail.in", "minimail.us", "minimail.xyz", "minimailz.com", "minimailz.net",
-			"minimailz.org", "minimailz.xyz", "minimailz.com.br", "minimailz.net.br", "minimailz.org.br",
-			"minimailz.xyz.br", "minimailz.info", "minimailz.ru", "minimailz.su", "minimailz.ua", "minister.com",
-			"mintemail.com", "miraclemail.com", "mirrorrr.com", "misterpinball.de", "mji.ro", "mkpfilm.com", "ml1.net",
-			"ml2.net", "ml3.net", "ml4.net", "ml5.net", "ml6.net", "ml7.net", "ml8.net", "ml9.net", "mm.st", "mnsi.net",
-			"mnsmail.com", "moakt.cc", "moakt.co", "moakt.com", "moakt.net", "moakt.org", "moakt.xyz", "moaktmail.com",
-			"moaktmail.net", "moaktmail.org", "moaktmail.xyz", "mobileninja.co.uk", "mochamail.com", "modemnet.net",
-			"modomail.com", "moeinmail.com", "moeri.org", "mohmal.com", "mohmal.in", "mohmal.net", "mohmal.org",
-			"mohmal.xyz", "mohmalmail.com", "mohmalmail.net", "mohmalmail.org", "mohmalmail.xyz", "moldova.cc",
-			"moldova.net", "moldova.org", "moldova.xyz", "moldova.com.br", "moldova.net.br", "moldova.org.br",
-			"moldova.xyz.br", "moldova.info", "moldova.ru", "moldova.su", "moldova.ua", "momentics.ru",
-			"moncourrier.fr.nf", "monemail.fr.nf", "monemail.net", "monemail.org", "monemail.xyz", "monemailing.com",
-			"monemailing.net", "monemailing.org", "monemailing.xyz", "monmail.fr.nf", "monmail.net", "monmail.org",
-			"monmail.xyz", "monmailing.com", "monmailing.net", "monmailing.org", "monmailing.xyz", "monoik.com",
-			"monumentmail.com", "moonwake.com", "moot.es", "moreawesomethanyou.com", "moreorcs.com", "morsin.com",
-			"moscowmail.ru", "mostlysunny.com", "motique.de", "mountainregionallibrary.net", "mox.pp.ua", "mp.uz",
-			"mrblacklist.gq", "mrblacklist.ml", "mrblacklist.tk", "mrblacklist.xyz", "mrblacklist.com.br",
-			"mrblacklist.net.br", "mrblacklist.org.br", "mrblacklist.xyz.br", "mrblacklist.info", "mrblacklist.ru",
-			"mrblacklist.su", "mrblacklist.ua", "mrch.com", "mrvousa.com", "msgden.com", "msgdrop.com", "msgsafe.io",
-			"msgsafe.net", "msgsafe.org", "msgsafe.xyz", "msgsafe.com.br", "msgsafe.net.br", "msgsafe.org.br",
-			"msgsafe.xyz.br", "msgsafe.info", "msgsafe.ru", "msgsafe.su", "msgsafe.ua", "msgsafeemail.com",
-			"msgsafeemail.net", "msgsafeemail.org", "msgsafeemail.xyz", "msgsafeemail.com.br", "msgsafeemail.net.br",
-			"msgsafeemail.org.br", "msgsafeemail.xyz.br", "msgsafeemail.info", "msgsafeemail.ru", "msgsafeemail.su",
-			"msgsafeemail.ua", "msgsafeemailing.com", "msgsafeemailing.net", "msgsafeemailing.org",
-			"msgsafeemailing.xyz", "msgsafeemailing.com.br", "msgsafeemailing.net.br", "msgsafeemailing.org.br",
-			"msgsafeemailing.xyz.br", "msgsafeemailing.info", "msgsafeemailing.ru", "msgsafeemailing.su",
-			"msgsafeemailing.ua", "msgspam.com", "msgspam.net", "msgspam.org", "msgspam.xyz", "msgspam.com.br",
-			"msgspam.net.br", "msgspam.org.br", "msgspam.xyz.br", "msgspam.info", "msgspam.ru", "msgspam.su",
-			"msgspam.ua", "msgspamming.com", "msgspamming.net", "msgspamming.org", "msgspamming.xyz",
-			"msgspamming.com.br", "msgspamming.net.br", "msgspamming.org.br", "msgspamming.xyz.br", "msgspamming.info",
-			"msgspamming.ru", "msgspamming.su", "msgspamming.ua", "msgsafe.io", "msgsafe.net", "msgsafe.org",
-			"msgsafe.xyz", "msgsafe.com.br", "msgsafe.net.br", "msgsafe.org.br", "msgsafe.xyz.br", "msgsafe.info",
-			"msgsafe.ru", "msgsafe.su", "msgsafe.ua", "msgsafeemail.com", "msgsafeemail.net", "msgsafeemail.org",
-			"msgsafeemail.xyz", "msgsafeemail.com.br", "msgsafeemail.net.br", "msgsafeemail.org.br",
-			"msgsafeemail.xyz.br", "msgsafeemail.info", "msgsafeemail.ru", "msgsafeemail.su", "msgsafeemail.ua",
-			"msgsafeemailing.com", "msgsafeemailing.net", "msgsafeemailing.org", "msgsafeemailing.xyz",
-			"msgsafeemailing.com.br", "msgsafeemailing.net.br", "msgsafeemailing.org.br", "msgsafeemailing.xyz.br",
-			"msgsafeemailing.info", "msgsafeemailing.ru", "msgsafeemailing.su", "msgsafeemailing.ua", "msgspam.com",
-			"msgspam.net", "msgspam.org", "msgspam.xyz", "msgspam.com.br", "msgspam.net.br", "msgspam.org.br",
-			"msgspam.xyz.br", "msgspam.info", "msgspam.ru", "msgspam.su", "msgspam.ua", "msgspamming.com",
-			"msgspamming.net", "msgspamming.org", "msgspamming.xyz", "msgspamming.com.br", "msgspamming.net.br",
-			"msgspamming.org.br", "msgspamming.xyz.br", "msgspamming.info", "msgspamming.ru", "msgspamming.su",
-			"msgspamming.ua"));
+			"mihaus.com", "mijnmail.nl", "mijnstreek.nl", "milliondollarinternet.com", "mini-mail.com",
+			"miniature.xyz", "minimail.eu", "minimail.in", "minimail.us", "minimail.xyz", "minimailz.com",
+			"minimailz.net", "minimailz.org", "minimailz.xyz", "minimailz.com.br", "minimailz.net.br",
+			"minimailz.org.br", "minimailz.xyz.br", "minimailz.info", "minimailz.ru", "minimailz.su", "minimailz.ua",
+			"miraclemail.com", "mirrorrr.com", "misterpinball.de", "mji.ro", "mkpfilm.com", "ml2.net", "ml3.net",
+			"ml4.net", "ml5.net", "ml6.net", "ml7.net", "ml8.net", "ml9.net", "mnsmail.com", "moakt.cc", "moakt.co",
+			"moakt.com", "moakt.net", "moakt.org", "moakt.xyz", "moaktmail.com", "moaktmail.net", "moaktmail.org",
+			"moaktmail.xyz", "mobileninja.co.uk", "mochamail.com", "modemnet.net", "modomail.com", "moeinmail.com",
+			"moeri.org", "mohmal.com", "mohmal.in", "mohmal.net", "mohmal.org", "mohmal.xyz", "mohmalmail.com",
+			"mohmalmail.net", "mohmalmail.org", "mohmalmail.xyz", "moldova.cc", "moldova.net", "moldova.org",
+			"moldova.xyz", "moldova.com.br", "moldova.net.br", "moldova.org.br", "moldova.xyz.br", "moldova.info",
+			"moldova.ru", "moldova.su", "moldova.ua", "momentics.ru", "moncourrier.fr.nf", "monemail.fr.nf",
+			"monemail.net", "monemail.org", "monemail.xyz", "monemailing.com", "monemailing.net", "monemailing.org",
+			"monemailing.xyz", "monmail.fr.nf", "monmail.net", "monmail.org", "monmail.xyz", "monmailing.com",
+			"monmailing.net", "monmailing.org", "monmailing.xyz", "monoik.com", "monumentmail.com", "moonwake.com",
+			"moot.es", "moreawesomethanyou.com", "moreorcs.com", "morsin.com", "moscowmail.ru", "mostlysunny.com",
+			"motique.de", "mountainregionallibrary.net", "mox.pp.ua", "mp.uz", "mrblacklist.gq", "mrblacklist.ml",
+			"mrblacklist.tk", "mrblacklist.xyz", "mrblacklist.com.br", "mrblacklist.net.br", "mrblacklist.org.br",
+			"mrblacklist.xyz.br", "mrblacklist.info", "mrblacklist.ru", "mrblacklist.su", "mrblacklist.ua", "mrch.com",
+			"mrvousa.com", "msgden.com", "msgdrop.com", "msgsafe.net", "msgsafe.org", "msgsafe.xyz", "msgsafe.com.br",
+			"msgsafe.net.br", "msgsafe.org.br", "msgsafe.xyz.br", "msgsafe.info", "msgsafe.ru", "msgsafe.su",
+			"msgsafe.ua", "msgsafeemail.com", "msgsafeemail.net", "msgsafeemail.org", "msgsafeemail.xyz",
+			"msgsafeemail.com.br", "msgsafeemail.net.br", "msgsafeemail.org.br", "msgsafeemail.xyz.br",
+			"msgsafeemail.info", "msgsafeemail.ru", "msgsafeemail.su", "msgsafeemail.ua", "msgsafeemailing.com",
+			"msgsafeemailing.net", "msgsafeemailing.org", "msgsafeemailing.xyz", "msgsafeemailing.com.br",
+			"msgsafeemailing.net.br", "msgsafeemailing.org.br", "msgsafeemailing.xyz.br", "msgsafeemailing.info",
+			"msgsafeemailing.ru", "msgsafeemailing.su", "msgsafeemailing.ua", "msgspam.com", "msgspam.net",
+			"msgspam.org", "msgspam.xyz", "msgspam.com.br", "msgspam.net.br", "msgspam.org.br", "msgspam.xyz.br",
+			"msgspam.info", "msgspam.ru", "msgspam.su", "msgspam.ua", "msgspamming.com", "msgspamming.net",
+			"msgspamming.org", "msgspamming.xyz", "msgspamming.com.br", "msgspamming.net.br", "msgspamming.org.br",
+			"msgspamming.xyz.br", "msgspamming.info", "msgspamming.ru", "msgspamming.su", "msgspamming.ua"
+	);
 
-	// Domínios de e-mail válidos/normais (exceções de segurança)
-	private static final Set<String> ALLOWED_DOMAINS = new HashSet<>(Arrays.asList("gmail.com", "yahoo.com",
+	/**
+	 * Provedores conhecidos: consultados <strong>antes</strong> da lista de descartáveis e sempre
+	 * vencedores (comparação exata do domínio).
+	 *
+	 * <p>A lista existia, mas nunca era consultada — e quatro domínios dela (mail.com, mail.ru,
+	 * mail.ua e gmx.fr) também estavam na lista de descartáveis, o que recusava clientes desses
+	 * provedores. Imutável: nenhum método a altera.</p>
+	 */
+	private static final Set<String> ALLOWED_DOMAINS = Set.copyOf(List.of("gmail.com", "yahoo.com",
 			"hotmail.com", "outlook.com", "live.com", "icloud.com", "aol.com", "protonmail.com", "proton.me",
 			"mail.com", "yandex.com", "yandex.ru", "rambler.ru", "mail.ru", "bk.ru", "list.ru", "inbox.ru",
 			"internet.ru", "pochta.ru", "mail.ua", "ukr.net", "i.ua", "meta.ua", "bigmir.net", "euroweb.ua",
@@ -326,298 +333,287 @@ public final class EmailFormatter {
 			"katamail.com", "email.it", "pec.it", "tele2.it", "vodafone.it"));
 
 	private EmailFormatter() {
-		throw new UnsupportedOperationException("Utility class cannot be instantiated");
+		throw new UnsupportedOperationException("Classe utilitária não pode ser instanciada");
 	}
 
 	// ==================== VALIDAÇÃO PRINCIPAL ====================
 
 	/**
-	 * [PT] Valida se um e-mail é NORMAL (formato válido + NÃO é
-	 * temporário/descartável).
-	 * <p>
-	 * Esta é a validação recomendada para cadastros de usuários reais.
-	 * </p>
+	 * Valida se um e-mail é NORMAL: formato válido e domínio que não é temporário/descartável.
 	 *
-	 * [EN] Validates if an email is NORMAL (valid format + NOT
-	 * temporary/disposable).
-	 * <p>
-	 * This is the recommended validation for real user registrations.
-	 * </p>
+	 * <p>É a validação recomendada para cadastro de usuários reais. Espaços nas pontas são
+	 * ignorados; domínios da lista de permitidos nunca são considerados descartáveis; o domínio e
+	 * seus domínios pai são comparados com a lista de descartáveis (ver
+	 * {@link #isDisposableDomain(String)}).</p>
 	 *
-	 * @param email [PT] endereço de e-mail a ser validado [EN] email address to
-	 *              validate
-	 * @return [PT] true se for um e-mail normal válido, false caso contrário [EN]
-	 *         true if it's a valid normal email, false otherwise
+	 * @param email endereço de e-mail a validar
+	 * @return {@code true} se for um e-mail normal válido, {@code false} caso contrário
 	 */
 	public static boolean isValidNormal(String email) {
-		if (!isValidFormat(email)) {
-			return false;
-		}
 		String domain = getDomain(email);
-		if (domain == null) {
-			return false;
-		}
-		return !isDisposableDomain(domain);
+		return domain != null && !isDisposableDomain(domain);
 	}
 
 	/**
-	 * [PT] Valida apenas o formato do e-mail (não verifica se é temporário).
+	 * Valida apenas o formato do e-mail (não verifica se é temporário).
 	 *
-	 * [EN] Validates only the email format (does not check if it's temporary).
+	 * <p>As regras estão na documentação da classe. Entrada nula, vazia ou com mais de 254
+	 * caracteres devolve {@code false} sem outra análise, e a análise é linear e sem recursão:
+	 * qualquer tamanho de entrada é seguro.</p>
 	 *
-	 * @param email [PT] endereço de e-mail [EN] email address
-	 * @return [PT] true se o formato for válido, false caso contrário [EN] true if
-	 *         format is valid, false otherwise
+	 * @param email endereço de e-mail
+	 * @return {@code true} se o formato for válido, {@code false} caso contrário
 	 */
 	public static boolean isValidFormat(String email) {
-		if (email == null || email.trim().isEmpty()) {
-			return false;
-		}
-		return EMAIL_PATTERN.matcher(email.trim()).matches();
+		String candidate = trimToCandidate(email);
+		return candidate != null && hasValidSyntax(candidate, LOCAL_PART_SYMBOLS);
 	}
 
 	/**
-	 * [PT] Valida se um e-mail é válido usando validação rigorosa.
+	 * Valida o formato com a parte local restrita a letras, dígitos, {@code + - _} e pontos.
 	 *
-	 * [EN] Validates if an email is valid using strict validation.
+	 * <p>Mais conservadora que {@link #isValidFormat(String)}: recusa endereços válidos pela RFC,
+	 * porém raros (ex: {@code o'brien@...}). O limite total é de 254 caracteres — era 320, acima do
+	 * que um servidor SMTP aceita.</p>
 	 *
-	 * @param email [PT] endereço de e-mail [EN] email address
-	 * @return [PT] true se o formato for estritamente válido, false caso contrário
-	 *         [EN] true if format is strictly valid, false otherwise
+	 * @param email endereço de e-mail
+	 * @return {@code true} se o formato for estritamente válido, {@code false} caso contrário
 	 */
 	public static boolean isValidStrict(String email) {
-		if (email == null || email.trim().isEmpty()) {
-			return false;
-		}
-		String trimmed = email.trim();
-		if (trimmed.length() > 320) {
-			return false;
-		}
-		return STRICT_EMAIL_PATTERN.matcher(trimmed).matches();
+		String candidate = trimToCandidate(email);
+		return candidate != null && hasValidSyntax(candidate, STRICT_LOCAL_PART_SYMBOLS);
 	}
 
 	/**
-	 * [PT] Verifica se um domínio é temporário/descartável.
+	 * Verifica se um domínio é temporário/descartável.
 	 *
-	 * [EN] Checks if a domain is temporary/disposable.
+	 * <p>Espaços nas pontas, maiúsculas e um ponto final ({@code "mailinator.com."}) são ignorados.
+	 * Domínio da lista de permitidos devolve {@code false} sempre. Fora isso, o domínio e cada
+	 * domínio pai são procurados na lista: {@code "a.b.mailinator.com"} é descartável porque
+	 * {@code "mailinator.com"} é. Antes a comparação era exata, e qualquer subdomínio de um serviço
+	 * descartável passava.</p>
 	 *
-	 * @param domain [PT] domínio do e-mail [EN] email domain
-	 * @return [PT] true se for temporário/descartável, false caso contrário [EN]
-	 *         true if temporary/disposable, false otherwise
+	 * <p>Texto com mais de 253 caracteres não é um domínio e devolve {@code false} (a validação de
+	 * formato já o recusa).</p>
+	 *
+	 * @param domain domínio do e-mail (ex: {@code "mailinator.com"})
+	 * @return {@code true} se for temporário/descartável, {@code false} caso contrário
 	 */
 	public static boolean isDisposableDomain(String domain) {
-		if (domain == null)
+		String normalized = normalizeDomain(domain);
+		if (normalized == null || ALLOWED_DOMAINS.contains(normalized)) {
 			return false;
-		return DISPOSABLE_DOMAINS.contains(domain.toLowerCase());
+		}
+		String candidate = normalized;
+		while (true) {
+			if (DISPOSABLE_DOMAINS.contains(candidate)) {
+				return true;
+			}
+			int dot = candidate.indexOf('.');
+			if (dot < 0) {
+				return false;
+			}
+			candidate = candidate.substring(dot + 1);
+		}
 	}
 
 	/**
-	 * [PT] Verifica se um domínio é permitido (lista de domínios confiáveis).
+	 * Verifica se um domínio está na lista de provedores conhecidos (permitidos).
 	 *
-	 * [EN] Checks if a domain is allowed (list of trusted domains).
+	 * <p>Comparação exata, sem considerar espaços nas pontas, maiúsculas nem ponto final.</p>
 	 *
-	 * @param domain [PT] domínio do e-mail [EN] email domain
-	 * @return [PT] true se estiver na lista de permitidos, false caso contrário
-	 *         [EN] true if in allowed list, false otherwise
+	 * @param domain domínio do e-mail
+	 * @return {@code true} se estiver na lista de permitidos, {@code false} caso contrário
 	 */
 	public static boolean isAllowedDomain(String domain) {
-		if (domain == null)
-			return false;
-		return ALLOWED_DOMAINS.contains(domain.toLowerCase());
+		String normalized = normalizeDomain(domain);
+		return normalized != null && ALLOWED_DOMAINS.contains(normalized);
 	}
 
 	// ==================== NORMALIZAÇÃO E FORMATAÇÃO ====================
 
 	/**
-	 * [PT] Normaliza um e-mail (remove espaços, converte para minúsculas).
+	 * Normaliza um e-mail: remove espaços nas pontas e converte para minúsculas.
 	 *
-	 * [EN] Normalizes an email (removes spaces, converts to lowercase).
+	 * <p>A conversão usa {@link Locale#ROOT}: com o locale padrão da JVM em turco,
+	 * {@code "ADMIN"} virava {@code "admın"} (i sem ponto), e um domínio descartável escrito em
+	 * maiúsculas passava pela checagem.</p>
 	 *
-	 * @param email [PT] endereço de e-mail [EN] email address
-	 * @return [PT] e-mail normalizado ou null se entrada for nula [EN] normalized
-	 *         email or null if input is null
+	 * @param email endereço de e-mail
+	 * @return e-mail normalizado ou {@code null} se a entrada for nula
 	 */
 	public static String normalize(String email) {
-		if (email == null)
+		if (email == null) {
 			return null;
-		return email.trim().toLowerCase();
-	}
-
-	/**
-	 * [PT] Formata um e-mail com nome para exibição (ex: "Nome
-	 * <email@dominio.com>").
-	 *
-	 * [EN] Formats an email with name for display (e.g., "Name
-	 * <email@domain.com>").
-	 *
-	 * @param nome  [PT] nome do destinatário [EN] recipient name
-	 * @param email [PT] endereço de e-mail [EN] email address
-	 * @return [PT] string formatada ou apenas o e-mail se nome for inválido [EN]
-	 *         formatted string or just the email if name is invalid
-	 */
-	public static String format(String nome, String email) {
-		if (email == null)
-			return null;
-		if (nome == null || nome.trim().isEmpty()) {
-			return normalize(email);
 		}
-		return nome.trim() + " <" + normalize(email) + ">";
+		return email.trim().toLowerCase(Locale.ROOT);
 	}
 
 	/**
-	 * [PT] Extrai a parte local do e-mail (antes do @).
+	 * Formata um e-mail com nome para exibição (ex: {@code "Nome <email@dominio.com>"}).
 	 *
-	 * [EN] Extracts the local part of the email (before @).
+	 * <p>O nome é saneado para que o resultado também sirva como <strong>um único</strong>
+	 * destinatário: caracteres de controle e quebras de linha viram espaço (uma quebra de linha no
+	 * nome permitia injetar cabeçalhos), e um nome com caractere especial da RFC 5322
+	 * ({@code , ; : < > @ ( ) [ ] . "} ou barra invertida) sai entre aspas, com aspas e barras
+	 * invertidas escapadas. Sem isso, {@code format("Silva, João", ...)} produzia um texto que os
+	 * programas de e-mail leem como <em>dois</em> destinatários. Nomes comuns saem como antes, sem
+	 * aspas.</p>
 	 *
-	 * @param email [PT] endereço de e-mail [EN] email address
-	 * @return [PT] parte local do e-mail ou null se inválido [EN] local part of the
-	 *         email or null if invalid
+	 * <p>O e-mail é apenas normalizado ({@link #normalize(String)}), não validado: para usar o
+	 * resultado como destinatário, valide o e-mail antes com {@link #isValidFormat(String)} ou
+	 * {@link #isValidNormal(String)}.</p>
+	 *
+	 * @param name  nome do destinatário (pode ser {@code null} ou vazio)
+	 * @param email endereço de e-mail
+	 * @return texto formatado; apenas o e-mail normalizado se o nome for vazio; {@code null} se o
+	 *         e-mail for {@code null}
+	 */
+	public static String format(String name, String email) {
+		if (email == null) {
+			return null;
+		}
+		String address = normalize(email);
+		String displayName = toSafeDisplayName(name);
+		return displayName.isEmpty() ? address : displayName + " <" + address + ">";
+	}
+
+	/**
+	 * Extrai a parte local do e-mail (antes do {@code @}), sem os espaços das pontas.
+	 *
+	 * @param email endereço de e-mail
+	 * @return parte local do e-mail ou {@code null} se o formato for inválido
 	 */
 	public static String getLocalPart(String email) {
-		if (!isValidFormat(email))
+		if (!isValidFormat(email)) {
 			return null;
-		int atIndex = email.indexOf('@');
-		if (atIndex == -1)
-			return null;
-		return email.substring(0, atIndex);
+		}
+		String candidate = email.trim();
+		return candidate.substring(0, candidate.indexOf('@'));
 	}
 
 	/**
-	 * [PT] Extrai o domínio do e-mail (depois do @).
+	 * Extrai o domínio do e-mail (depois do {@code @}), em minúsculas e sem os espaços das pontas.
 	 *
-	 * [EN] Extracts the domain of the email (after @).
-	 *
-	 * @param email [PT] endereço de e-mail [EN] email address
-	 * @return [PT] domínio do e-mail ou null se inválido [EN] email domain or null
-	 *         if invalid
+	 * @param email endereço de e-mail
+	 * @return domínio do e-mail ou {@code null} se o formato for inválido
 	 */
 	public static String getDomain(String email) {
-		if (!isValidFormat(email))
+		if (!isValidFormat(email)) {
 			return null;
-		int atIndex = email.indexOf('@');
-		if (atIndex == -1)
-			return null;
-		return email.substring(atIndex + 1).toLowerCase();
+		}
+		String candidate = email.trim();
+		return candidate.substring(candidate.indexOf('@') + 1).toLowerCase(Locale.ROOT);
 	}
 
 	/**
-	 * [PT] Mascara um e-mail para exibição segura (ex: usu***@dominio.com).
+	 * Mascara um e-mail para exibição segura (ex: {@code "us***@dominio.com"}).
 	 *
-	 * [EN] Masks an email for safe display (e.g., use***@domain.com).
-	 *
-	 * @param email [PT] endereço de e-mail [EN] email address
-	 * @return [PT] e-mail mascarado ou null se inválido [EN] masked email or null
-	 *         if invalid
+	 * @param email endereço de e-mail
+	 * @return e-mail mascarado ou {@code null} se o formato for inválido
 	 */
 	public static String mask(String email) {
-		if (!isValidFormat(email))
-			return null;
 		String local = getLocalPart(email);
 		String domain = getDomain(email);
-		if (local == null || domain == null)
+		if (local == null || domain == null) {
 			return null;
-
+		}
 		if (local.length() <= 2) {
 			return "***@" + domain;
 		}
-		String maskedLocal = local.substring(0, 2) + "***";
-		return maskedLocal + "@" + domain;
+		return local.substring(0, 2) + "***@" + domain;
 	}
 
 	/**
-	 * [PT] Mascara um e-mail exibindo apenas o primeiro caractere e o domínio.
+	 * Mascara um e-mail exibindo apenas o primeiro caractere e o domínio.
 	 *
-	 * [EN] Masks an email showing only the first character and the domain.
-	 *
-	 * @param email [PT] endereço de e-mail [EN] email address
-	 * @return [PT] e-mail mascarado (ex: "j***@exemplo.com") [EN] masked email
-	 *         (e.g., "j***@example.com")
+	 * @param email endereço de e-mail
+	 * @return e-mail mascarado (ex: {@code "j***@exemplo.com"}) ou {@code null} se o formato for
+	 *         inválido
 	 */
 	public static String maskWithFirstChar(String email) {
-		if (!isValidFormat(email))
-			return null;
 		String local = getLocalPart(email);
 		String domain = getDomain(email);
-		if (local == null || domain == null)
+		if (local == null || domain == null) {
 			return null;
-
-		if (local.isEmpty())
+		}
+		if (local.isEmpty()) {
 			return "***@" + domain;
-		String maskedLocal = local.substring(0, 1) + "***";
-		return maskedLocal + "@" + domain;
+		}
+		return local.substring(0, 1) + "***@" + domain;
 	}
 
 	// ==================== VALIDAÇÃO DE MÚLTIPLOS E-MAILS ====================
 
 	/**
-	 * [PT] Filtra uma lista de e-mails, retornando apenas os normais (válidos + não
-	 * temporários).
+	 * Filtra uma lista de e-mails, devolvendo apenas os normais (válidos e não temporários), já
+	 * normalizados.
 	 *
-	 * [EN] Filters a list of emails, returning only normal ones (valid + not
-	 * temporary).
-	 *
-	 * @param emails [PT] lista de e-mails [EN] list of emails
-	 * @return [PT] lista contendo apenas e-mails normais [EN] list containing only
-	 *         normal emails
+	 * @param emails lista de e-mails
+	 * @return nova lista contendo apenas os e-mails normais
 	 */
 	public static List<String> filterNormal(List<String> emails) {
-		if (emails == null)
+		if (emails == null) {
 			return Collections.emptyList();
+		}
 		return emails.stream().filter(EmailFormatter::isValidNormal).map(EmailFormatter::normalize)
 				.collect(ArrayList::new, ArrayList::add, ArrayList::addAll);
 	}
 
 	/**
-	 * [PT] Verifica se todos os e-mails em uma lista são normais.
+	 * Verifica se todos os e-mails de uma lista são normais.
 	 *
-	 * [EN] Checks if all emails in a list are normal.
-	 *
-	 * @param emails [PT] lista de e-mails [EN] list of emails
-	 * @return [PT] true se todos forem normais, false caso contrário [EN] true if
-	 *         all are normal, false otherwise
+	 * @param emails lista de e-mails
+	 * @return {@code true} se todos forem normais; {@code false} se algum não for ou se a lista
+	 *         for nula ou vazia
 	 */
 	public static boolean areAllNormal(List<String> emails) {
-		if (emails == null || emails.isEmpty())
+		if (emails == null || emails.isEmpty()) {
 			return false;
+		}
 		return emails.stream().allMatch(EmailFormatter::isValidNormal);
 	}
 
 	// ==================== UTILITÁRIOS ADICIONAIS ====================
 
 	/**
-	 * [PT] Adiciona um domínio à lista de domínios descartáveis.
+	 * Adiciona um domínio à lista de domínios descartáveis (vale também para os subdomínios).
 	 *
-	 * [EN] Adds a domain to the list of disposable domains.
+	 * <p>Seguro para chamar com a aplicação no ar. Domínios da lista de permitidos continuam aceitos
+	 * mesmo se adicionados aqui.</p>
 	 *
-	 * @param domain [PT] domínio a ser bloqueado (ex: "tempemail.com") [EN] domain
-	 *               to block (e.g., "tempemail.com")
+	 * @param domain domínio a bloquear (ex: {@code "tempemail.com"})
 	 */
 	public static void addDisposableDomain(String domain) {
-		if (domain != null && !domain.trim().isEmpty()) {
-			DISPOSABLE_DOMAINS.add(domain.toLowerCase().trim());
+		String normalized = normalizeDomain(domain);
+		if (normalized != null) {
+			DISPOSABLE_DOMAINS.add(normalized);
 		}
 	}
 
 	/**
-	 * [PT] Remove um domínio da lista de domínios descartáveis.
+	 * Remove um domínio da lista de domínios descartáveis.
 	 *
-	 * [EN] Removes a domain from the list of disposable domains.
+	 * <p>Seguro para chamar com a aplicação no ar.</p>
 	 *
-	 * @param domain [PT] domínio a ser removido [EN] domain to remove
+	 * @param domain domínio a remover
 	 */
 	public static void removeDisposableDomain(String domain) {
-		if (domain != null) {
-			DISPOSABLE_DOMAINS.remove(domain.toLowerCase().trim());
+		String normalized = normalizeDomain(domain);
+		if (normalized != null) {
+			DISPOSABLE_DOMAINS.remove(normalized);
 		}
 	}
 
 	/**
-	 * [PT] Gera um e-mail aleatório para testes (nunca será considerado normal).
+	 * Gera um e-mail aleatório para testes, no formato {@code "test_XXXXXXXX@example.com"}.
 	 *
-	 * [EN] Generates a random email for testing (will never be considered normal).
+	 * <p>O endereço tem formato válido e é <strong>aceito</strong> por
+	 * {@link #isValidNormal(String)}: {@code example.com} não é descartável (a documentação antiga
+	 * dizia o contrário). O domínio é reservado para exemplos (RFC 2606) e não recebe e-mail de
+	 * verdade — serve para preencher cadastros em teste, não para testar envio.</p>
 	 *
-	 * @return [PT] e-mail aleatório no formato "test_XXXXX@example.com" [EN] random
-	 *         email in format "test_XXXXX@example.com"
+	 * @return e-mail aleatório em {@code example.com}
 	 */
 	public static String generateRandomEmail() {
 		String randomPart = UUID.randomUUID().toString().substring(0, 8);
@@ -625,12 +621,9 @@ public final class EmailFormatter {
 	}
 
 	/**
-	 * [PT] Gera um e-mail normal aleatório (com domínio permitido).
+	 * Gera um e-mail normal aleatório, com um domínio da lista de permitidos.
 	 *
-	 * [EN] Generates a random normal email (with allowed domain).
-	 *
-	 * @return [PT] e-mail aleatório em domínio permitido (ex: gmail.com) [EN]
-	 *         random email with allowed domain (e.g., gmail.com)
+	 * @return e-mail aleatório em domínio permitido (ex: {@code gmail.com})
 	 */
 	public static String generateNormalRandomEmail() {
 		String[] allowedArray = ALLOWED_DOMAINS.toArray(new String[0]);
@@ -640,44 +633,209 @@ public final class EmailFormatter {
 	}
 
 	/**
-	 * [PT] Verifica se dois e-mails são iguais (ignorando maiúsculas/minúsculas).
+	 * Verifica se dois e-mails são iguais, ignorando maiúsculas/minúsculas e espaços nas pontas.
 	 *
-	 * [EN] Checks if two emails are equal (case-insensitive).
-	 *
-	 * @param email1 [PT] primeiro e-mail [EN] first email
-	 * @param email2 [PT] segundo e-mail [EN] second email
-	 * @return [PT] true se forem iguais (ignorando case), false caso contrário [EN]
-	 *         true if equal (case-insensitive), false otherwise
+	 * @param email1 primeiro e-mail
+	 * @param email2 segundo e-mail
+	 * @return {@code true} se forem iguais após {@link #normalize(String)} (ou ambos nulos)
 	 */
 	public static boolean equalsIgnoreCase(String email1, String email2) {
-		if (email1 == null && email2 == null)
+		if (email1 == null && email2 == null) {
 			return true;
-		if (email1 == null || email2 == null)
+		}
+		if (email1 == null || email2 == null) {
 			return false;
+		}
 		return normalize(email1).equals(normalize(email2));
 	}
 
 	// ==================== MENSAGENS DE ERRO ====================
 
 	/**
-	 * [PT] Retorna uma mensagem de erro descritiva para um e-mail inválido.
+	 * Devolve uma mensagem de erro, em português, pronta para exibir ao usuário.
 	 *
-	 * [EN] Returns a descriptive error message for an invalid email.
-	 *
-	 * @param email [PT] e-mail a ser verificado [EN] email to check
-	 * @return [PT] mensagem de erro ou null se o e-mail for normal [EN] error
-	 *         message or null if email is normal
+	 * @param email e-mail a verificar
+	 * @return mensagem de erro, ou {@code null} se o e-mail for normal
 	 */
 	public static String getValidationErrorMessage(String email) {
 		if (email == null || email.trim().isEmpty()) {
-			return "O e-mail não pode estar vazio / Email cannot be empty";
+			return "O e-mail não pode estar vazio.";
 		}
 		if (!isValidFormat(email)) {
-			return "Formato de e-mail inválido / Invalid email format";
+			return "Formato de e-mail inválido.";
 		}
 		if (isDisposableDomain(getDomain(email))) {
-			return "E-mail temporário não é permitido. Use um e-mail permanente / Temporary email not allowed. Use a permanent email";
+			return "E-mail temporário não é permitido. Use um e-mail permanente.";
 		}
 		return null;
+	}
+
+	// ==================== IMPLEMENTAÇÃO ====================
+
+	/**
+	 * Devolve o e-mail sem os espaços das pontas, ou {@code null} se ficar vazio ou passar de 254
+	 * caracteres. É a primeira coisa que toda validação faz: nada examina um texto maior que isso.
+	 */
+	private static String trimToCandidate(String email) {
+		if (email == null) {
+			return null;
+		}
+		String trimmed = email.trim();
+		return trimmed.isEmpty() || trimmed.length() > MAX_ADDRESS_LENGTH ? null : trimmed;
+	}
+
+	/**
+	 * Analisa {@code parte-local@domínio} numa varredura linear, sem expressão regular.
+	 *
+	 * <p>A expressão regular antiga repetia um grupo por rótulo de domínio, e o
+	 * {@code java.util.regex} empilha uma chamada recursiva por repetição de grupo: um endereço com
+	 * alguns milhares de rótulos estourava a pilha da thread da requisição. Aqui não há recursão, e
+	 * o texto já chega limitado a 254 caracteres.</p>
+	 *
+	 * @param address       endereço já aparado e dentro do limite de tamanho
+	 * @param localSymbols  símbolos aceitos na parte local, além de letras e dígitos ASCII
+	 */
+	private static boolean hasValidSyntax(String address, String localSymbols) {
+		int at = address.indexOf('@');
+		if (at <= 0 || at > MAX_LOCAL_PART_LENGTH || at != address.lastIndexOf('@')) {
+			return false;
+		}
+		return isValidLocalPart(address, at, localSymbols) && isValidDomain(address, at + 1);
+	}
+
+	/** Parte local {@code [0, end)}: blocos não vazios separados por um único ponto. */
+	private static boolean isValidLocalPart(String address, int end, String symbols) {
+		boolean expectingAtom = true;
+		for (int i = 0; i < end; i++) {
+			char c = address.charAt(i);
+			if (c == '.') {
+				if (expectingAtom) {
+					return false; // ponto no início ou dois pontos seguidos
+				}
+				expectingAtom = true;
+			} else if (isAsciiLetterOrDigit(c) || symbols.indexOf(c) >= 0) {
+				expectingAtom = false;
+			} else {
+				return false;
+			}
+		}
+		return !expectingAtom; // não pode terminar em ponto
+	}
+
+	/**
+	 * Domínio a partir de {@code start}: dois ou mais rótulos de 1 a 63 caracteres (letras, dígitos e
+	 * hífen, sem hífen nas pontas) e domínio de topo válido.
+	 */
+	private static boolean isValidDomain(String address, int start) {
+		int end = address.length();
+		int labelStart = start;
+		int labels = 0;
+		for (int i = start; i <= end; i++) {
+			if (i < end && address.charAt(i) != '.') {
+				char c = address.charAt(i);
+				if (!isAsciiLetterOrDigit(c) && c != '-') {
+					return false;
+				}
+				continue;
+			}
+			int length = i - labelStart;
+			if (length == 0 || length > MAX_LABEL_LENGTH) {
+				return false;
+			}
+			if (address.charAt(labelStart) == '-' || address.charAt(i - 1) == '-') {
+				return false;
+			}
+			labels++;
+			labelStart = i + 1;
+		}
+		return labels >= 2 && isValidTopLevelLabel(address, address.lastIndexOf('.') + 1, end);
+	}
+
+	/** Domínio de topo: duas letras ou mais, ou IDN em punycode ({@code xn--p1ai}, por exemplo). */
+	private static boolean isValidTopLevelLabel(String address, int start, int end) {
+		int length = end - start;
+		if (length < 2) {
+			return false;
+		}
+		if (length > 4 && address.regionMatches(true, start, "xn--", 0, 4)) {
+			return true; // os caracteres do rótulo já foram conferidos em isValidDomain
+		}
+		for (int i = start; i < end; i++) {
+			if (!isAsciiLetter(address.charAt(i))) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private static boolean isAsciiLetter(char c) {
+		return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+	}
+
+	private static boolean isAsciiLetterOrDigit(char c) {
+		return isAsciiLetter(c) || (c >= '0' && c <= '9');
+	}
+
+	/**
+	 * Domínio sem espaços nas pontas, em minúsculas ({@link Locale#ROOT}) e sem ponto final; ou
+	 * {@code null} se ficar vazio ou longo demais para ser um domínio.
+	 */
+	private static String normalizeDomain(String domain) {
+		if (domain == null) {
+			return null;
+		}
+		String trimmed = domain.trim();
+		if (trimmed.isEmpty() || trimmed.length() > MAX_DOMAIN_LENGTH + 1) {
+			return null;
+		}
+		String normalized = trimmed.toLowerCase(Locale.ROOT);
+		if (normalized.endsWith(".")) {
+			normalized = normalized.substring(0, normalized.length() - 1);
+		}
+		return normalized.isEmpty() ? null : normalized;
+	}
+
+	/**
+	 * Nome de exibição seguro para um cabeçalho de destinatário: controles viram espaço e nomes com
+	 * caractere especial saem entre aspas (ver {@link #format(String, String)}).
+	 */
+	private static String toSafeDisplayName(String name) {
+		if (name == null) {
+			return "";
+		}
+		StringBuilder cleaned = new StringBuilder(name.length());
+		for (int i = 0; i < name.length(); i++) {
+			char c = name.charAt(i);
+			cleaned.append(isControlOrLineBreak(c) ? ' ' : c);
+		}
+		String trimmed = cleaned.toString().trim();
+		boolean needsQuotes = false;
+		for (int i = 0; i < trimmed.length() && !needsQuotes; i++) {
+			needsQuotes = DISPLAY_NAME_SPECIALS.indexOf(trimmed.charAt(i)) >= 0;
+		}
+		if (!needsQuotes) {
+			return trimmed;
+		}
+		StringBuilder quoted = new StringBuilder(trimmed.length() + 8).append('"');
+		for (int i = 0; i < trimmed.length(); i++) {
+			char c = trimmed.charAt(i);
+			if (c == '"' || c == '\\') {
+				quoted.append('\\');
+			}
+			quoted.append(c);
+		}
+		return quoted.append('"').toString();
+	}
+
+	/** Caractere de controle (CR, LF, TAB, NUL...) ou separador de linha/parágrafo Unicode. */
+	private static boolean isControlOrLineBreak(char c) {
+		return Character.isISOControl(c) || c == '\u2028' || c == '\u2029';
+	}
+
+	/** Conjunto concorrente com os valores dados (repetições são ignoradas). */
+	private static Set<String> concurrentSetOf(String... values) {
+		Set<String> set = ConcurrentHashMap.newKeySet(values.length * 2);
+		Collections.addAll(set, values);
+		return set;
 	}
 }

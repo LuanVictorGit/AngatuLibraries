@@ -1,25 +1,21 @@
 package br.com.angatusistemas.lib.images;
 
-import java.awt.Color;
 import java.awt.Graphics2D;
+import java.awt.RenderingHints;
 import java.awt.image.BufferedImage;
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
-import java.io.File;
+import java.awt.image.WritableRaster;
 import java.io.IOException;
-import java.util.Base64;
 import java.util.EnumMap;
+import java.util.List;
 import java.util.Map;
-
-import javax.imageio.ImageIO;
 
 import com.google.zxing.BarcodeFormat;
 import com.google.zxing.BinaryBitmap;
+import com.google.zxing.DecodeHintType;
 import com.google.zxing.EncodeHintType;
 import com.google.zxing.LuminanceSource;
 import com.google.zxing.MultiFormatReader;
 import com.google.zxing.NotFoundException;
-import com.google.zxing.Result;
 import com.google.zxing.WriterException;
 import com.google.zxing.client.j2se.BufferedImageLuminanceSource;
 import com.google.zxing.common.BitMatrix;
@@ -31,27 +27,60 @@ import br.com.angatusistemas.lib.console.Console;
 import br.com.angatusistemas.lib.dependencies.Dependencies;
 
 /**
- * [PT] Classe utilitária para geração e leitura de QR Codes utilizando a biblioteca ZXing.
- * <p>
- * Permite criar QR Codes a partir de texto/URL, configurar tamanho, margem, correção de erros,
- * e também decodificar QR Codes a partir de arquivos de imagem ou Base64.
- * </p>
+ * Geração e leitura de QR Codes com a biblioteca ZXing.
  *
- * [EN] Utility class for generating and reading QR Codes using the ZXing library.
- * <p>
- * Enables creating QR Codes from text/URL, configuring size, margin, error correction,
- * and also decoding QR Codes from image files or Base64.
- * </p>
+ * <p>Gera QR Codes a partir de texto ou URL — com tamanho, margem, nível de correção de erro e
+ * logo central configuráveis — e lê QR Codes de arquivo, Base64 ou {@link BufferedImage}.</p>
+ *
+ * <h2>Tamanho, margem e correção de erro</h2>
+ * <ul>
+ *   <li>Largura e altura vão de 1 a 4096 pixels. Se o conteúdo precisar de mais módulos do que
+ *       cabem no tamanho pedido, a imagem sai com o tamanho mínimo que o comporta (maior que o
+ *       pedido); se sobrar espaço, o código é centralizado com borda branca.</li>
+ *   <li>A margem (<em>quiet zone</em>) é contada em <strong>módulos</strong> — os quadradinhos do
+ *       código —, não em pixels, de 0 a 64. O padrão é 0, como sempre foi nesta biblioteca; a norma
+ *       do QR Code recomenda 4, e ela faz diferença para câmeras quando o código fica sobre fundo
+ *       escuro ou estampado.</li>
+ *   <li>O nível de correção padrão é M (recupera cerca de 15% do código). Com logo, o nível é H
+ *       (cerca de 30%): o logo cobre parte dos módulos.</li>
+ * </ul>
+ *
+ * <h2>Leitura</h2>
+ * <p>A imagem é lida com as mesmas proteções da {@link ImageAPI} — formato reconhecido pelos
+ * bytes, limite de pixels conferido pelo cabeçalho antes de decodificar — e o leitor procura só
+ * QR Code, sem tentar os formatos de código de barras.</p>
+ *
+ * <h2>Dependências</h2>
+ * <p>Gerar exige {@code com.google.zxing:core:3.5.3}; ler exige também
+ * {@code com.google.zxing:javase:3.5.3}. Sem elas, a chamada exibe a instrução de instalação e lança
+ * {@link br.com.angatusistemas.lib.dependencies.MissingDependencyException}. Toda referência ao
+ * ZXing fica numa classe interna carregada só depois dessa verificação — nenhum campo estático da
+ * {@code QRCodeAPI} tem tipo do ZXing —, então a classe carrega sem o jar. Os tipos do ZXing que
+ * continuam nas assinaturas públicas ({@code ErrorCorrectionLevel}, {@code WriterException},
+ * {@code NotFoundException}) não são carregados pela JVM ao usar a classe; só o código que os
+ * menciona (um {@code catch (WriterException e)} no projeto) precisa do jar.</p>
  *
  * @author Angatu Sistemas
- * @see <a href="https://github.com/zxing/zxing">ZXing GitHub</a>
+ * @see ImageAPI
+ * @see <a href="https://github.com/zxing/zxing">ZXing no GitHub</a>
  */
 public final class QRCodeAPI {
 
     private static final int DEFAULT_WIDTH = 300;
     private static final int DEFAULT_HEIGHT = 300;
     private static final String DEFAULT_IMAGE_FORMAT = "png";
-    private static final ErrorCorrectionLevel DEFAULT_ERROR_CORRECTION = ErrorCorrectionLevel.M;
+
+    /** Margem padrão, em módulos: a mesma desde a primeira versão (ver o Javadoc da classe). */
+    private static final int DEFAULT_QUIET_ZONE_MODULES = 0;
+
+    /**
+     * Maior largura ou altura aceita, em pixels. Sem teto, um tamanho vindo da requisição alocava
+     * a imagem que pedisse — {@code 100000 × 100000} é um OutOfMemoryError.
+     */
+    private static final int MAX_SIZE_PIXELS = 4096;
+
+    /** Maior margem aceita, em módulos: a norma pede 4; acima de 64 só desperdiça a imagem. */
+    private static final int MAX_QUIET_ZONE_MODULES = 64;
 
     /** Coordenadas Maven das dependências ZXing. */
     private static final String ZXING_CORE_COORDINATES = "com.google.zxing:core:3.5.3";
@@ -60,322 +89,309 @@ public final class QRCodeAPI {
     private static final String QRCODE_FEATURE = "QR Code (ZXing)";
 
     private QRCodeAPI() {
-        throw new UnsupportedOperationException("Utility class cannot be instantiated");
+        throw new UnsupportedOperationException("Classe utilitária não pode ser instanciada");
     }
 
     // ==================== GERAÇÃO DE QR CODE ====================
 
     /**
-     * [PT] Gera um QR Code a partir de um texto e retorna como BufferedImage.
-     * <p>
-     * Utiliza tamanho padrão (300x300) e correção de erro padrão (M).
-     * </p>
+     * Gera um QR Code de 300 × 300 pixels, com correção de erro M e margem padrão (0 módulo).
      *
-     * [EN] Generates a QR Code from a text and returns as BufferedImage.
-     * <p>
-     * Uses default size (300x300) and default error correction (M).
-     * </p>
-     *
-     * @param text [PT] conteúdo do QR Code (URL, texto, etc.)
-     *             [EN] QR Code content (URL, text, etc.)
-     * @return [PT] imagem do QR Code
-     *         [EN] QR Code image
-     * @throws WriterException [PT] se não for possível gerar o QR Code
-     *                         [EN] if QR Code generation fails
+     * @param text conteúdo do QR Code (URL, texto etc.)
+     * @return imagem do QR Code ({@code TYPE_INT_RGB}, preto sobre branco)
+     * @throws WriterException          se o ZXing não conseguir codificar o conteúdo (ex.: texto
+     *                                  longo demais para um QR Code)
+     * @throws IllegalArgumentException se o texto for nulo ou vazio
+     * @throws br.com.angatusistemas.lib.dependencies.MissingDependencyException sem o ZXing core
      */
     public static BufferedImage generateQRCode(String text) throws WriterException {
-        return generateQRCode(text, DEFAULT_WIDTH, DEFAULT_HEIGHT, DEFAULT_ERROR_CORRECTION, 0);
+        return generateQRCode(text, DEFAULT_WIDTH, DEFAULT_HEIGHT);
     }
 
     /**
-     * [PT] Gera um QR Code com tamanho personalizado.
+     * Gera um QR Code com tamanho escolhido, correção de erro M e margem padrão (0 módulo).
      *
-     * [EN] Generates a QR Code with custom size.
-     *
-     * @param text   [PT] conteúdo do QR Code
-     *               [EN] QR Code content
-     * @param width  [PT] largura em pixels
-     *               [EN] width in pixels
-     * @param height [PT] altura em pixels
-     *               [EN] height in pixels
-     * @return [PT] imagem do QR Code
-     *         [EN] QR Code image
-     * @throws WriterException [PT] se não for possível gerar
-     *                         [EN] if generation fails
+     * @param text   conteúdo do QR Code
+     * @param width  largura em pixels (1 a 4096)
+     * @param height altura em pixels (1 a 4096)
+     * @return imagem do QR Code; maior que o pedido se o conteúdo não couber (ver o Javadoc da classe)
+     * @throws WriterException          se o ZXing não conseguir codificar o conteúdo
+     * @throws IllegalArgumentException se o texto for vazio ou o tamanho estiver fora do limite
+     * @throws br.com.angatusistemas.lib.dependencies.MissingDependencyException sem o ZXing core
      */
     public static BufferedImage generateQRCode(String text, int width, int height) throws WriterException {
-        return generateQRCode(text, width, height, DEFAULT_ERROR_CORRECTION, 0);
+        requireGeneration(text, width, height, DEFAULT_QUIET_ZONE_MODULES);
+        return QrSupport.generate(text, width, height, null, DEFAULT_QUIET_ZONE_MODULES, false);
     }
 
     /**
-     * [PT] Gera um QR Code com parâmetros avançados.
+     * Gera um QR Code com todos os parâmetros.
      *
-     * [EN] Generates a QR Code with advanced parameters.
-     *
-     * @param text                [PT] conteúdo do QR Code
-     *                            [EN] QR Code content
-     * @param width               [PT] largura em pixels
-     *                            [EN] width in pixels
-     * @param height              [PT] altura em pixels
-     *                            [EN] height in pixels
-     * @param errorCorrectionLevel [PT] nível de correção de erro (L, M, Q, H)
-     *                            [EN] error correction level (L, M, Q, H)
-     * @param quietZonePixels     [PT] margem branca ao redor do código (em pixels)
-     *                            [EN] white margin around the code (in pixels)
-     * @return [PT] imagem do QR Code
-     *         [EN] QR Code image
-     * @throws WriterException [PT] se não for possível gerar
-     *                         [EN] if generation fails
+     * @param text                 conteúdo do QR Code
+     * @param width                largura em pixels (1 a 4096)
+     * @param height               altura em pixels (1 a 4096)
+     * @param errorCorrectionLevel nível de correção de erro (L, M, Q ou H); {@code null} usa M
+     * @param quietZoneModules     margem branca em volta do código, em <strong>módulos</strong> (não
+     *                             em pixels), de 0 a 64; a norma recomenda 4
+     * @return imagem do QR Code; maior que o pedido se o conteúdo não couber (ver o Javadoc da classe)
+     * @throws WriterException          se o ZXing não conseguir codificar o conteúdo
+     * @throws IllegalArgumentException se o texto for vazio, ou o tamanho ou a margem estiverem fora
+     *                                  do limite
+     * @throws br.com.angatusistemas.lib.dependencies.MissingDependencyException sem o ZXing core
      */
     public static BufferedImage generateQRCode(String text, int width, int height,
                                                ErrorCorrectionLevel errorCorrectionLevel,
-                                               int quietZonePixels) throws WriterException {
-        Dependencies.require("com.google.zxing.QRCodeWriter", ZXING_CORE_COORDINATES, QRCODE_FEATURE);
-        if (text == null || text.trim().isEmpty()) {
-            throw new IllegalArgumentException("QR Code text cannot be null or empty");
-        }
-        return QrSupport.generate(text, width, height, errorCorrectionLevel, quietZonePixels);
+                                               int quietZoneModules) throws WriterException {
+        requireGeneration(text, width, height, quietZoneModules);
+        return QrSupport.generate(text, width, height, errorCorrectionLevel, quietZoneModules, false);
     }
 
     // ==================== MÉTODOS DE SAÍDA ====================
 
     /**
-     * [PT] Salva um QR Code em um arquivo de imagem.
+     * Grava um QR Code em arquivo, no formato da extensão do caminho.
      *
-     * [EN] Saves a QR Code to an image file.
+     * <p>Grava com {@link ImageAPI#saveImage(BufferedImage, String)}: falha com {@link IOException}
+     * quando nada pode ser gravado (ex.: extensão sem codificador instalado), em vez de voltar sem
+     * ter criado o arquivo.</p>
      *
-     * @param qrCode   [PT] imagem do QR Code
-     *                 [EN] QR Code image
-     * @param filePath [PT] caminho de destino (ex: "qrcode.png")
-     *                 [EN] destination path (e.g., "qrcode.png")
-     * @throws IOException [PT] se ocorrer erro de escrita
-     *                     [EN] if write error occurs
+     * @param qrCode   imagem do QR Code
+     * @param filePath caminho de destino (ex.: {@code "qrcode.png"})
+     * @throws IOException              se a gravação falhar
+     * @throws IllegalArgumentException se a imagem ou o caminho forem nulos
      */
     public static void saveQRCodeToFile(BufferedImage qrCode, String filePath) throws IOException {
-        String extension = filePath.substring(filePath.lastIndexOf('.') + 1);
-        ImageIO.write(qrCode, extension, new File(filePath));
+        ImageAPI.saveImage(qrCode, filePath);
         Console.log("QR Code salvo em: " + filePath);
     }
 
     /**
-     * [PT] Converte um QR Code (BufferedImage) para string Base64.
+     * Converte um QR Code em data URI Base64 ({@code data:image/png;base64,...}).
      *
-     * [EN] Converts a QR Code (BufferedImage) to Base64 string.
+     * <p>O prefixo leva o tipo MIME oficial do formato ({@code "jpg"} gera {@code image/jpeg}). Não
+     * depende do ZXing.</p>
      *
-     * @param qrCode [PT] imagem do QR Code
-     *               [EN] QR Code image
-     * @param format [PT] formato da imagem (ex: "png", "jpg")
-     *               [EN] image format (e.g., "png", "jpg")
-     * @return [PT] string Base64 com prefixo MIME
-     *         [EN] Base64 string with MIME prefix
-     * @throws IOException [PT] se ocorrer erro na codificação
-     *                     [EN] if encoding error occurs
+     * @param qrCode imagem do QR Code
+     * @param format formato da imagem (ex.: {@code "png"}, {@code "jpg"})
+     * @return data URI com a imagem
+     * @throws IOException              se não houver codificador para o formato ou a gravação falhar
+     * @throws IllegalArgumentException se a imagem ou o formato forem nulos
      */
     public static String qrCodeToBase64(BufferedImage qrCode, String format) throws IOException {
-        ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        ImageIO.write(qrCode, format, baos);
-        byte[] bytes = baos.toByteArray();
-        String base64 = Base64.getEncoder().encodeToString(bytes);
-        return "data:image/" + format + ";base64," + base64;
+        return ImageAPI.imageToBase64(qrCode, format);
     }
 
     /**
-     * [PT] Gera um QR Code e já retorna como Base64 (útil para APIs REST).
+     * Gera um QR Code e o devolve como data URI Base64 em PNG — útil para APIs REST.
      *
-     * [EN] Generates a QR Code and returns as Base64 (useful for REST APIs).
-     *
-     * @param text   [PT] conteúdo do QR Code
-     *               [EN] QR Code content
-     * @param width  [PT] largura
-     *               [EN] width
-     * @param height [PT] altura
-     *               [EN] height
-     * @return [PT] string Base64 do QR Code
-     *         [EN] Base64 string of the QR Code
-     * @throws WriterException [PT] se falhar na geração
-     *                         [EN] if generation fails
-     * @throws IOException     [PT] se falhar na conversão Base64
-     *                         [EN] if Base64 conversion fails
+     * @param text   conteúdo do QR Code
+     * @param width  largura em pixels (1 a 4096)
+     * @param height altura em pixels (1 a 4096)
+     * @return data URI {@code data:image/png;base64,...}
+     * @throws WriterException          se o ZXing não conseguir codificar o conteúdo
+     * @throws IOException              se a conversão para PNG falhar
+     * @throws IllegalArgumentException se o texto for vazio ou o tamanho estiver fora do limite
+     * @throws br.com.angatusistemas.lib.dependencies.MissingDependencyException sem o ZXing core
      */
     public static String generateQRCodeAsBase64(String text, int width, int height) throws WriterException, IOException {
-        BufferedImage qr = generateQRCode(text, width, height);
-        return qrCodeToBase64(qr, DEFAULT_IMAGE_FORMAT);
+        return qrCodeToBase64(generateQRCode(text, width, height), DEFAULT_IMAGE_FORMAT);
     }
 
     // ==================== LEITURA / DECODIFICAÇÃO DE QR CODE ====================
 
     /**
-     * [PT] Lê/decodifica um QR Code a partir de um arquivo de imagem.
+     * Lê o QR Code de um arquivo de imagem.
      *
-     * [EN] Reads/decodes a QR Code from an image file.
+     * <p>O arquivo é lido por {@link ImageAPI#readImage(String)}: formato reconhecido pelo
+     * conteúdo e limite de pixels conferido antes de decodificar.</p>
      *
-     * @param imagePath [PT] caminho da imagem contendo o QR Code
-     *                  [EN] path to the image containing the QR Code
-     * @return [PT] texto decodificado do QR Code (ou null se não encontrado)
-     *         [EN] decoded text from QR Code (or null if not found)
-     * @throws IOException [PT] se ocorrer erro de leitura
-     *                     [EN] if read error occurs
-     * @throws NotFoundException [PT] se nenhum QR Code for encontrado na imagem
-     *                           [EN] if no QR Code is found in the image
+     * @param imagePath caminho da imagem com o QR Code
+     * @return texto do QR Code
+     * @throws IOException              se o arquivo não existir, não for uma imagem aceita ou passar
+     *                                  do limite de pixels
+     * @throws NotFoundException        se nenhum QR Code for encontrado na imagem
+     * @throws IllegalArgumentException se o caminho for nulo
+     * @throws br.com.angatusistemas.lib.dependencies.MissingDependencyException sem o ZXing core e javase
      */
     public static String readQRCodeFromFile(String imagePath) throws IOException, NotFoundException {
-        BufferedImage image = ImageIO.read(new File(imagePath));
-        if (image == null) {
-            throw new IOException("Could not read image: " + imagePath);
-        }
-        return decodeQRCode(image);
+        requireReader();
+        return QrSupport.decode(ImageAPI.readImage(imagePath));
     }
 
     /**
-     * [PT] Lê/decodifica um QR Code a partir de uma string Base64.
+     * Lê o QR Code de uma imagem em Base64 (com ou sem o prefixo de data URI).
      *
-     * [EN] Reads/decodes a QR Code from a Base64 string.
+     * <p>A imagem é decodificada por {@link ImageAPI#base64ToImage(String)}, com as mesmas
+     * proteções de {@link #readQRCodeFromFile(String)}.</p>
      *
-     * @param base64 [PT] string Base64 da imagem (com ou sem prefixo)
-     *               [EN] Base64 string of the image (with or without prefix)
-     * @return [PT] texto decodificado
-     *         [EN] decoded text
-     * @throws IOException     [PT] se falhar na leitura da imagem
-     *                         [EN] if image reading fails
-     * @throws NotFoundException [PT] se nenhum QR Code for encontrado
-     *                           [EN] if no QR Code is found
+     * @param base64 imagem em Base64
+     * @return texto do QR Code
+     * @throws IOException              se o Base64 for inválido ou não for uma imagem aceita dentro do
+     *                                  limite de pixels
+     * @throws NotFoundException        se nenhum QR Code for encontrado
+     * @throws IllegalArgumentException se {@code base64} for nulo
+     * @throws br.com.angatusistemas.lib.dependencies.MissingDependencyException sem o ZXing core e javase
      */
     public static String readQRCodeFromBase64(String base64) throws IOException, NotFoundException {
-        String clean = base64.contains(",") ? base64.split(",")[1] : base64;
-        byte[] bytes = Base64.getDecoder().decode(clean);
-        try (ByteArrayInputStream bais = new ByteArrayInputStream(bytes)) {
-            BufferedImage image = ImageIO.read(bais);
-            if (image == null) {
-                throw new IOException("Could not decode Base64 to image");
-            }
-            return decodeQRCode(image);
-        }
+        requireReader();
+        return QrSupport.decode(ImageAPI.base64ToImage(base64));
     }
 
     /**
-     * [PT] Decodifica um QR Code a partir de um BufferedImage.
+     * Lê o QR Code de uma imagem já carregada.
      *
-     * [EN] Decodes a QR Code from a BufferedImage.
-     *
-     * @param image [PT] imagem contendo o QR Code
-     *              [EN] image containing the QR Code
-     * @return [PT] texto decodificado
-     *         [EN] decoded text
-     * @throws NotFoundException [PT] se nenhum QR Code for encontrado
-     *                           [EN] if no QR Code is found
+     * @param image imagem com o QR Code
+     * @return texto do QR Code
+     * @throws NotFoundException        se nenhum QR Code for encontrado
+     * @throws IllegalArgumentException se a imagem for nula
+     * @throws br.com.angatusistemas.lib.dependencies.MissingDependencyException sem o ZXing core e javase
      */
     public static String decodeQRCode(BufferedImage image) throws NotFoundException {
-        Dependencies.require("com.google.zxing.MultiFormatReader", ZXING_CORE_COORDINATES, QRCODE_FEATURE);
-        Dependencies.require("com.google.zxing.client.j2se.BufferedImageLuminanceSource", ZXING_JAVASE_COORDINATES, QRCODE_FEATURE);
+        requireReader();
+        if (image == null) {
+            throw new IllegalArgumentException("A imagem não pode ser nula.");
+        }
         return QrSupport.decode(image);
-    }
-
-    // ==================== IMPLEMENTAÇÃO (ZXING — LAZY) ====================
-
-    /**
-     * Implementação de geração/leitura com ZXing. Classe separada para manter
-     * as referências ao ZXing fora do bytecode da {@link QRCodeAPI} — a classe
-     * pública pode ser vinculada sem o zxing e o guard exibe a mensagem de
-     * instalação antes de qualquer uso.
-     */
-    private static final class QrSupport {
-
-        private QrSupport() {
-        }
-
-        static BufferedImage generate(String text, int width, int height,
-                ErrorCorrectionLevel errorCorrectionLevel, int quietZonePixels) throws WriterException {
-            Map<EncodeHintType, Object> hints = new EnumMap<>(EncodeHintType.class);
-            hints.put(EncodeHintType.ERROR_CORRECTION, errorCorrectionLevel);
-            hints.put(EncodeHintType.MARGIN, quietZonePixels);
-
-            QRCodeWriter writer = new QRCodeWriter();
-            BitMatrix bitMatrix = writer.encode(text, BarcodeFormat.QR_CODE, width, height, hints);
-
-            // Preenche os pixels em um único array (uma chamada nativa ao setRGB)
-            // em vez de width*height chamadas individuais
-            BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
-            int black = Color.BLACK.getRGB();
-            int white = Color.WHITE.getRGB();
-            int[] pixels = new int[width * height];
-            for (int y = 0; y < height; y++) {
-                int rowOffset = y * width;
-                for (int x = 0; x < width; x++) {
-                    pixels[rowOffset + x] = bitMatrix.get(x, y) ? black : white;
-                }
-            }
-            image.setRGB(0, 0, width, height, pixels, 0, width);
-            return image;
-        }
-
-        static String decode(BufferedImage image) throws NotFoundException {
-            LuminanceSource source = new BufferedImageLuminanceSource(image);
-            BinaryBitmap bitmap = new BinaryBitmap(new HybridBinarizer(source));
-            Result result = new MultiFormatReader().decode(bitmap);
-            return result.getText();
-        }
     }
 
     // ==================== UTILITÁRIOS ====================
 
     /**
-     * [PT] Gera um QR Code e o salva diretamente no disco.
+     * Gera um QR Code e o grava em arquivo, no formato da extensão do caminho.
      *
-     * [EN] Generates a QR Code and saves it directly to disk.
-     *
-     * @param text      [PT] conteúdo
-     *                  [EN] content
-     * @param filePath  [PT] caminho de destino
-     *                  [EN] destination path
-     * @param width     [PT] largura
-     *                  [EN] width
-     * @param height    [PT] altura
-     *                  [EN] height
-     * @throws WriterException [PT] se falhar na geração
-     * @throws IOException     [PT] se falhar na escrita
+     * @param text     conteúdo do QR Code
+     * @param filePath caminho de destino (ex.: {@code "qrcode.png"})
+     * @param width    largura em pixels (1 a 4096)
+     * @param height   altura em pixels (1 a 4096)
+     * @throws WriterException          se o ZXing não conseguir codificar o conteúdo
+     * @throws IOException              se a gravação falhar
+     * @throws IllegalArgumentException se o texto for vazio ou o tamanho estiver fora do limite
+     * @throws br.com.angatusistemas.lib.dependencies.MissingDependencyException sem o ZXing core
      */
     public static void generateAndSaveQRCode(String text, String filePath, int width, int height)
             throws WriterException, IOException {
-        BufferedImage qr = generateQRCode(text, width, height);
-        saveQRCodeToFile(qr, filePath);
+        saveQRCodeToFile(generateQRCode(text, width, height), filePath);
     }
 
     /**
-     * [PT] Gera um QR Code em preto e branco com logo central opcional.
-     * <p>
-     * Útil para criar QR Codes personalizados com marca d'água.
-     * </p>
+     * Gera um QR Code com um logo no centro.
      *
-     * [EN] Generates a black-and-white QR Code with an optional central logo.
-     * <p>
-     * Useful for creating branded QR Codes with a watermark.
-     * </p>
+     * <p>Com logo, o código é gerado com correção de erro H (cerca de 30%), porque o logo cobre
+     * módulos que o leitor precisa reconstruir. Mantenha o logo em até cerca de 25% da largura do
+     * código: acima disso, nem o nível H garante a leitura. Sem logo ({@code null}), o resultado é o
+     * de {@link #generateQRCode(String, int, int)}, com correção M.</p>
      *
-     * @param text       [PT] conteúdo
-     *                   [EN] content
-     * @param width      [PT] largura
-     *                   [EN] width
-     * @param height     [PT] altura
-     *                   [EN] height
-     * @param logo       [PT] imagem do logo (pode ser null)
-     *                   [EN] logo image (may be null)
-     * @param logoSize   [PT] tamanho do logo em pixels (largura = altura)
-     *                   [EN] logo size in pixels (width = height)
-     * @return [PT] imagem do QR Code com logo
-     *         [EN] QR Code image with logo
-     * @throws WriterException [PT] se falhar na geração
-     *                         [EN] if generation fails
+     * @param text     conteúdo do QR Code
+     * @param width    largura em pixels (1 a 4096)
+     * @param height   altura em pixels (1 a 4096)
+     * @param logo     imagem do logo (pode ser {@code null})
+     * @param logoSize lado do logo em pixels (o logo é desenhado quadrado, centralizado)
+     * @return imagem do QR Code com o logo
+     * @throws WriterException          se o ZXing não conseguir codificar o conteúdo
+     * @throws IllegalArgumentException se o texto for vazio, o tamanho estiver fora do limite ou,
+     *                                  com logo, {@code logoSize} não for positivo
+     * @throws br.com.angatusistemas.lib.dependencies.MissingDependencyException sem o ZXing core
      */
     public static BufferedImage generateQRCodeWithLogo(String text, int width, int height,
                                                         BufferedImage logo, int logoSize) throws WriterException {
-        BufferedImage qr = generateQRCode(text, width, height);
-        if (logo == null) return qr;
-
+        requireGeneration(text, width, height, DEFAULT_QUIET_ZONE_MODULES);
+        if (logo == null) {
+            return QrSupport.generate(text, width, height, null, DEFAULT_QUIET_ZONE_MODULES, false);
+        }
+        if (logoSize <= 0) {
+            throw new IllegalArgumentException("O tamanho do logo deve ser maior que zero: " + logoSize);
+        }
+        BufferedImage qr = QrSupport.generate(text, width, height, null, DEFAULT_QUIET_ZONE_MODULES, true);
         Graphics2D g = qr.createGraphics();
-        int x = (width - logoSize) / 2;
-        int y = (height - logoSize) / 2;
-        g.drawImage(logo, x, y, logoSize, logoSize, null);
-        g.dispose();
+        try {
+            g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC);
+            g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
+            int x = (qr.getWidth() - logoSize) / 2;
+            int y = (qr.getHeight() - logoSize) / 2;
+            g.drawImage(ImageAPI.java2dCompatible(logo), x, y, logoSize, logoSize, null);
+        } finally {
+            g.dispose();
+        }
         return qr;
+    }
+
+    // ==================== VALIDAÇÃO ====================
+
+    /** Dependência e argumentos da geração, antes de qualquer tipo do ZXing ser tocado. */
+    private static void requireGeneration(String text, int width, int height, int quietZoneModules) {
+        Dependencies.require("com.google.zxing.qrcode.QRCodeWriter", ZXING_CORE_COORDINATES, QRCODE_FEATURE);
+        if (text == null || text.trim().isEmpty()) {
+            throw new IllegalArgumentException("O conteúdo do QR Code não pode ser nulo nem vazio.");
+        }
+        if (width < 1 || height < 1 || width > MAX_SIZE_PIXELS || height > MAX_SIZE_PIXELS) {
+            throw new IllegalArgumentException("A largura e a altura do QR Code devem estar entre 1 e "
+                    + MAX_SIZE_PIXELS + " pixels: " + width + " × " + height + ".");
+        }
+        if (quietZoneModules < 0 || quietZoneModules > MAX_QUIET_ZONE_MODULES) {
+            throw new IllegalArgumentException("A margem do QR Code deve estar entre 0 e " + MAX_QUIET_ZONE_MODULES
+                    + " módulos: " + quietZoneModules + ".");
+        }
+    }
+
+    private static void requireReader() {
+        Dependencies.require("com.google.zxing.MultiFormatReader", ZXING_CORE_COORDINATES, QRCODE_FEATURE);
+        Dependencies.require("com.google.zxing.client.j2se.BufferedImageLuminanceSource", ZXING_JAVASE_COORDINATES, QRCODE_FEATURE);
+    }
+
+    // ==================== IMPLEMENTAÇÃO (ZXING — LAZY) ====================
+
+    /**
+     * Implementação com o ZXing. Classe separada para manter as referências ao ZXing fora do
+     * bytecode da {@link QRCodeAPI}: a classe pública carrega sem o zxing, e o guard exibe a
+     * mensagem de instalação antes de esta classe ser tocada. O nível de correção padrão também
+     * mora aqui — como campo estático da {@code QRCodeAPI}, ele carregava o ZXing junto com a classe.
+     */
+    private static final class QrSupport {
+
+        private static final int BLACK = 0x000000;
+        private static final int WHITE = 0xFFFFFF;
+
+        private QrSupport() {
+        }
+
+        static BufferedImage generate(String text, int width, int height, ErrorCorrectionLevel level,
+                int quietZoneModules, boolean forLogo) throws WriterException {
+            ErrorCorrectionLevel resolved = level != null ? level
+                    : forLogo ? ErrorCorrectionLevel.H : ErrorCorrectionLevel.M;
+            Map<EncodeHintType, Object> hints = new EnumMap<>(EncodeHintType.class);
+            hints.put(EncodeHintType.ERROR_CORRECTION, resolved);
+            hints.put(EncodeHintType.MARGIN, quietZoneModules);
+            BitMatrix matrix = new QRCodeWriter().encode(text, BarcodeFormat.QR_CODE, width, height, hints);
+            return toImage(matrix);
+        }
+
+        /**
+         * Imagem do tamanho da matriz — que é o pedido, ou maior quando o conteúdo não cabe. Usar o
+         * tamanho pedido cortava o código nesse caso. Preenche linha a linha direto no raster, sem
+         * uma cópia inteira da imagem em memória.
+         */
+        private static BufferedImage toImage(BitMatrix matrix) {
+            int width = matrix.getWidth();
+            int height = matrix.getHeight();
+            BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
+            WritableRaster raster = image.getRaster();
+            int[] row = new int[width];
+            for (int y = 0; y < height; y++) {
+                for (int x = 0; x < width; x++) {
+                    row[x] = matrix.get(x, y) ? BLACK : WHITE;
+                }
+                raster.setDataElements(0, y, width, 1, row);
+            }
+            return image;
+        }
+
+        /** Procura só QR Code: mais rápido e sem falso positivo de código de barras. */
+        static String decode(BufferedImage image) throws NotFoundException {
+            LuminanceSource source = new BufferedImageLuminanceSource(image);
+            BinaryBitmap bitmap = new BinaryBitmap(new HybridBinarizer(source));
+            Map<DecodeHintType, Object> hints = new EnumMap<>(DecodeHintType.class);
+            hints.put(DecodeHintType.POSSIBLE_FORMATS, List.of(BarcodeFormat.QR_CODE));
+            return new MultiFormatReader().decode(bitmap, hints).getText();
+        }
     }
 }
