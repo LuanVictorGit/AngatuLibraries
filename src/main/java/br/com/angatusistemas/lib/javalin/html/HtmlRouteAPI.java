@@ -10,7 +10,7 @@ import java.util.stream.Collectors;
 
 import br.com.angatusistemas.lib.console.Console;
 import br.com.angatusistemas.lib.javalin.AssetsAPI;
-import br.com.angatusistemas.lib.javalin.IP;
+import br.com.angatusistemas.lib.javalin.JavalinAPI;
 import br.com.angatusistemas.lib.strings.StringAPI;
 import io.javalin.Javalin;
 
@@ -174,8 +174,6 @@ public final class HtmlRouteAPI {
     private static void renderPage(io.javalin.http.Context ctx, String baseTemplatePath, String filePath,
             String pageName, List<String> pageNames) {
         try {
-            Console.debug("Acessando [%s] -> %s", IP.get(ctx), filePath);
-
             String pageContent = loadContent(filePath);
             if (pageContent == null) {
                 Console.error("Arquivo não encontrado: " + filePath);
@@ -201,6 +199,7 @@ public final class HtmlRouteAPI {
 
         } catch (Exception e) {
             Console.error("Erro na página: " + filePath, e);
+            JavalinAPI.markRequestError(ctx, e); // a página responde sozinha; o tipo vai para o log da requisição
             ctx.status(500).result("Erro interno.");
         }
     }

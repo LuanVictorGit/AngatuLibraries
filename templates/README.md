@@ -58,6 +58,9 @@ public class HealthRoute extends Route {
    o cache do SQLite, as threads e o Chromium usam memória fora do heap.
 6. **Environment Variables**: as chaves do `.env` do projeto (ex.: `EMAIL_KEY`).
    A biblioteca lê variáveis de ambiente pelo mesmo `Env.get()`.
+7. **Logs**: cada requisição aparece numa linha — horário, método, caminho, IP, status e
+   tempo —, inclusive a do `HEALTHCHECK`. Para ver só as falhas, `ANGATU_REQUEST_LOG=errors`
+   como variável do serviço; `off` desliga.
 
 > Prefira **volume nomeado** a caminho do host: o volume herda o dono de `/data`
 > na imagem (uid 10001). Se usar caminho do host, rode `chown -R 10001:10001` nele.

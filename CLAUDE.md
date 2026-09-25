@@ -82,9 +82,9 @@ os projetos consumidores sobem o hash.
 `src/main/java/br/com/angatusistemas/lib/`
 - `AngatuLib` (bootstrap), `Core`, `console/`, `dependencies/`, `env/`, `gson/`, `strings/`,
   `time/`, `task/`, `criptografy/`, `connection/` — núcleo
-- `javalin/` — `JavalinAPI` (servidor, filtro de segurança, rate limit), `IP` (IP do cliente),
-  `AssetsAPI`, `html/HtmlRouteAPI` (páginas de `public/`), `routes/Route`, `classes/` (entidades
-  e tipos do rate limit)
+- `javalin/` — `JavalinAPI` (servidor, filtro de segurança, rate limit), `RequestLog` (log de
+  requisições), `IP` (IP do cliente), `AssetsAPI`, `html/HtmlRouteAPI` (páginas de `public/`),
+  `routes/Route`, `classes/` (entidades e tipos do rate limit e do log)
 - `database/` — `Saveable` e `PersistenceException`
 - `email/`, `webpush/`, `discord/`, `images/`, `browser/`, `payments/`, `ai/` — integrações
   (`payments/` e `ai/` existem para o AngatuCRM; projeto cliente usa a API do CRM — R26)
@@ -122,6 +122,11 @@ os projetos consumidores sobem o hash.
   (`/api/pedidos/{id}`), nunca da URL — a memória cresce com as rotas registradas, não com os
   caminhos pedidos. Caminho que não é rota divide um contador por IP. O limite vem antes da
   varredura de conteúdo, e o preflight de CORS fica fora dele.
+- **Log de requisições:** uma linha por requisição, pelo `requestLogger` nativo do Javalin, que
+  só enfileira; formatar e escrever é de uma thread própria, em lote, pelo `Console`, com descarte
+  contado quando a fila enche — a requisição nunca espera pelo terminal. Nunca entram corpo,
+  cabeçalho, cookie, mensagem de exceção nem valor de parâmetro com cara de segredo. O tipo da
+  exceção vem do `handlerWrapper`, que anota e relança: a resposta de erro não muda.
 - **Integração de rede tem fila própria:** e-mail e Web Push não usam o pool do `Task`. Cada um
   tem fila limitada, threads daemon, prazo em toda operação de rede e um gancho de desligamento
   que dá 8 s para a fila esvaziar; o future deles sempre completa, nunca com exceção. O `Task`

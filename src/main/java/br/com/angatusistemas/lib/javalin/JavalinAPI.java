@@ -37,6 +37,7 @@ import br.com.angatusistemas.lib.javalin.classes.BlockInfo;
 import br.com.angatusistemas.lib.javalin.classes.DenyNotice;
 import br.com.angatusistemas.lib.javalin.classes.PermanentBlock;
 import br.com.angatusistemas.lib.javalin.classes.RateLimitConfig;
+import br.com.angatusistemas.lib.javalin.classes.RequestLogMode;
 import br.com.angatusistemas.lib.javalin.classes.RouteRateLimitConfig;
 import br.com.angatusistemas.lib.javalin.classes.SlidingWindowCounter;
 import br.com.angatusistemas.lib.javalin.classes.SuspectIp;
@@ -70,6 +71,10 @@ import io.javalin.websocket.WsHandlerType;
  *   <li>Headers de segurança HTTP automáticos</li>
  *   <li>Só HTTP: o TLS termina no proxy de borda do Coolify, que entrega a requisição em HTTP</li>
  *   <li>Arquivos estáticos de {@code public/}, com os mesmos cabeçalhos de segurança</li>
+ *   <li>Uma linha no terminal para toda requisição — horário, método, caminho, IP, status, tempo
+ *       e, quando houver, parâmetros mascarados, motivo da recusa e tipo da exceção —, escrita
+ *       por uma fila própria que nunca atrasa a resposta (ver
+ *       {@link #setRequestLogMode(RequestLogMode)})</li>
  * </ul>
  *
  * <p><strong>Quando usar:</strong> em toda aplicação web da biblioteca — a
@@ -213,6 +218,12 @@ public final class JavalinAPI {
      * {@link #resolveLimit(Context, String, boolean)}).
      */
     private static final String NO_ROUTE = "(sem rota)";
+
+    /**
+     * Prazo, no desligamento do servidor, para a fila do log de requisições chegar ao terminal:
+     * as últimas linhas antes de um redeploy são as que mais interessam.
+     */
+    private static final long REQUEST_LOG_FLUSH_MS = 2_000;
 
     /**
      * Folga do freio de rede do IPv6: o {@code /48} inteiro pode somar este múltiplo do limite
@@ -556,6 +567,57 @@ public final class JavalinAPI {
         DENY_PAGE_FAILURE_LOGGED.set(false);
     }
 
+    // ==================== LOG DE REQUISIÇÕES ====================
+
+    /**
+     * Escolhe o que o log de requisições escreve no terminal.
+     *
+     * <p>Toda requisição que chega ao servidor gera uma linha — rota, página, arquivo estático,
+     * 404, recusa do filtro de segurança, erro —, sem configuração por rota:</p>
+     * <pre>
+     * [25/09 22:14:03] GET     /api/pedidos/42          IP=189.40.12.7 STATUS=200 TIME=14ms
+     * [25/09 22:15:21] POST    /api/usuarios            IP=189.40.12.7 STATUS=500 TIME=142ms ERROR=NullPointerException
+     * </pre>
+     *
+     * <p>A linha nunca atrasa a resposta: a requisição só põe um registro numa fila, e uma thread
+     * própria escreve em lote. Corpo, cabeçalho, cookie e arquivo nunca entram; o valor de
+     * parâmetro com cara de segredo ou de dado pessoal sai como {@code ***}. O IP é o de
+     * {@link IP#get(Context)}.</p>
+     *
+     * <p>O padrão é {@link RequestLogMode#ALL}, ou o que a variável de ambiente
+     * {@code ANGATU_REQUEST_LOG} pedir ({@code all}, {@code errors}, {@code off}). Esta chamada
+     * vale na hora, com o servidor no ar, e vence a variável.</p>
+     *
+     * @param mode {@link RequestLogMode#ALL}, {@link RequestLogMode#ERRORS} (status 400 ou mais, ou
+     *             exceção) ou {@link RequestLogMode#OFF}; {@code null} volta a {@code ALL}
+     */
+    public static void setRequestLogMode(RequestLogMode mode) {
+        RequestLog.setMode(mode);
+    }
+
+    /**
+     * O modo em vigor do log de requisições.
+     *
+     * @return O modo; {@link RequestLogMode#ALL} quando ninguém escolheu outro
+     */
+    public static RequestLogMode getRequestLogMode() {
+        return RequestLog.getMode();
+    }
+
+    /**
+     * Põe o tipo da exceção na linha do log de requisições quando a rota a captura e responde
+     * sozinha — por exemplo, um {@code catch} que devolve 500 com uma mensagem própria.
+     *
+     * <p>Exceção que escapa da rota já aparece na linha ({@code ERROR=NullPointerException}) sem
+     * esta chamada. Só o tipo é escrito, nunca a mensagem: ela pode trazer dado do cliente.</p>
+     *
+     * @param ctx   Contexto da requisição
+     * @param error A exceção capturada
+     */
+    public static void markRequestError(Context ctx, Throwable error) {
+        RequestLog.markError(ctx, error);
+    }
+
     // ==================== API PÚBLICA ====================
 
     /**
@@ -646,6 +708,14 @@ public final class JavalinAPI {
                 config.router.ignoreTrailingSlashes = true;
                 config.router.treatMultipleSlashesAsSingleSlash = true;
                 config.http.maxRequestSize = maxRequestSize;
+
+                // Log de requisições: o logger nativo roda depois da resposta, para toda
+                // requisição, e só enfileira; o wrapper anota o tipo da exceção e a relança, sem
+                // mudar a resposta de erro; ao parar, a fila é escrita antes de o processo sair.
+                config.router.handlerWrapper(RequestLog::wrap);
+                config.requestLogger.http(RequestLog::record);
+                config.requestLogger.ws(ws -> ws.onUpgrade(RequestLog::record));
+                config.events.serverStopped(() -> RequestLog.flush(REQUEST_LOG_FLUSH_MS));
             });
 
             javalinInstance = javalin; // Route exige a instância para ser construída
@@ -653,8 +723,9 @@ public final class JavalinAPI {
             registerAllRoutes();
             if (beforeStart != null) beforeStart.accept(javalin);
 
+            RequestLog.start();
             javalin.start(port);
-            Console.log("Javalin no ar em HTTP (porta %d) — o HTTPS é do Coolify", port);
+            Console.log("Javalin no ar em HTTP (porta %d) — o HTTPS é do Coolify", javalin.port());
         } catch (Exception e) {
             Console.error("Falha ao iniciar Javalin", e);
             javalinInstance = null;
@@ -1070,11 +1141,15 @@ public final class JavalinAPI {
         if (rateLimitingEnabled && !isUnlimitedPath(path)) {
             Denial denial = checkAccess(ctx, path, false, true);
             if (denial != null) {
+                RequestLog.markDenied(ctx, denial.permanent() ? "blocked" : "too_many_requests");
                 if (denial.permanent()) throw new ForbiddenResponse("Acesso bloqueado");
                 throw new TooManyRequestsResponse("Muitos acessos seguidos");
             }
         }
-        if (hasMaliciousInput(ctx)) throw new ForbiddenResponse("Pedido recusado");
+        if (hasMaliciousInput(ctx)) {
+            RequestLog.markDenied(ctx, "rejected");
+            throw new ForbiddenResponse("Pedido recusado");
+        }
     }
 
     /**
@@ -1902,6 +1977,7 @@ public final class JavalinAPI {
      */
     private static void sendDenyPage(Context ctx, String path, int status, String code, String title,
             String message, String detail, long retryAfter) {
+        RequestLog.markDenied(ctx, code);
         if (wantsJson(ctx, path)) {
             ctx.status(status).contentType("application/json; charset=utf-8")
                     .result("{\"error\":\"" + code + "\",\"message\":\"" + message + "\"}");

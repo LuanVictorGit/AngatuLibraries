@@ -79,7 +79,7 @@ A biblioteca foi projetada para ser **leve, modular e segura**:
 │         │                │                        │                  │
 │  ┌──────▼────────────────▼────────────────────────▼──────────────┐   │
 │  │                   JavalinAPI (servidor web)                   │   │
-│  │  HTTP (TLS no Coolify) · Headers · Rate limit · SQLi/XSS      │   │
+│  │ HTTP (TLS no Coolify) · Headers · Rate limit · SQLi/XSS · Log │   │
 │  │ ┌────────────────┐  ┌─────────────────┐  ┌──────────────────┐ │   │
 │  │ │ Route (abstr.) │  │ HtmlRouteAPI    │  │ AssetsAPI        │ │   │
 │  │ │ rotas auto     │  │ páginas /public │  │ MIME, sem cache  │ │   │
@@ -135,6 +135,7 @@ main()
      ├─ 4. JavalinAPI.setup(porta, rateLimit, HtmlRouteAPI::registerAllRoutes)
      │      ├─ loadPersistedConfigs()   → bloqueios longos e configs do banco, índices
      │      ├─ filtros: headers + rate limiting + SQLi/XSS (HTTP e upgrade de WebSocket)
+     │      ├─ log de requisições: uma linha por requisição, escrita por fila própria
      │      ├─ rotas descobertas (Route) e páginas /public/*.html
      │      ├─ start: HTTP na porta informada (o TLS é do Coolify)
      │      └─ Task: limpeza diária do banco + varredura do rate limit a cada minuto
@@ -147,7 +148,7 @@ main()
 
 | Módulo | Classe principal | Descrição |
 |---|---|---|
-| 🌐 **Web Server** | `JavalinAPI`, `HtmlRouteAPI`, `Route`, `IP` | Servidor HTTP (Javalin 7.2.3) com rate limiting, recusa de SQLi/XSS e rotas por convenção; o TLS é do Coolify |
+| 🌐 **Web Server** | `JavalinAPI`, `HtmlRouteAPI`, `Route`, `IP` | Servidor HTTP (Javalin 7.2.3) com rate limiting, recusa de SQLi/XSS, rotas por convenção e uma linha no terminal para cada requisição; o TLS é do Coolify |
 | 📁 **Assets** | `AssetsAPI` | Ler e servir arquivos de `public/` com o MIME type certo (sem cache por padrão) |
 | 🗄️ **Persistência** | `Saveable` | ORM JSON sobre SQLite (HikariCP + WAL), sem nada em memória: uma conexão de escrita, leitura em paralelo |
 | 📨 **E-mail** | `EmailAPI`, `EmailFormatter` | Envio SMTP (Gmail) assíncrono, HTML, anexos, múltiplos destinatários e validação |
@@ -330,7 +331,7 @@ public class Main {
 Ao iniciar, a biblioteca:
 1. Verifica as dependências dos módulos usados (mensagens claras se faltarem);
 2. Redireciona `System.out` para o log colorido do `Console`;
-3. Configura o Javalin com headers de segurança e rate limiting;
+3. Configura o Javalin com headers de segurança, rate limiting e o log de requisições (uma linha no terminal para cada uma);
 4. Registra as rotas (`Route`) e as páginas HTML de `/public` **antes** de aceitar conexões — nenhuma requisição chega sem filtro ou antes da rota existir;
 5. Sobe o servidor e agenda a limpeza diária do banco e a varredura do rate limit a cada minuto.
 
@@ -444,6 +445,22 @@ public class Main {
 - **Cache** — `JavalinAPI.setSecurityHeader("Cache-Control", "no-store")` (e `Pragma`, `Expires`) declarado **antes** do `new AngatuLib` vale para páginas, rotas **e** arquivos estáticos; sem isso, o servidor de estáticos sai com o `max-age=0` do Javalin.
 - **Conteúdo com cara de SQLi/XSS** — procurado em nome e valor de parâmetro, em cabeçalho e em corpo de texto de até 64 KiB (JSON, formulário, XML, `text/*`), por palavra inteira, já decodificado: o formulário campo a campo, o JSON com os escapes `\uXXXX` resolvidos. Recusado com 403, sem contar violação — mas o pedido entra na conta do limite, que é conferido **antes** da varredura: um IP bloqueado não gasta CPU com ela. Corpo varrido fica em cache no Javalin (`ctx.body()`, `bodyAsClass`); quem lê em fluxo (`bodyInputStream()`) deve usar `bodyAsBytes()`.
 - **Tamanho de corpo** — até 16 MiB lidos em memória (`ctx.body()`); `JavalinAPI.setMaxRequestSize(bytes)` antes do `new AngatuLib` muda. Upload multipart não passa por esse limite.
+
+**Log de requisições:** toda requisição que chega ao servidor vira uma linha no terminal — rota, página, arquivo estático, 404, recusa do filtro, erro e upgrade de WebSocket —, sem nenhuma configuração por rota: rota nova já nasce com log.
+
+```text
+[25/09 22:14:03] GET     /api/pedidos/42          IP=189.40.12.7 STATUS=200 TIME=14ms
+[25/09 22:14:04] GET     /api/produtos            IP=189.40.12.7 STATUS=200 TIME=3ms PARAMS=pagina=2&token=***
+[25/09 22:14:05] POST    /api/login               IP=189.40.12.7 STATUS=429 TIME=<1ms DENIED=too_many_requests
+[25/09 22:15:21] POST    /api/usuarios            IP=189.40.12.7 STATUS=500 TIME=142ms ERROR=NullPointerException
+```
+
+- **O que cada linha traz** — data e hora, método, caminho, IP (o de `IP.get(ctx)`, com a regra de proxy: nunca o `X-Forwarded-For` que o cliente escreveu), status, tempo total e, quando houver, os parâmetros da URL, o motivo da recusa do filtro (`DENIED`, o mesmo código do JSON que o cliente recebe) e o tipo da exceção (`ERROR`).
+- **O que nunca entra** — corpo de requisição ou de resposta, arquivo enviado, cabeçalho, cookie e a mensagem da exceção (só o tipo). Dos parâmetros, o valor de todo nome com cara de segredo ou de dado pessoal (senha, token, chave, código, e-mail, CPF, telefone, cartão...) sai como `***`, e o resto sai cortado. O caminho sai como veio: segredo não vai na URL.
+- **Não atrasa a resposta** — o `requestLogger` do Javalin roda na thread da requisição, que só põe um registro numa fila; uma thread própria formata e escreve em lote, pelo `Console`. Com o terminal lento, a fila (16 mil registros) enche e o excedente é descartado, com um aviso de quantas linhas faltaram — a requisição nunca espera. Na carga do teste, 2.400 requisições em 8 threads levaram praticamente o mesmo tempo com e sem log. Ao parar o servidor, a fila é escrita antes de o processo sair.
+- **Exceções** — a que escapa da rota aparece como `ERROR=Tipo`, e a resposta de erro continua a do Javalin, sem mudança. A rota que captura a exceção e responde sozinha põe o tipo na linha com `JavalinAPI.markRequestError(ctx, e)`.
+- **Reduzir ou desligar** — `ANGATU_REQUEST_LOG=errors` (só status 400 ou mais, ou exceção) ou `off`, como variável do serviço no Coolify; em código, `JavalinAPI.setRequestLogMode(RequestLogMode.ERRORS)`, que vale na hora e vence a variável. O padrão é `all`.
+- **Nenhuma rota escreve o próprio log de acesso** — um `Console.log` em cada rota duplicaria a linha.
 
 **Rotas automáticas:** crie classes que estendem `Route` com construtor vazio — elas são descobertas e registradas no startup:
 
@@ -930,6 +947,8 @@ if (resp2.isSuccess()) {
 | `UnsupportedOperationException: HTTPS gerenciado saiu da biblioteca` | `new AngatuLib(host, porta, rateLimit, true)` ou `JavalinAPI.setup` com `manageSsl = true`, do tempo em que o Javalin cuidava do certificado | Use `new AngatuLib(host, porta, rateLimit)`: a aplicação sobe em HTTP e o Coolify termina o TLS |
 | `Não foi possível registrar a rota` | Registro manual antes do servidor ativo | Registre após o `setup` ou deixe a descoberta automática fazer o trabalho |
 | Logs sem cor no terminal | Terminal sem suporte ANSI ou stream redirecionado | Use um terminal compatível (Windows Terminal, VS Code) |
+| Terminal cheio de linhas de requisição (o `HEALTHCHECK` também aparece) | O log de requisições escreve toda requisição, por padrão | `ANGATU_REQUEST_LOG=errors` no Coolify para ver só as falhas, ou `off` para desligar |
+| `Log de requisições: N linha(s) descartada(s)` | O terminal não acompanhou o ritmo das requisições e a fila do log encheu | Nada quebrou: as requisições foram atendidas. Se for constante, `ANGATU_REQUEST_LOG=errors` |
 
 ---
 
@@ -987,6 +1006,7 @@ código que um projeto pode notar:
 | `JavalinAPI`: o contador do limite é da **rota** (o molde, com os parâmetros), não da URL — `/api/pedidos/1` e `/api/pedidos/2` contam juntos; caminho que não é rota divide um contador só | Procure as telas que pedem muitos itens seguidos da mesma rota com parâmetro e dê a essa rota um limite próprio com `configureRateLimit` |
 | `JavalinAPI.configureLoginRateLimit`: 2 por segundo (antes 1), para o duplo clique no botão não virar 429 | Nada |
 | `JavalinAPI`: preflight de CORS fora do limite; IPv6 com teto de 16 clientes por `/48` num limite configurado; pedido recusado pelo filtro de conteúdo conta no limite; formulário e JSON varridos já decodificados; `.json` e `.wasm` contam como arquivo estático | Nada |
+| **Toda requisição vira uma linha no terminal** (novo, ligado por padrão); o `debug` "Acessando […]" das páginas saiu, porque a linha da requisição o substitui | Tire o `Console.log` de acesso que alguma rota escreva, para não duplicar; para reduzir, `ANGATU_REQUEST_LOG=errors` ou `JavalinAPI.setRequestLogMode(...)` |
 | `JavalinAPI.addIgnoredPath("/x")` vale por segmento (`/x` e `/x/...`, não `/xy`) | Confira se algum projeto dependia do prefixo solto |
 | `AssetsAPI.serveAsset` não define mais `Cache-Control` (era um dia) | O projeto decide o cabeçalho de cache |
 | `AngatuLib` lança `IllegalStateException` quando o servidor não sobe (antes seguia com o servidor fora do ar) e registra o próprio gancho de desligamento | Não chame `Task.shutdown()` num gancho seu (ele descarta a fila); se precisar, use `Task.drain(ms)` |
@@ -1053,6 +1073,7 @@ código que um projeto pode notar:
 * 🔒 Redirecionamento de `.html` sem open redirect, sem laço e com a query; `X-Content-Type-Options: nosniff`; `AssetsAPI` sem path traversal
 * 🎨 Página de recusa (429/403) desenhada pelo projeto com `JavalinAPI.setDenyPage` — se a função falhar de qualquer jeito, até por exceção verificada ou estouro de pilha, vale a página padrão; cabeçalhos de cache declarados antes da subida valem também para os arquivos estáticos
 * 🌐 Rotas e páginas registradas antes de o servidor aceitar conexões; descoberta de rotas também no `mvn exec:java`; página duplicada vira aviso em vez de derrubar a subida
+* 🧾 **Log de requisições**: uma linha por requisição — data e hora, método, caminho, IP, status, tempo, parâmetros mascarados, motivo da recusa e tipo da exceção —, sem configuração por rota, escrita por uma fila própria que nunca atrasa a resposta; `ANGATU_REQUEST_LOG` e `JavalinAPI.setRequestLogMode` reduzem ou desligam
 * 🐳 **Só atrás do Coolify**: o HTTPS gerenciado e a pasta de certificados saíram — o servidor sobe em HTTP, e o construtor ou o `setup` que ainda pedem HTTPS falham na hora, sem subir nada; `javalin-ssl` deixou de ser dependência
 * ⚙️ **`Task`**: relógio separado do trabalho (a limpeza periódica não fica atrás de envios lentos), `Error` não mata timer, sem vazamento de entradas, `drain()` para desligar sem perder a fila — nem a tarefa de prazo vencido que o relógio ocupado ainda não tinha disparado; ID que dá a volta não sobrescreve mais o registro de um timer vivo (o `cancelTask` dele deixava de pará-lo)
 * 🚀 **`AngatuLib`**: falha na subida lança exceção (antes deixava o processo vivo sem servidor); gancho de desligamento que para o servidor, espera as tarefas e fecha o banco

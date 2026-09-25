@@ -29,7 +29,8 @@ import lombok.Setter;
  *   <li>Redireciona {@code System.out} para o log colorido do {@link Console}
  *       (preservando o stream original);</li>
  *   <li>Sobe o servidor em <strong>HTTP na porta informada</strong>;</li>
- *   <li>Inicializa o {@link JavalinAPI#setup} com rate limiting e headers de segurança;</li>
+ *   <li>Inicializa o {@link JavalinAPI#setup} com rate limiting, headers de segurança e o log de
+ *       requisições (uma linha no terminal para cada uma);</li>
  *   <li>Registra automaticamente as páginas HTML de {@code /public} via
  *       {@link HtmlRouteAPI}.</li>
  * </ol>

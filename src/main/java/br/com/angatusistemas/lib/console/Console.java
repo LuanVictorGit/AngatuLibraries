@@ -29,9 +29,10 @@ import br.com.angatusistemas.lib.time.DataTime;
  * inteira é interpretada — para um {@code &} literal ali, escreva {@code &&}.</p>
  *
  * <p><strong>Quando NÃO usar:</strong> para dados sensíveis em produção
- * (credenciais, tokens); para logs volumosos por requisição (use o nível
- * {@code debug}, silencioso por padrão); não substitua a política de log da
- * aplicação — este é um logger de console simples, sem arquivos nem rotação.</p>
+ * (credenciais, tokens); para registrar cada requisição numa rota — o servidor já escreve uma
+ * linha por requisição (log de requisições do {@code JavalinAPI}); para detalhe volumoso de
+ * depuração, use o nível {@code debug}, silencioso por padrão. Não substitua a política de log
+ * da aplicação — este é um logger de console simples, sem arquivos nem rotação.</p>
  *
  * <p><strong>Integração:</strong> o {@link AngatuLib} redireciona
  * {@code System.out} para um {@link InterceptorOutputStream}, que roteia toda
@@ -110,6 +111,20 @@ public final class Console {
      */
     public static void log(String format, Object... args) {
         log((Object) processMessage(format, args));
+    }
+
+    /**
+     * Escreve a mensagem como está, numa única escrita: sem o horário que os outros métodos põem
+     * na frente, com os códigos de cor interpretados.
+     *
+     * <p>Para quem monta a própria linha e escreve várias de uma vez — o log de requisições do
+     * {@code JavalinAPI}, que traz o horário de cada requisição. Dado vindo de fora precisa de
+     * {@link AnsiColor#escape(String)} antes de entrar na mensagem.</p>
+     *
+     * @param message Uma ou mais linhas, separadas por quebra de linha
+     */
+    public static void logRaw(String message) {
+        output().println(AnsiColor.parse(message));
     }
 
     /**
