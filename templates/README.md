@@ -1,3 +1,10 @@
+---
+tags:
+  - deploy
+  - coolify
+  - docker
+---
+
 # Modelos de deploy — Coolify
 
 Arquivos prontos para copiar na raiz de qualquer projeto que usa a AngatuLibraries:
