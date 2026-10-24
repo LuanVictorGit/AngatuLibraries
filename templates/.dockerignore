@@ -6,10 +6,11 @@ target/
 out/
 bin/
 
-# Controle de versão e CI
+# Controle de versão, CI e ferramentas do editor de código
 .git/
 .gitignore
 .github/
+.claude/
 
 # Banco e dados locais — o volume do Coolify é a fonte da verdade em produção.
 # "**/" pega em qualquer pasta: sem ele, só a raiz era excluída, e um banco ou .env

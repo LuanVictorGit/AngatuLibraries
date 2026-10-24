@@ -76,6 +76,7 @@ class RequestLogTest {
         System.setProperty("angatu.db", directory.resolve("log.db").toString());
         JavalinAPI.configureRateLimit("/api/log/limited", new RateLimitConfig(1, 1, 60));
         JavalinAPI.addUnlimitedPath("/api/log/load");
+        JavalinAPI.addIgnoredPath("/api/log/probe");
 
         Javalin app = JavalinAPI.setup(0, true, HtmlRouteAPI::registerAllRoutes);
         assertNotNull(app, "o servidor não subiu");
@@ -239,6 +240,30 @@ class RequestLogTest {
         assertFalse(lines.get(0).contains("DENIED"), lines.get(0));
         assertTrue(lines.get(1).contains("STATUS=429") && lines.get(1).endsWith("DENIED=too_many_requests"), lines.get(1));
         assertTrue(lines.get(2).contains("STATUS=403") && lines.get(2).endsWith("DENIED=rejected"), lines.get(2));
+    }
+
+    @Test
+    @DisplayName("a sonda do HEALTHCHECK que deu certo não vira linha; a que falha, sim")
+    void healthProbeIsLoggedOnlyWhenItFails() throws Exception {
+        int mark = mark();
+        // A sonda do Docker: de dentro do contêiner, sem proxy — sem X-Forwarded-For
+        assertEquals(200, direct("/api/log/probe").statusCode());
+        assertEquals(200, direct("/api/log/probe").statusCode());
+        assertEquals(503, direct("/api/log/probe/down").statusCode());
+
+        String log = logSince(mark);
+        assertTrue(lines(log, "/api/log/probe ").isEmpty(), log);
+        assertTrue(single(log, "/api/log/probe/down").contains("STATUS=503"), log);
+    }
+
+    @Test
+    @DisplayName("o mesmo caminho pedido pelo proxy continua no log")
+    void healthPathThroughTheProxyIsLogged() throws Exception {
+        String ip = "203.0.113.31";
+        int mark = mark();
+        assertEquals(200, get("/api/log/probe", ip).statusCode());
+
+        assertTrue(single(logSince(mark), "IP=" + ip + " ").contains("/api/log/probe"));
     }
 
     @Test
@@ -453,6 +478,11 @@ class RequestLogTest {
     private static HttpResponse<String> get(String path, String ip) throws IOException, InterruptedException {
         HttpRequest request = HttpRequest.newBuilder(uri(path)).header("X-Forwarded-For", ip).GET().build();
         return HTTP.send(request, HttpResponse.BodyHandlers.ofString());
+    }
+
+    /** Requisição direta, como a sonda do contêiner: sem cabeçalho de proxy. */
+    private static HttpResponse<String> direct(String path) throws IOException, InterruptedException {
+        return HTTP.send(HttpRequest.newBuilder(uri(path)).GET().build(), HttpResponse.BodyHandlers.ofString());
     }
 
     private static HttpResponse<String> post(String path, String ip, String json) throws IOException, InterruptedException {

@@ -1825,9 +1825,10 @@ public final class JavalinAPI {
 
     /**
      * Verifica se o path deve ser completamente ignorado pela verificação de segurança: o
-     * prefixo configurado, ou algo abaixo dele — nunca um nome que só começa igual.
+     * prefixo configurado, ou algo abaixo dele — nunca um nome que só começa igual. O log de
+     * requisições também consulta, para reconhecer a sonda do {@code HEALTHCHECK}.
      */
-    private static boolean shouldIgnorePath(String path) {
+    static boolean shouldIgnorePath(String path) {
         if (IGNORED_PATHS.isEmpty()) return false;
         String lower = path.toLowerCase(Locale.ROOT);
         for (String prefix : IGNORED_PATHS)
@@ -2091,6 +2092,42 @@ public final class JavalinAPI {
         RouteDiscovery.scanAndRegister();
     }
 
+    /**
+     * Pacotes de bibliotecas de terceiros que viajam com os projetos — o Javalin e o Jetty, o
+     * Kotlin, os drivers, os SDKs dos módulos opcionais. Nenhuma classe deles estende
+     * {@link Route}: quem estende foi compilado contra esta biblioteca.
+     */
+    private static final String[] THIRD_PARTY_PACKAGES = {
+            "META-INF/", "java/", "javax/", "jakarta/", "jdk/", "sun/", "com/sun/", "org/w3c/", "org/xml/",
+            "kotlin/", "kotlinx/", "org/jetbrains/", "org/intellij/", "io/javalin/", "org/eclipse/",
+            "org/slf4j/", "ch/qos/", "org/apache/", "com/google/", "com/fasterxml/", "org/reflections/",
+            "javassist/", "org/objectweb/", "org/sqlite/", "com/zaxxer/", "io/github/cdimascio/",
+            "org/mindrot/", "nl/martijndwars/", "org/bouncycastle/", "org/jose4j/", "net/dv8tion/",
+            "com/neovisionaries/", "okhttp3/", "okio/", "gnu/trove/", "com/mercadopago/",
+            "com/microsoft/playwright/", "net/coobird/", "com/twelvemonkeys/", "com/beust/", "org/junit/",
+            "org/opentest4j/", "org/apiguardian/", "lombok/", "org/checkerframework/", "org/json/"
+    };
+
+    /**
+     * Um arquivo do classpath pode declarar rota? Só quem não é de um pacote de terceiros.
+     *
+     * <p>A busca abria e lia cada uma das milhares de classes do JAR — do Jetty, do Kotlin, do
+     * SQLite — atrás das poucas que estendem {@link Route}: era quase um terço da subida da
+     * aplicação, e a subida entra inteira no tempo de cada deploy. A Reflections testa o caminho
+     * nas duas formas ({@code org/eclipse/Server.class} e {@code org.eclipse.Server.class}), e as
+     * duas são reconhecidas aqui.</p>
+     *
+     * @param resource Caminho do arquivo dentro do JAR ou da pasta de classes
+     * @return {@code false} para os pacotes de terceiros, que a busca pula
+     */
+    static boolean mayDeclareRoutes(String resource) {
+        if (resource == null) return false;
+        String path = resource.replace('.', '/');
+        for (String prefix : THIRD_PARTY_PACKAGES)
+            if (path.startsWith(prefix)) return false;
+        return true;
+    }
+
     // ==================== HELPERS (CARREGAMENTO LAZY) ====================
 
     /**
@@ -2125,6 +2162,7 @@ public final class JavalinAPI {
                     new org.reflections.util.ConfigurationBuilder()
                             .setUrls(classpathUrls())
                             .setScanners(Scanners.SubTypes)
+                            .filterInputsBy(JavalinAPI::mayDeclareRoutes)
             );
             for (Class<? extends Route> routeClass : reflections.getSubTypesOf(Route.class)) {
                 try {

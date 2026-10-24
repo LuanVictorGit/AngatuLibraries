@@ -73,10 +73,15 @@ consumidor declara só as dos módulos que usa, e cada módulo confere a presen�
 `Dependencies.require(...)` antes de tocar no tipo de terceiro.
 
 ## Publicação
-O JitPack publica **o último commit da `main`** (`mvn install -DskipTests`); não há tags nem
-releases (R4). Os projetos fixam o hash do commit em `angatulibraries.version`. Só existe a
-`main`: uma mudança só vai para ela com confirmação explícita do dono (R3), e depois do push
-os projetos consumidores sobem o hash.
+O JitPack publica **o último commit da `main`**; não há tags nem releases (R4). Os projetos fixam
+o hash do commit em `angatulibraries.version`. O JitPack só compila um commit quando alguém pede
+por ele, e leva uns 4 minutos: a cada push na `main`, o workflow `JitPack`
+(`.github/workflows/jitpack.yml`) faz esse pedido e espera o artefato, para que nenhum deploy de
+projeto fique parado no Maven esperando. O build lá segue o `jitpack.yml` — Maven do wrapper
+(`mvnw`, versão fixada em `.mvn/wrapper`), coletor paralelo de dependências (`.mvn/maven.config`)
+e testes nem compilados (eles rodam antes do push). Só existe a `main`: uma mudança só vai para
+ela com confirmação explícita do dono (R3), e depois do push, com o check `JitPack` verde, os
+projetos consumidores sobem o hash.
 
 ## Estrutura
 `src/main/java/br/com/angatusistemas/lib/`
@@ -89,11 +94,17 @@ os projetos consumidores sobem o hash.
 - `email/`, `webpush/`, `discord/`, `images/`, `browser/`, `payments/`, `ai/` — integrações
   (`payments/` e `ai/` existem para o AngatuCRM; projeto cliente usa a API do CRM — R26)
 
-`templates/` — `Dockerfile`, `.dockerignore` e guia de deploy no Coolify para os projetos.
+`templates/` — `Dockerfile`, `.dockerignore` e guia de deploy no Coolify para os projetos. O
+`Dockerfile` é o que segura o deploy abaixo de 1 minuto: repositório Maven num cache do BuildKit
+compartilhado por todos os projetos do servidor, nenhum `apt-get`, JAR fino com `lib/` em camada
+própria e `HEALTHCHECK` nos tempos com que o Coolify espera (o guia traz as medições).
+`jitpack.yml`, `mvnw`, `.mvn/` — build no JitPack; `.github/workflows/jitpack.yml` — pede esse
+build a cada push na `main`.
 `src/test/java/` — testes JUnit 5; `src/test/resources/public/` — páginas para o teste do servidor.
 
 ## Como rodar
-- `mvn -DskipTests package` — compila e gera o JAR
+- `mvn -DskipTests package` (ou `sh mvnw -DskipTests package`, com o Maven do wrapper) — compila
+  e gera o JAR
 - `mvn test` — todos os testes (uma JVM por classe de teste; os do servidor sobem o Javalin em
   porta aleatória e precisam de loopback)
 
@@ -126,7 +137,13 @@ os projetos consumidores sobem o hash.
   só enfileira; formatar e escrever é de uma thread própria, em lote, pelo `Console`, com descarte
   contado quando a fila enche — a requisição nunca espera pelo terminal. Nunca entram corpo,
   cabeçalho, cookie, mensagem de exceção nem valor de parâmetro com cara de segredo. O tipo da
-  exceção vem do `handlerWrapper`, que anota e relança: a resposta de erro não muda.
+  exceção vem do `handlerWrapper`, que anota e relança: a resposta de erro não muda. A única
+  requisição sem linha é a sonda do `HEALTHCHECK` que deu certo — caminho de `addIgnoredPath`,
+  par de loopback e sem `X-Forwarded-For`; a que falha aparece.
+- **Descoberta de rotas:** a Reflections pula os pacotes de terceiros de
+  `JavalinAPI.THIRD_PARTY_PACKAGES` (Javalin, Jetty, Kotlin, drivers, SDKs dos módulos) — nenhuma
+  classe deles estende `Route`, e lê-las era quase um terço da subida. Biblioteca nova de
+  terceiro pode entrar na lista; pacote que pode ter rota de projeto (`br.…`) nunca.
 - **Integração de rede tem fila própria:** e-mail e Web Push não usam o pool do `Task`. Cada um
   tem fila limitada, threads daemon, prazo em toda operação de rede e um gancho de desligamento
   que dá 8 s para a fila esvaziar; o future deles sempre completa, nunca com exceção. O `Task`

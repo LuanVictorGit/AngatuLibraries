@@ -74,4 +74,18 @@ final class RequestLogRoutes {
             super("/api/log/load", RouteType.GET, ctx -> ctx.result("ok"));
         }
     }
+
+    /** {@code GET /api/log/probe}: o {@code /health} do teste, fora da verificação de segurança. */
+    public static class ProbeRoute extends Route {
+        public ProbeRoute() {
+            super("/api/log/probe", RouteType.GET, ctx -> ctx.result("{\"status\":\"ok\"}"));
+        }
+    }
+
+    /** {@code GET /api/log/probe/down}: a sonda que falha. */
+    public static class ProbeDownRoute extends Route {
+        public ProbeDownRoute() {
+            super("/api/log/probe/down", RouteType.GET, ctx -> ctx.status(503).result("{\"status\":\"down\"}"));
+        }
+    }
 }

@@ -38,6 +38,11 @@ import io.javalin.router.Endpoint;
  * com log, e nenhuma rota escreve o próprio. O tipo da exceção vem do {@code handlerWrapper} do
  * Javalin ({@link #wrap(Endpoint)}), que anota e relança: a resposta de erro continua a mesma.</p>
  *
+ * <p><strong>A única que não vira linha:</strong> a sonda do {@code HEALTHCHECK} do contêiner que
+ * deu certo — caminho de {@code JavalinAPI.addIgnoredPath}, pedido de loopback e sem
+ * {@code X-Forwarded-For}. Ela se repete a cada poucos segundos e afogaria as requisições de
+ * verdade; a sonda que falha continua no log.</p>
+ *
  * <p><strong>Por que não atrasa:</strong> o Javalin chama o logger na thread da requisição, antes
  * de fechar a resposta. Ali só se copiam algumas referências para um registro, que entra numa
  * fila sem trava. Formatar, mascarar e escrever é trabalho de uma thread própria, que escreve em
@@ -189,7 +194,7 @@ final class RequestLog {
             if (current == RequestLogMode.OFF) return;
             int status = ctx.statusCode();
             String error = ctx.attribute(ERROR_ATTRIBUTE);
-            if (current == RequestLogMode.ERRORS && status < 400 && error == null) return;
+            if (status < 400 && error == null && (current == RequestLogMode.ERRORS || isHealthProbe(ctx))) return;
             if (SUBMITTED.get() - TAKEN.get() >= capacity) {
                 DROPPED.increment();
                 return;
@@ -201,6 +206,20 @@ final class RequestLog {
         } catch (RuntimeException ignored) {
             // O log nunca derruba nem atrasa a resposta.
         }
+    }
+
+    /**
+     * A sonda do {@code HEALTHCHECK} do contêiner: caminho fora da verificação de segurança
+     * ({@code /health}), pedido de dentro do próprio contêiner, sem proxy no meio.
+     *
+     * <p>O Docker repete a sonda a cada poucos segundos durante a vida inteira do contêiner: com
+     * uma linha para cada uma, o log do Coolify virava uma lista de {@code GET /health}. Só a que
+     * deu certo fica de fora — a que falha é justamente a que explica um deploy parado.</p>
+     */
+    private static boolean isHealthProbe(Context ctx) {
+        // O cabeçalho primeiro: toda requisição que passou pelo proxy para aí, sem mais nada
+        return ctx.header("X-Forwarded-For") == null && IP.isLoopback(IP.socketAddress(ctx.ip()))
+                && JavalinAPI.shouldIgnorePath(ctx.path());
     }
 
     /**

@@ -1,0 +1,10 @@
+# Build do JitPack para cada versão pedida (com.github.LuanVictorGit:AngatuLibraries:<hash>).
+#
+# O Maven vem do wrapper (mvnw), na versão fixada em .mvn/wrapper: sem ele o JitPack gastava
+# uns 40 s gerando um wrapper antes de começar. O .mvn/maven.config liga o coletor paralelo de
+# dependências, que baixa os POMs ao mesmo tempo em vez de um por um. Os testes rodam antes do
+# push (mvn test): aqui nem são compilados.
+jdk:
+  - openjdk21
+install:
+  - sh mvnw -B install -Dmaven.test.skip=true

@@ -196,9 +196,11 @@ Adicione a dependência:
 
 > Substitua `VERSION` pelo **hash de um commit da `main`** — o repositório não publica tags nem
 > releases, e o JitPack gera a versão a partir do commit (veja em
-> https://jitpack.io/#LuanVictorGit/AngatuLibraries). Evite `main-SNAPSHOT`: a camada de
-> dependências do `Dockerfile` congela o snapshot que resolveu primeiro, e o deploy seguinte
-> pode subir com uma versão antiga sem aviso.
+> https://jitpack.io/#LuanVictorGit/AngatuLibraries). Evite `main-SNAPSHOT`: o cache do Maven
+> do servidor guarda o snapshot que resolveu primeiro e só confere de novo uma vez por dia, e o
+> deploy seguinte pode subir com uma versão antiga sem aviso. Suba o hash depois que o check
+> **JitPack** daquele commit ficar verde no GitHub: o JitPack só compila um commit quando alguém
+> pede, em uns 4 minutos, e o workflow do repositório faz esse pedido a cada push na `main`.
 
 ### Gradle (via JitPack)
 
@@ -389,6 +391,7 @@ O essencial:
 | Memória | limite definido no Coolify (Resource Limits); o `-XX:MaxRAMPercentage=75` do `Dockerfile` é relativo a ele |
 | Ambiente | `ANGATU_ENV=production` já vem no `Dockerfile` |
 | Saúde | `GET /health` → 200 — **rota do projeto** (a biblioteca não registra nenhuma), com `JavalinAPI.addIgnoredPath("/health")`; usada pelo `HEALTHCHECK` |
+| Tempo de deploy | menos de 1 minuto com o modelo: cache do Maven compartilhado no servidor, nenhum `apt-get`, JAR fino e `HEALTHCHECK` nos tempos com que o Coolify espera — as medições e os ajustes do painel estão em [`templates/README.md`](templates/README.md) |
 
 ```bash
 # valide a mesma imagem localmente antes de subir
@@ -446,7 +449,7 @@ public class Main {
 - **Conteúdo com cara de SQLi/XSS** — procurado em nome e valor de parâmetro, em cabeçalho e em corpo de texto de até 64 KiB (JSON, formulário, XML, `text/*`), por palavra inteira, já decodificado: o formulário campo a campo, o JSON com os escapes `\uXXXX` resolvidos. Recusado com 403, sem contar violação — mas o pedido entra na conta do limite, que é conferido **antes** da varredura: um IP bloqueado não gasta CPU com ela. Corpo varrido fica em cache no Javalin (`ctx.body()`, `bodyAsClass`); quem lê em fluxo (`bodyInputStream()`) deve usar `bodyAsBytes()`.
 - **Tamanho de corpo** — até 16 MiB lidos em memória (`ctx.body()`); `JavalinAPI.setMaxRequestSize(bytes)` antes do `new AngatuLib` muda. Upload multipart não passa por esse limite.
 
-**Log de requisições:** toda requisição que chega ao servidor vira uma linha no terminal — rota, página, arquivo estático, 404, recusa do filtro, erro e upgrade de WebSocket —, sem nenhuma configuração por rota: rota nova já nasce com log.
+**Log de requisições:** toda requisição que chega ao servidor vira uma linha no terminal — rota, página, arquivo estático, 404, recusa do filtro, erro e upgrade de WebSocket —, sem nenhuma configuração por rota: rota nova já nasce com log. A única que fica de fora é a sonda do `HEALTHCHECK` do contêiner que deu certo (caminho de `addIgnoredPath`, pedido de loopback, sem `X-Forwarded-For`): ela se repete a cada poucos segundos. A que falha aparece.
 
 ```text
 [25/09 22:14:03] GET     /api/pedidos/42          IP=189.40.12.7 STATUS=200 TIME=14ms
@@ -947,7 +950,11 @@ if (resp2.isSuccess()) {
 | `UnsupportedOperationException: HTTPS gerenciado saiu da biblioteca` | `new AngatuLib(host, porta, rateLimit, true)` ou `JavalinAPI.setup` com `manageSsl = true`, do tempo em que o Javalin cuidava do certificado | Use `new AngatuLib(host, porta, rateLimit)`: a aplicação sobe em HTTP e o Coolify termina o TLS |
 | `Não foi possível registrar a rota` | Registro manual antes do servidor ativo | Registre após o `setup` ou deixe a descoberta automática fazer o trabalho |
 | Logs sem cor no terminal | Terminal sem suporte ANSI ou stream redirecionado | Use um terminal compatível (Windows Terminal, VS Code) |
-| Terminal cheio de linhas de requisição (o `HEALTHCHECK` também aparece) | O log de requisições escreve toda requisição, por padrão | `ANGATU_REQUEST_LOG=errors` no Coolify para ver só as falhas, ou `off` para desligar |
+| Terminal cheio de linhas de requisição | O log de requisições escreve toda requisição, por padrão | `ANGATU_REQUEST_LOG=errors` no Coolify para ver só as falhas, ou `off` para desligar |
+| Terminal cheio de `GET /health` | `/health` sem `JavalinAPI.addIgnoredPath("/health")`, ou biblioteca anterior a outubro de 2026 | Declare o caminho ignorado e suba o hash da biblioteca: a sonda que dá certo deixa de virar linha |
+| Deploy no Coolify parado uns 45 s em "Waiting for healthcheck" | `Dockerfile` antigo: o Coolify dorme o `--start-period` (45 s) antes de olhar o contêiner | Copie de novo `templates/Dockerfile` |
+| Todo deploy baixa as dependências do Maven de novo | `Dockerfile` antigo (`dependency:go-offline` numa camada), cache de build desligado no painel ou limpeza do Docker em todo agendamento | `templates/Dockerfile` e os ajustes do painel em `templates/README.md` (seção 3) |
+| Deploy parado no Maven resolvendo `com.github.LuanVictorGit:AngatuLibraries` | O JitPack ainda está compilando aquele hash (uns 4 minutos) | Espere o check **JitPack** do commit ficar verde no GitHub e refaça o deploy |
 | `Log de requisições: N linha(s) descartada(s)` | O terminal não acompanhou o ritmo das requisições e a fila do log encheu | Nada quebrou: as requisições foram atendidas. Se for constante, `ANGATU_REQUEST_LOG=errors` |
 
 ---
@@ -979,7 +986,7 @@ Instale o browser uma vez: `mvn exec:java -e -Dexec.mainClass=com.microsoft.play
 
 ## 🔄 Migração entre versões
 
-### Para a versão atual (Javalin 7.2.3, setembro de 2026)
+### Para a versão atual (Javalin 7.2.3, setembro e outubro de 2026)
 
 Nada muda no banco: mesmo arquivo, mesmas colunas, mesmo `INSERT OR REPLACE`. As mudanças de
 código que um projeto pode notar:
@@ -987,6 +994,9 @@ código que um projeto pode notar:
 | Mudança | O que fazer |
 |---|---|
 | Javalin **7.2.3** (Jetty 12.1.12, sem os três CVEs de 2026 do 12.1.8), `jakarta.mail` **2.0.2** (CVE-2025-7962, injeção SMTP), `bcprov-jdk18on` **1.86** | Atualize as versões no `pom.xml` do projeto |
+| **`Dockerfile` modelo para deploy em menos de 1 minuto** (outubro de 2026): Java 25, cache do Maven compartilhado, sem `apt-get`, `HEALTHCHECK` de 5 s | Copie de novo `templates/Dockerfile` e faça os ajustes do painel de `templates/README.md` (seção 3); para ganhar mais uns segundos por deploy, troque o `maven-shade-plugin` pelo JAR fino (seção 2). Projeto ainda no Java 21: troque 25 por 21 nos dois `FROM` e tire `-XX:+UseCompactObjectHeaders` |
+| Log de requisições: a sonda do `HEALTHCHECK` que deu certo não vira mais linha | Nada |
+| Descoberta de rotas: pula os pacotes de bibliotecas de terceiros (`org.eclipse`, `kotlin`, `com.google`…) | Nada — a não ser que o projeto tenha rota num pacote com nome de biblioteca de terceiro, o que nenhum projeto da Angatu tem |
 | `Saveable`: falha de banco dentro de transação agora é `PersistenceException` (antes `IllegalStateException`) | Quem capturava `IllegalStateException` em volta de `transaction` passa a capturar `PersistenceException` |
 | `Saveable.save()` de entidade sem campo de ID que o `getId()` leia lança `IllegalStateException` (antes devolvia `false` sem gravar) | Declare um campo `id` (`String` ou `UUID`) e devolva-o no `getId()` — o campo pode estar numa classe base |
 | `Saveable`: transação aninhada é *savepoint* — se a interna falhar e a externa seguir, o que a interna gravou é desfeito | Se algum código dependia de a interna valer pela metade, ele estava errado; nada a fazer no caso normal |
@@ -1061,7 +1071,7 @@ código que um projeto pode notar:
 
 ## 📝 Changelog resumido
 
-### Versão atual (setembro de 2026)
+### Versão atual (setembro e outubro de 2026)
 * 🗄️ **`Saveable` para milhares de acessos simultâneos**: uma conexão de escrita numa fila justa, leitura em paralelo num pool `query_only`, nenhuma leitura segurando duas conexões, prazo em toda espera; sem trava por registro (que podia travar duas threads para sempre); gravação dentro de `mutate` entra na mesma transação; transação aninhada é savepoint
 * 🐛 **Tabela "pronta" sem existir**: a primeira vez de uma entidade dentro de uma transação que desfazia deixava a entidade sem tabela até reiniciar — agora a tabela só vale depois do commit, e uma tabela que sumiu se recria na chamada seguinte
 * 🐛 **Transação desfeita pelo próprio SQLite** (disco cheio, erro de E/S, `ON CONFLICT ROLLBACK`): quem capturava a falha e seguia gravava o resto fora da transação, cada comando confirmado sozinho — agora a transação termina em falha, sem nada gravado
@@ -1090,6 +1100,7 @@ código que um projeto pode notar:
 * 🔔 **Web Push**: só push services conhecidos (o endpoint servia de porta para requisição a endereço interno); cliente HTTP com prazos, sem redirecionamento e com resposta limitada; fila própria de envio; `Urgency` chega ao push service; futures sempre completam; subject configurável; geração de chaves sem corrida
 * ⬆️ Javalin **7.2.3**, `jakarta.mail` **2.0.2**, `bcprov-jdk18on` **1.86**
 * 🐳 Dockerfile modelo com `-XX:+ExitOnOutOfMemoryError` e `LANG=C.UTF-8`; `.dockerignore` exclui `.env` e bancos em qualquer pasta
+* 🚀 **Deploy em menos de 1 minuto** (outubro de 2026): o `Dockerfile` modelo guarda o repositório Maven num cache do BuildKit compartilhado por todos os projetos (biblioteca atualizada: 105 s → 8 s de build), não roda `apt-get` (o `wget` do `HEALTHCHECK` é o binário estático do busybox), separa `lib/` do JAR fino e usa os tempos com que o Coolify espera o contêiner (45 s → 5 s); a busca de rotas pula as classes de terceiros (scan de ~550 ms → ~80 ms na subida); a sonda do `HEALTHCHECK` que deu certo não suja o log; o JitPack compila cada commit da `main` no push, pelo workflow do repositório, com o Maven do wrapper e o coletor paralelo de dependências
 * 🧪 Primeiros testes automatizados (JUnit 5): persistência, concorrência, servidor real em processo, rate limit, tarefas, senha e log
 
 ### Versão anterior

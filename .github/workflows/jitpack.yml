@@ -1,0 +1,37 @@
+# Pede ao JitPack a versão do commit que acabou de chegar na main e espera o build terminar.
+#
+# O JitPack só compila um commit quando alguém pede por ele, e o build leva uns 4 minutos.
+# Sem este pedido, quem pedia era o primeiro deploy de um projeto que subiu o hash da
+# biblioteca — e esse deploy ficava parado no Maven esperando o JitPack. Um build que falha
+# aparece aqui, com o fim do log, antes de algum projeto apontar para ele.
+name: JitPack
+
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Pedir o build do commit e esperar o artefato
+        env:
+          VERSION: ${{ github.sha }}
+        run: |
+          base="https://jitpack.io/com/github/${GITHUB_REPOSITORY}/${VERSION}"
+          pom="${base}/AngatuLibraries-${VERSION}.pom"
+          for attempt in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "$pom" || true)
+            echo "tentativa ${attempt}: HTTP ${code}"
+            if [ "$code" = "200" ]; then
+              echo "Pronto: com.github.${GITHUB_REPOSITORY%%/*}:AngatuLibraries:${VERSION}"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "O JitPack não publicou ${VERSION}. Fim do log do build:"
+          curl -s --max-time 30 "${base}/build.log" | tail -n 60
+          exit 1

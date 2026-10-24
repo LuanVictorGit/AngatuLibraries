@@ -109,14 +109,35 @@ public final class IP {
      */
     static boolean isPrivateOrLocal(String ip) {
         if (ip == null || ip.isBlank()) return true;
-        String v = ip.trim().toLowerCase(Locale.ROOT);
-        if (v.startsWith("[")) v = v.substring(1);
-        if (v.startsWith("::ffff:")) v = v.substring(7); // IPv4 dentro de IPv6
-        return v.startsWith("127.") || v.equals("::1") || v.startsWith("0:0:0:0:0:0:0:1")
+        String v = normalized(ip);
+        return isLoopbackLiteral(v)
                 || v.startsWith("10.") || v.startsWith("192.168.") || v.startsWith("169.254.")
                 || v.startsWith("fc") || v.startsWith("fd")
                 || v.startsWith("fe8") || v.startsWith("fe9") || v.startsWith("fea") || v.startsWith("feb")
                 || PRIVATE_172.matcher(v).matches() || CGNAT_100.matcher(v).matches();
+    }
+
+    /**
+     * O IP é de loopback — a própria máquina, ou o próprio contêiner?
+     *
+     * @param ip Endereço literal
+     * @return {@code true} para {@code 127.0.0.0/8} e {@code ::1}, inclusive escritos dentro de IPv6
+     */
+    static boolean isLoopback(String ip) {
+        return ip != null && !ip.isBlank() && isLoopbackLiteral(normalized(ip));
+    }
+
+    /** Minúsculo, sem colchetes e sem o prefixo de IPv4 dentro de IPv6. */
+    private static String normalized(String ip) {
+        String v = ip.trim().toLowerCase(Locale.ROOT);
+        if (v.startsWith("[")) v = v.substring(1);
+        if (v.endsWith("]")) v = v.substring(0, v.length() - 1);
+        if (v.startsWith("::ffff:")) v = v.substring(7); // IPv4 dentro de IPv6
+        return v;
+    }
+
+    private static boolean isLoopbackLiteral(String v) {
+        return v.startsWith("127.") || v.equals("::1") || v.startsWith("0:0:0:0:0:0:0:1");
     }
 
     /** Declarado por {@link JavalinAPI#setTrustedProxyHops(int)}. */

@@ -84,4 +84,32 @@ class RateLimitPrimitivesTest {
             assertFalse(IP.isPrivateOrLocal(ip), ip);
         }
     }
+
+    @Test
+    @DisplayName("loopback é só a própria máquina: a rede do Docker e a privada ficam de fora")
+    void loopbackIsOnlyTheMachineItself() {
+        for (String ip : new String[] {"127.0.0.1", "127.8.9.10", "::1", "0:0:0:0:0:0:0:1", "[::1]",
+                "::ffff:127.0.0.1"}) {
+            assertTrue(IP.isLoopback(ip), ip);
+        }
+        for (String ip : new String[] {"10.0.1.5", "172.17.0.1", "192.168.0.10", "fd00::1", "8.8.8.8", "",
+                null}) {
+            assertFalse(IP.isLoopback(ip), String.valueOf(ip));
+        }
+    }
+
+    @Test
+    @DisplayName("a busca de rotas pula os pacotes de terceiros, nas duas formas de caminho")
+    void routeScanSkipsThirdPartyPackages() {
+        for (String resource : new String[] {"org/eclipse/jetty/server/Server.class",
+                "org.eclipse.jetty.server.Server.class", "kotlin/collections/ArraysKt.class",
+                "io/javalin/Javalin.class", "org/sqlite/JDBC.class", "META-INF/versions/11/module-info.class"}) {
+            assertFalse(JavalinAPI.mayDeclareRoutes(resource), resource);
+        }
+        for (String resource : new String[] {"br/com/angatusistemas/lib/images/ImagesRoute.class",
+                "br.com.angatusistemas.lib.images.ImagesRoute.class", "com/company/store/routes/OrderRoute.class",
+                "kotlinfake/Route.class", "Main.class"}) {
+            assertTrue(JavalinAPI.mayDeclareRoutes(resource), resource);
+        }
+    }
 }

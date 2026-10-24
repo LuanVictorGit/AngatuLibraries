@@ -1,3 +1,10 @@
 # Modelos de deploy: o Docker executa estes arquivos no Linux — CRLF quebra o shell.
 templates/Dockerfile text eol=lf
 templates/.dockerignore text eol=lf
+
+# Build no JitPack e no GitHub Actions, também no Linux.
+mvnw text eol=lf
+mvnw.cmd text eol=crlf
+.mvn/** text eol=lf
+jitpack.yml text eol=lf
+.github/** text eol=lf
