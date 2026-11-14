@@ -10,6 +10,7 @@
 
 	<!-- Configurações do Java -->
 	<properties>
+		<excluded.test.groups>benchmark</excluded.test.groups>
 		<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
 		<maven.compiler.source>21</maven.compiler.source>
 		<maven.compiler.target>21</maven.compiler.target>
@@ -60,6 +61,9 @@
 					     temporária. No Windows com TEMP em nome curto (C:\Users\NOME~1\...), o connect
 					     falha com "Invalid argument" e nenhum servidor sobe no teste. -->
 					<argLine>"-Djdk.net.unixdomain.tmpdir=${project.build.directory}"</argLine>
+					<!-- O benchmark do Saveable mede, não confere: fica fora do mvn test e roda com
+					     -Dexcluded.test.groups=none -Dtest=SaveableBenchmark. -->
+					<excludedGroups>${excluded.test.groups}</excludedGroups>
 				</configuration>
 			</plugin>
 		</plugins>
