@@ -57,6 +57,16 @@ final class ConnectionPools {
         }
     }
 
+    // Lets SQLite refresh the statistics the planner uses for the json_extract indexes; a failure here
+    // only costs a slower plan, so it is logged and the shutdown goes on.
+    void optimize() {
+        try (Connection conn = borrowWriter()) {
+            RecordSql.execute(conn, "PRAGMA optimize");
+        } catch (SQLException e) {
+            Console.warn("Saveable: PRAGMA optimize falhou no encerramento: %s", e.getMessage());
+        }
+    }
+
     // HikariCP's abort does nothing on SQLite: closing with a read in flight leaves that connection
     // open forever, the file locked and the WAL without its closing checkpoint.
     void close(long deadline) {
@@ -85,7 +95,11 @@ final class ConnectionPools {
         config.addDataSourceProperty("busy_timeout", Integer.toString(DatabaseSettings.BUSY_TIMEOUT_MS));
         config.addDataSourceProperty("transaction_mode", "IMMEDIATE");
         config.addDataSourceProperty("cache_size", Integer.toString(-DatabaseSettings.CACHE_SIZE_KIB)); // negative = KiB
-        config.addDataSourceProperty("temp_store", "MEMORY");
+        // Sorts and temporary indexes of a large query go to a temporary file instead of RAM.
+        config.addDataSourceProperty("temp_store", "FILE");
+        if (DatabaseSettings.MMAP_MIB > 0) {
+            config.addDataSourceProperty("mmap_size", Long.toString(DatabaseSettings.MMAP_MIB * 1024L * 1024L));
+        }
         config.addDataSourceProperty("journal_size_limit", Long.toString(DatabaseSettings.JOURNAL_SIZE_LIMIT_BYTES));
         return config;
     }

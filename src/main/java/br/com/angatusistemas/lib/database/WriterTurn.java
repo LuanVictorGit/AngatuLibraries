@@ -21,7 +21,8 @@ final class WriterTurn {
 
     private static final Set<String> INTERNAL_CLASSES = Set.of(Saveable.class.getName(), Database.class.getName(),
             WriterTurn.class.getName(), Transaction.class.getName(), TableRegistry.class.getName(),
-            RecordSql.class.getName(), EntityIds.class.getName());
+            RecordSql.class.getName(), EntityIds.class.getName(), BatchWriter.class.getName(),
+            PagedReader.class.getName());
 
     private WriterTurn() {
     }

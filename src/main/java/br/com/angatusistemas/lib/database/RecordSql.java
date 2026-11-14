@@ -47,6 +47,37 @@ final class RecordSql {
         }
     }
 
+    // One prepared statement for the whole batch: SQLite compiles the INSERT once, not once per row.
+    static void writeRows(Connection conn, String table, List<String> ids, List<String> jsons) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement("INSERT OR REPLACE INTO " + quote(table) + " (id, data) VALUES (?, ?)")) {
+            for (int i = 0; i < ids.size(); i++) {
+                ps.setString(1, ids.get(i));
+                ps.setString(2, jsons.get(i));
+                ps.addBatch();
+            }
+            ps.executeBatch();
+        }
+    }
+
+    // Keyset page over the primary key: each page costs one index seek, however deep the scan is.
+    static RowPage page(Connection conn, String table, String afterId, int limit) throws SQLException {
+        String sql = "SELECT id, data FROM " + quote(table) + (afterId == null ? "" : " WHERE id > ?") + " ORDER BY id LIMIT ?";
+        List<String> rows = new ArrayList<>(limit);
+        String lastId = null;
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            int index = 1;
+            if (afterId != null) ps.setString(index++, afterId);
+            ps.setInt(index, limit);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    lastId = rs.getString(1);
+                    rows.add(rs.getString(2));
+                }
+            }
+        }
+        return new RowPage(rows, lastId);
+    }
+
     static String selectJson(Connection conn, String table, String id) throws SQLException {
         try (PreparedStatement ps = conn.prepareStatement("SELECT data FROM " + quote(table) + " WHERE id = ?")) {
             ps.setString(1, id);
@@ -134,5 +165,9 @@ final class RecordSql {
             if (name.equalsIgnoreCase(meta.getColumnLabel(i)) || name.equalsIgnoreCase(meta.getColumnName(i))) return i;
         }
         return 0;
+    }
+
+    // The JSON of one page, still as text, and the id to continue after.
+    record RowPage(List<String> rows, String lastId) {
     }
 }

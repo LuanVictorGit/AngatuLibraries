@@ -4,8 +4,8 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
 
 /**
- * Reflective field copy used by reload(): every persisted field of the class and its base classes,
- * leaving static and transient fields as they are because they never come from the database.
+ * Reflection over entity classes: the field copy used by reload(), which leaves static and transient
+ * fields alone because they never come from the database, and the check for an overridden save().
  *
  * @author Angatu Sistemas
  */
@@ -27,5 +27,18 @@ final class EntityFields {
                 }
             }
         }
+    }
+
+    // A project that overrides save() (to stamp a date, validate, log) must see it called by saveAll().
+    static boolean overridesSave(Class<?> type) {
+        for (Class<?> current = type; current != null && current != Saveable.class; current = current.getSuperclass()) {
+            try {
+                current.getDeclaredMethod("save");
+                return true;
+            } catch (NoSuchMethodException e) {
+                // not declared here: look at the base class
+            }
+        }
+        return false;
     }
 }

@@ -98,7 +98,10 @@ final class Database {
             } finally {
                 POOLS_LOCK.unlock();
             }
-            if (current != null) current.close(deadline);
+            if (current != null) {
+                if (locked) current.optimize();
+                current.close(deadline);
+            }
             TableRegistry.clear();
             CURRENT_TRANSACTION.remove();
         } finally {

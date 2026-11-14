@@ -5,6 +5,7 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
+import java.util.StringJoiner;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
@@ -26,6 +27,7 @@ import br.com.angatusistemas.lib.gson.GsonAPI;
 public abstract class Saveable {
 
     private static final Object[] NO_PARAMS = new Object[0];
+    private static final String[] NO_FIELDS = new String[0];
 
     protected Saveable() {
     }
@@ -76,12 +78,21 @@ public abstract class Saveable {
         return query(clazz, "SELECT data FROM " + RecordSql.quote(TableRegistry.tableName(clazz)));
     }
 
+    // Walks the table page by page: only the records that pass stay in RAM.
     public static <T> List<T> findByPredicate(Class<T> clazz, Predicate<T> predicate) {
-        List<T> result = new ArrayList<>();
-        for (T obj : findAll(clazz)) {
-            if (predicate.test(obj)) result.add(obj);
-        }
-        return result;
+        Objects.requireNonNull(predicate, "predicate");
+        return PagedReader.filter(clazz, predicate);
+    }
+
+    // Visits every record of the table with flat memory, however large it is; not a snapshot.
+    public static <T> void forEach(Class<T> clazz, Consumer<? super T> action) {
+        Objects.requireNonNull(action, "action");
+        PagedReader.forEach(clazz, action);
+    }
+
+    // Up to limit records (capped at 1000) ordered by id, after afterId; null starts at the beginning.
+    public static <T> List<T> findPage(Class<T> clazz, String afterId, int limit) {
+        return PagedReader.page(clazz, afterId, limit);
     }
 
     public static <T> List<T> findByField(Class<T> clazz, String fieldName, Object value) {
@@ -132,21 +143,35 @@ public abstract class Saveable {
         List<String> rows = command.equals("SELECT")
                 ? Database.read(what, conn -> RecordSql.dataColumn(conn, sql, args))
                 : Database.writeAlone(what, conn -> RecordSql.dataColumn(conn, sql, args));
-        return fromJson(rows, clazz);
+        return PagedReader.fromJson(rows, clazz);
     }
 
     public static boolean createIndex(Class<?> clazz, String fieldName) {
+        return createIndex(clazz, fieldName, NO_FIELDS);
+    }
+
+    // Composite index, in the given order, for queries that filter or sort by several fields at once.
+    public static boolean createIndex(Class<?> clazz, String fieldName, String... moreFields) {
         String table = TableRegistry.tableName(clazz);
         TableRegistry.prepare(clazz);
-        String path = JsonFieldFilter.jsonPath(clazz, fieldName);
-        if (path == null) {
-            Console.error("Nome de campo inválido para índice: " + fieldName);
-            return false;
+        List<String> fields = new ArrayList<>(1 + (moreFields == null ? 0 : moreFields.length));
+        fields.add(fieldName);
+        if (moreFields != null) fields.addAll(List.of(moreFields));
+        StringJoiner columns = new StringJoiner(", ");
+        StringJoiner name = new StringJoiner("_", "idx_" + table + "_", "");
+        for (String field : fields) {
+            String path = JsonFieldFilter.jsonPath(clazz, field);
+            if (path == null) {
+                Console.error("Nome de campo inválido para índice: " + field);
+                return false;
+            }
+            columns.add("json_extract(data, '" + path + "')");
+            name.add(field.toLowerCase(Locale.ROOT));
         }
-        String index = "idx_" + table + "_" + fieldName.toLowerCase(Locale.ROOT);
+        String index = name.toString();
         Database.write("criar índice " + index, conn -> {
             RecordSql.execute(conn, "CREATE INDEX IF NOT EXISTS " + RecordSql.quote(index) + " ON " + RecordSql.quote(table)
-                    + "(json_extract(data, '" + path + "'))");
+                    + "(" + columns + ")");
             return null;
         });
         return true;
@@ -175,15 +200,10 @@ public abstract class Saveable {
         });
     }
 
+    // All or nothing, in batches of one prepared statement per table; an overridden save() is still called.
     public static int saveAll(Collection<? extends Saveable> objects) {
         if (objects == null || objects.isEmpty()) return 0;
-        return computeInTransaction(() -> {
-            int saved = 0;
-            for (Saveable obj : objects) {
-                if (obj != null && obj.save()) saved++;
-            }
-            return saved;
-        });
+        return BatchWriter.saveAll(objects);
     }
 
     public static boolean deleteById(Class<?> clazz, String id) {
@@ -220,16 +240,5 @@ public abstract class Saveable {
 
     public static String databasePath() {
         return DatabaseSettings.databasePath();
-    }
-
-    // Each text is released as soon as it becomes an object: on a large table both never coexist whole.
-    private static <T> List<T> fromJson(List<String> rows, Class<T> clazz) {
-        Gson gson = GsonAPI.get();
-        List<T> objects = new ArrayList<>(rows.size());
-        for (int i = 0; i < rows.size(); i++) {
-            objects.add(gson.fromJson(rows.get(i), clazz));
-            rows.set(i, null);
-        }
-        return objects;
     }
 }

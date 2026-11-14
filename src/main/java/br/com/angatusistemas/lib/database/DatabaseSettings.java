@@ -15,7 +15,13 @@ final class DatabaseSettings {
     // Every read connection carries its own native page cache, so the pool size is a memory decision too.
     static final int READ_POOL_SIZE = intFromEnvironment("ANGATU_DB_POOL_SIZE", 12, 1, 64);
 
-    static final int CACHE_SIZE_KIB = intFromEnvironment("ANGATU_DB_CACHE_KIB", 8_192, 64, 1_048_576);
+    // 2 MiB per connection by default: CPU before RAM. Indexed lookups touch few pages, and the OS
+    // page cache still holds the hot ones for every connection at once.
+    static final int CACHE_SIZE_KIB = intFromEnvironment("ANGATU_DB_CACHE_KIB", 2_048, 64, 1_048_576);
+
+    // Off by default: an I/O error on a memory-mapped file can bring the JVM down instead of failing
+    // one query, so the map is the project's explicit choice.
+    static final int MMAP_MIB = intFromEnvironment("ANGATU_DB_MMAP_MIB", 0, 0, 65_536);
 
     static final int BUSY_TIMEOUT_MS = intFromEnvironment("ANGATU_DB_BUSY_TIMEOUT_MS", 30_000, 1_000, 300_000);
 

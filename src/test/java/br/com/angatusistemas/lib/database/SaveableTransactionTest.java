@@ -267,11 +267,11 @@ class SaveableTransactionTest extends DatabaseTestSupport {
     @DisplayName("as configurações do banco chegam de fato às conexões")
     void connectionSettingsAreApplied() {
         // Pela API pública: a consulta devolve o valor do PRAGMA dentro do JSON de uma Account.
-        assertEquals(-8192, pragma("cache_size", "cache_size"), "cache_size (KiB, negativo)");
+        assertEquals(-2048, pragma("cache_size", "cache_size"), "cache_size (KiB, negativo)");
         assertEquals(30000, pragma("busy_timeout", "timeout"), "busy_timeout");
         assertEquals(64L * 1024 * 1024, pragma("journal_size_limit", "journal_size_limit"), "journal_size_limit");
         assertEquals(1, pragma("synchronous", "synchronous"), "synchronous NORMAL");
-        assertEquals(2, pragma("temp_store", "temp_store"), "temp_store MEMORY");
+        assertEquals(1, pragma("temp_store", "temp_store"), "temp_store FILE");
         assertEquals(1, pragma("query_only", "query_only"), "leitor em query_only");
 
         List<Note> mode = Saveable.query(Note.class,

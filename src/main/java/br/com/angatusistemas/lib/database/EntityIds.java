@@ -2,18 +2,22 @@ package br.com.angatusistemas.lib.database;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
+import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
 
 /**
- * Entity identifiers: a missing id is generated and injected into the field getId() reads, each
- * candidate confirmed through getId() and restored when it was the wrong one.
+ * Entity identifiers: a missing id is generated as a time-ordered UUIDv7 and injected into the field
+ * getId() reads, each candidate confirmed through getId() and restored when it was the wrong one.
  *
  * @author Angatu Sistemas
  */
 final class EntityIds {
+
+    // SecureRandom keeps the 74 random bits of every id unguessable, as UUID.randomUUID() did.
+    private static final SecureRandom RANDOM = new SecureRandom();
 
     private EntityIds() {
     }
@@ -26,8 +30,14 @@ final class EntityIds {
         return generated;
     }
 
+    // UUIDv7 (RFC 9562): the same 36-character text as before, but ordered by creation time, so a
+    // new row lands at the end of the primary key B-tree instead of a random page that must be read
+    // and split. Existing ids are never touched.
     static String newId() {
-        return UUID.randomUUID().toString();
+        long millis = System.currentTimeMillis();
+        long msb = (millis << 16) | 0x7000L | (RANDOM.nextInt() & 0x0FFFL);
+        long lsb = (RANDOM.nextLong() & 0x3FFFFFFFFFFFFFFFL) | 0x8000000000000000L;
+        return new UUID(msb, lsb).toString();
     }
 
     // The confirmation exists because a wrong guess did not fail: a String "paid" declared before the
