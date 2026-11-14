@@ -2,7 +2,6 @@ package br.com.angatusistemas.lib.database;
 
 import static org.junit.jupiter.api.Assertions.fail;
 
-import java.lang.reflect.Field;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -13,7 +12,6 @@ import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -76,15 +74,8 @@ abstract class DatabaseTestSupport {
     }
 
     /** A classe está no registro interno de tabelas prontas? Lido por reflexão. */
-    @SuppressWarnings("unchecked")
     static boolean isRegistered(Class<?> type) {
-        try {
-            Field field = Saveable.class.getDeclaredField("PREPARED_TABLES");
-            field.setAccessible(true);
-            return ((Set<Class<?>>) field.get(null)).contains(type);
-        } catch (ReflectiveOperationException e) {
-            throw new AssertionError("Registro interno de tabelas não encontrado", e);
-        }
+        return TableRegistry.isPrepared(type);
     }
 
     /**
