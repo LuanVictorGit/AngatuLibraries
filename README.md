@@ -541,6 +541,12 @@ User byEmail = Saveable.findFirstByField(User.class, "email", "joao@exemplo.com"
 List<User> joaos = Saveable.query(User.class,
     "SELECT data FROM " + Saveable.tableName(User.class) + " WHERE json_extract(data, '$.name') = ?", "João");
 
+// Tabelas grandes: lote, páginas e índice composto
+Saveable.saveAll(listaDeUsuarios);                        // um PreparedStatement por tabela, em lotes
+Saveable.forEach(User.class, u -> relatorio.add(u));      // qualquer tamanho, memória constante
+List<User> pagina = Saveable.findPage(User.class, ultimoId, 100); // por chave; null = primeira página
+Saveable.createIndex(Order.class, "storeId", "status");   // índice composto, nesta ordem
+
 // Encerrar a aplicação: espera a gravação e as leituras em curso, e fecha as conexões
 Saveable.shutdown();
 ```
@@ -599,6 +605,10 @@ por vez no arquivo, e a biblioteca organiza o processo em torno disso:
   `PersistenceException`. Um pedido de interrupção pendente não derruba a operação — a tarefa
   cancelada ainda grava o estado dela — e volta à thread no fim. Uma gravação que segura a vez por
   mais de 2 s aparece no log com o ponto do código que a chamou.
+- **Gravações avulsas concorrentes em grupo.** `save()` e `deleteById()` fora de transação entram
+  numa fila: quem pega a vez de gravar grava todas as que esperam (até 256) numa transação só.
+  Cada chamada continua recebendo o próprio resultado ou a própria falha; a que faz o SQLite desfazer
+  o grupo falha sozinha e as outras são refeitas.
 - **Falha é exceção.** Erro de banco sobe como `PersistenceException`, dentro ou fora de
   transação — nunca volta disfarçado de "não existe" (`null`) ou "lista vazia". Entidade sem campo
   de ID que o `getId()` leia lança `IllegalStateException` no `save()`.
@@ -613,8 +623,15 @@ banco vive dentro do contêiner e some no deploy seguinte.
 
 > ⚠️ **Sem dados em memória:** não há cache total nem *identity map*. Um objeto alterado só é
 > visível para os outros componentes depois do `save()`, e `findById` devolve instâncias
-> distintas a cada chamada. Consultas frequentes por campo pedem `createIndex(...)`;
-> `findAll`/`findByPredicate` percorrem a tabela.
+> distintas a cada chamada. Consultas frequentes por campo pedem `createIndex(...)`.
+> `findAll` traz a tabela inteira para a memória; `findByPredicate` a percorre em páginas e só
+> guarda os aprovados; para tabelas grandes, `forEach` e `findPage` (por chave, nunca `OFFSET`).
+> Nenhuma leitura em páginas é um instantâneo: o que for gravado durante ela aparece se o id
+> ainda estiver à frente.
+
+**ID gerado.** Entidade salva sem ID recebe um UUIDv7: o mesmo texto de 36 caracteres de sempre,
+mas crescente no tempo, para a linha nova cair no fim da chave primária. Ele revela o instante da
+criação e tem 74 bits aleatórios (de `SecureRandom`). ID já gravado nunca muda.
 
 **Memória do banco, em contêiner apertado.** Cada conexão carrega o próprio cache de páginas do
 SQLite, que é memória **nativa**: não aparece no gráfico de heap e é contada inteira pelo limite
@@ -622,13 +639,14 @@ do contêiner. Os ajustes, todos por variável de ambiente e com padrão seguro:
 
 | Variável | Padrão | O que é |
 |---|---|---|
-| `ANGATU_DB_CACHE_KIB` | `8192` (8 MiB por conexão) | Cache de páginas do SQLite, em **KiB** |
+| `ANGATU_DB_CACHE_KIB` | `2048` (2 MiB por conexão) | Cache de páginas do SQLite, em **KiB** |
 | `ANGATU_DB_POOL_SIZE` | `12` | Conexões de **leitura** (a de escrita é uma à parte) |
 | `ANGATU_DB_BUSY_TIMEOUT_MS` | `30000` | Prazo de toda espera do banco, em ms |
+| `ANGATU_DB_MMAP_MIB` | `0` (desligado) | Mapeia o arquivo na memória para leituras mais rápidas em banco grande. Só em disco local: erro de E/S num arquivo mapeado pode derrubar a JVM |
 
-Com os padrões, o teto é ~104 MiB nativos (13 conexões). Num contêiner de 1 GB rodando com folga,
-algo como `ANGATU_DB_CACHE_KIB=4096` e `ANGATU_DB_POOL_SIZE=6` corta isso para ~28 MiB sem efeito
-perceptível em consultas indexadas.
+Com os padrões, o teto é ~26 MiB nativos (13 conexões), e ordenações grandes vão para arquivo
+temporário (`temp_store=FILE`), não para a RAM: a biblioteca prefere gastar CPU a segurar memória.
+Um serviço de muita leitura e memória sobrando pode subir `ANGATU_DB_CACHE_KIB`.
 
 ### 📨 E-mail (EmailAPI)
 

@@ -142,7 +142,11 @@ projetos consumidores sobem o hash.
 - `javalin/` — `JavalinAPI` (servidor, filtro de segurança, rate limit), `RequestLog` (log de
   requisições), `IP` (IP do cliente), `AssetsAPI`, `html/HtmlRouteAPI` (páginas de `public/`),
   `routes/Route`, `classes/` (entidades e tipos do rate limit e do log)
-- `database/` — `Saveable` e `PersistenceException`
+- `database/` — `Saveable` (fachada pública) e `PersistenceException`; o resto é package-private:
+  `Database` (roteia leitura, escrita e transação), `WriterTurn` (a vez de gravar), `Transaction`,
+  `GroupCommit` (gravações avulsas concorrentes numa transação só), `BatchWriter` (`saveAll`),
+  `PagedReader` (`forEach`, `findPage`, `findByPredicate`), `TableRegistry`, `RecordSql`,
+  `JsonFieldFilter`, `EntityIds` (UUIDv7), `EntityFields`, `ConnectionPools`, `DatabaseSettings`
 - `email/`, `webpush/`, `discord/`, `images/`, `browser/`, `payments/`, `ai/` — integrações
   (`payments/` e `ai/` existem para o AngatuCRM; projeto cliente usa a API do CRM — R26)
 
@@ -153,12 +157,18 @@ própria e `HEALTHCHECK` nos tempos com que o Coolify espera (o guia traz as med
 `jitpack.yml`, `mvnw`, `.mvn/` — build no JitPack; `.github/workflows/jitpack.yml` — pede esse
 build a cada push na `main`.
 `src/test/java/` — testes JUnit 5; `src/test/resources/public/` — páginas para o teste do servidor.
+`src/test/java/.../e2e/` — app E2E do `Saveable` (rotas por HTTP); `src/test/e2e/upgrade.sh` sobe esse
+app com cada JAR da biblioteca sobre o mesmo banco (antigo → novo → antigo) e `container.sh` faz o
+mesmo em Docker. `SaveableBenchmark` (`@Tag("benchmark")`) fica fora do `mvn test`.
 
 ## Como rodar
 - `mvn -DskipTests package` (ou `sh mvnw -DskipTests package`, com o Maven do wrapper) — compila
   e gera o JAR
 - `mvn test` — todos os testes (uma JVM por classe de teste; os do servidor sobem o Javalin em
   porta aleatória e precisam de loopback)
+- `mvn test -Dexcluded.test.groups=none -Dtest=SaveableBenchmark -Dbench.rows=1000000` — benchmark
+- `bash src/test/e2e/upgrade.sh <pasta> <contas> <pasta-de-deps> <jar-antigo> <jar-novo> <jar-antigo>`
+  — E2E de atualização (deps de `mvn dependency:copy-dependencies -DincludeScope=runtime`)
 
 ## Contratos que não podem quebrar
 - **API pública estável:** mudança entra por sobrecarga ou método novo; o que sai vira
@@ -168,8 +178,14 @@ build a cada push na `main`.
   versão continua legível pelas anteriores.
 - **`Saveable` sob concorrência:** uma conexão de escrita e a vez de gravar numa fila justa; leitura
   num pool `query_only`; nenhuma leitura segura duas conexões; tabela criada dentro de transação
-  só vale depois do commit; transação aninhada é savepoint. Os testes de
-  `SaveableConcurrencyTest` são o contrato de "milhares de leituras e gravações ao mesmo tempo".
+  só vale depois do commit; transação aninhada é savepoint. `save()`/`deleteById()` avulsos e
+  concorrentes entram no group commit, e cada um mantém o próprio resultado e a própria falha. Os
+  testes de `SaveableConcurrencyTest` e `SaveableGroupCommitTest` são o contrato de "milhares de
+  leituras e gravações ao mesmo tempo".
+- **`Saveable` com milhões de registros — CPU antes de RAM:** `saveAll` grava em lote e ainda chama
+  o `save()` sobrescrito; `findByPredicate`, `forEach` e `findPage` andam em páginas pela chave
+  primária e não seguram conexão enquanto roda código do projeto; ID gerado é UUIDv7. As mensagens
+  de exceção e de log do banco são API de fato (projetos comparam "Transação perdida"): não mudam.
 - **`Saveable` diante de falha:** depois de toda falha de SQL numa transação, confere-se se o
   SQLite ainda a mantém aberta (disco cheio, E/S e `ON CONFLICT ROLLBACK` desfazem a transação
   inteira); perdida, ela não roda mais nada e termina em `PersistenceException`, e a conexão é

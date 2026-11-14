@@ -36,7 +36,8 @@ for JAR in "$@"; do
   driver verify "$ACCOUNTS"
   driver load 64 200 10000
   driver verify "$ACCOUNTS"
-  ls -l "$WORK"/database.db* | awk '{print "   " $5 " " $NF}'
+  for F in "$WORK"/database.db*; do printf '   %s bytes %s
+' "$(wc -c < "$F" | tr -d ' ')" "${F##*/}"; done
   driver stop
   wait $APP || true
   trap - EXIT

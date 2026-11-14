@@ -8,3 +8,6 @@ mvnw.cmd text eol=crlf
 .mvn/** text eol=lf
 jitpack.yml text eol=lf
 .github/** text eol=lf
+
+# Scripts do E2E do Saveable: rodam no bash e no Docker, CRLF os quebra.
+src/test/e2e/** text eol=lf
