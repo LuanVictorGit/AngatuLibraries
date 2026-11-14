@@ -52,6 +52,14 @@ final class Database {
         return runOutermost(what, () -> apply(CURRENT_TRANSACTION.get(), what, work));
     }
 
+    // A single-statement write outside a transaction joins the group commit: concurrent writers share
+    // one transaction instead of paying for their own, and each one still fails alone.
+    static <R> R writeGrouped(String what, SqlWork<R> work) {
+        Transaction running = CURRENT_TRANSACTION.get();
+        if (running != null) return apply(running, what, work);
+        return GroupCommit.submit(what, work);
+    }
+
     // A single statement is already atomic, and SQLite refuses VACUUM, ATTACH and a journal_mode
     // change inside a transaction: outside one, this runs alone in autocommit on the writer.
     static <R> R writeAlone(String what, SqlWork<R> work) {
@@ -165,7 +173,7 @@ final class Database {
         }
     }
 
-    private static void begin(Transaction tx, String what) {
+    static void begin(Transaction tx, String what) {
         try {
             tx.connection.setAutoCommit(false); // BEGIN IMMEDIATE: the file write lock from now on
         } catch (SQLException e) {
@@ -216,7 +224,7 @@ final class Database {
 
     // setAutoCommit(true), not commit(): the driver's commit() chains a new BEGIN IMMEDIATE that can
     // fail after the data is already written, and the caller would repeat a write that counted.
-    private static void commit(Connection conn, String what) {
+    static void commit(Connection conn, String what) {
         try {
             conn.setAutoCommit(true);
         } catch (SQLException e) {
@@ -224,7 +232,7 @@ final class Database {
         }
     }
 
-    private static boolean rollback(Connection conn) {
+    static boolean rollback(Connection conn) {
         try {
             conn.rollback();          // undoes; the driver reopens a BEGIN right after...
             conn.setAutoCommit(true); // ...and this COMMIT closes that empty BEGIN
@@ -235,7 +243,7 @@ final class Database {
         }
     }
 
-    private static ConnectionPools pools() {
+    static ConnectionPools pools() {
         ConnectionPools current = pools;
         if (current != null) return current;
         Dependencies.require("org.sqlite.JDBC", SQLITE_COORDINATES, PERSISTENCE_FEATURE);

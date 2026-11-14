@@ -40,7 +40,7 @@ public abstract class Saveable {
         String id = EntityIds.ensureId(this);
         TableRegistry.prepare(type);
         String json = GsonAPI.get().toJson(this);
-        Database.write("salvar " + type.getSimpleName() + " id=" + id, conn -> RecordSql.writeRow(conn, table, id, json));
+        Database.writeGrouped("salvar " + type.getSimpleName() + " id=" + id, conn -> RecordSql.writeRow(conn, table, id, json));
         return true;
     }
 
@@ -210,7 +210,7 @@ public abstract class Saveable {
         if (id == null) return false;
         String table = TableRegistry.tableName(clazz);
         TableRegistry.prepare(clazz);
-        Boolean deleted = Database.write("excluir " + clazz.getSimpleName() + " id=" + id, conn -> RecordSql.deleteRow(conn, table, id));
+        Boolean deleted = Database.writeGrouped("excluir " + clazz.getSimpleName() + " id=" + id, conn -> RecordSql.deleteRow(conn, table, id));
         return Boolean.TRUE.equals(deleted);
     }
 
