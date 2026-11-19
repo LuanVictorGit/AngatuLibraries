@@ -174,7 +174,8 @@ mesmo em Docker. `SaveableBenchmark` (`@Tag("benchmark")`) fica fora do `mvn tes
 - **API pública estável:** mudança entra por sobrecarga ou método novo; o que sai vira
   `@Deprecated` com nota em PT-BR, nunca some.
 - **Formato do banco imutável:** tabela `id TEXT PRIMARY KEY, data TEXT NOT NULL`, gravação por
-  `INSERT OR REPLACE`, nome da tabela por `Saveable.tableName(Class)`. Um banco escrito por esta
+  `INSERT OR REPLACE`, nome da tabela por `Saveable.tableName(Class)` — o de `@Table` quando a
+  classe o declara, para a entidade renomeada continuar na tabela antiga. Um banco escrito por esta
   versão continua legível pelas anteriores.
 - **`Saveable` sob concorrência:** uma conexão de escrita e a vez de gravar numa fila justa; leitura
   num pool `query_only`; nenhuma leitura segura duas conexões; tabela criada dentro de transação

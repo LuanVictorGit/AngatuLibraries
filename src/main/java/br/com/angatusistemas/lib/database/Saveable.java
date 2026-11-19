@@ -166,7 +166,11 @@ public abstract class Saveable {
                 return false;
             }
             columns.add("json_extract(data, '" + path + "')");
-            name.add(field.toLowerCase(Locale.ROOT));
+            // A renamed entity (@Table) names the index by the stored key, so a field renamed with
+            // @SerializedName keeps its old index instead of gaining a duplicate every write would also
+            // maintain. Without @Table the name stays as it always was, by the Java field.
+            String part = clazz.isAnnotationPresent(Table.class) ? path.substring(2) : field;
+            name.add(part.toLowerCase(Locale.ROOT));
         }
         String index = name.toString();
         Database.write("criar índice " + index, conn -> {

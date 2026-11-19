@@ -28,11 +28,22 @@ final class TableRegistry {
     // transaction that committed. Registering before the commit left entities "ready" without a table.
     private static final Set<Class<?>> PREPARED_TABLES = ConcurrentHashMap.newKeySet();
 
+    private static final Pattern VALID_TABLE = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*");
+
     private TableRegistry() {
     }
 
     static String tableName(Class<?> clazz) {
         Objects.requireNonNull(clazz, "clazz");
+        Table fixed = clazz.getAnnotation(Table.class);
+        if (fixed != null) {
+            String name = fixed.value();
+            if (name == null || !VALID_TABLE.matcher(name).matches()) {
+                throw new IllegalArgumentException("Nome de tabela inválido em @Table de " + clazz.getName()
+                        + ": use letras, números e sublinhado, começando por letra ou sublinhado");
+            }
+            return name;
+        }
         String simpleName = clazz.getSimpleName();
         if (simpleName.isEmpty()) {
             throw new IllegalArgumentException("Classe anônima não pode ser entidade do Saveable: "

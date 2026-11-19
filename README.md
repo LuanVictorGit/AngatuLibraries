@@ -557,6 +557,21 @@ classe em minúsculas, com um `s` acrescentado **só quando ele ainda não termi
 `Category` → `categorys`. Não há outra flexão de plural. Duas classes com o mesmo nome simples,
 em pacotes diferentes, caem na mesma tabela; classe anônima não pode ser entidade.
 
+**Renomear uma entidade sem perder os dados: `@Table`.** Como a tabela vem do nome da classe,
+renomear `Usuario` para `User` aponta a entidade para uma tabela nova e vazia, e os registros
+gravados deixam de ser lidos. `@Table("usuarios")` na classe nova fixa a tabela antiga; o campo
+renomeado guarda a chave antiga com `@SerializedName("nome")`. Nada é copiado. Numa classe com
+`@Table`, o índice de `createIndex` leva o nome da **chave gravada**, então o campo renomeado
+continua usando o índice que já existia, sem ganhar uma duplicata (sem `@Table`, o nome continua
+vindo do campo Java, como sempre).
+
+```java
+@Table("usuarios")
+public class User extends Saveable {
+    @SerializedName("nome") private String name;   // findByField(User.class, "name", ...) consulta $.nome
+}
+```
+
 **Busca por campo.** `findByField`/`findFirstByField` resolvem no SQL, com `json_extract`, todo
 valor que vira primitivo no JSON gravado: texto, número, booleano, enum (pelo nome), `UUID`, datas
 do `GsonAPI` e `null` (campo nulo ou ausente). `BigDecimal("10.50")` encontra `10.5`. Só valor que
